@@ -17,56 +17,75 @@ import io
 import telebot
 from telebot import types
 
+
 # ================== KONFİQURASİYA ==================
 BOT_TOKEN = "6202216323:AAEOWdglrcYTJfCr9oRSJtufjsNAkaLWyTc"
 ADMIN_ID = 1311851277
 CHANNEL_ID = -1001878623087  # Kanal ID (bot kanalda admin olmalıdır!)
 
-MAIN_DB = "besthome.db"  # Gündəlik yenilənən böyük baza
-LOCAL_DB = "local_data.db"  # Sabit baza (yeni elanlar, təsdiqlər, agentlər, favorilər)
+# Qovluq yolları
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MAIN_DB = os.path.join(BASE_DIR, "besthome.db")  # Dropbox-dan endirilən əsas baza
+LOCAL_DB = os.path.join(BASE_DIR, "local_data.db")  # Lokal sabit baza
 
-# Əgər Render-də main db zip şəklindədirsə, burdan çəkə bilərsən (istəyirsənsə istifadə et)
-DROPBOX_ZIP_URL = None  # "https://.../besthome.zip?dl=1"
+# Dropbox ZIP link (faylın avtomatik yüklənməsi üçün)
+DROPBOX_ZIP_URL = "https://www.dropbox.com/scl/fi/08jskiis43hezgl1btim5/besthome.zip?rlkey=jrkmbuv14sal08zpcthb2l7ba&st=h92jg1o7&dl=1"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 user_state = {}  # istifadəçi addım prosesi (yeni elan)
 search_state = {}  # "daha çox göstər" üçün yaddaş
 
 
-# ================== DB YARDIMÇI ==================
+# ================== 📦 DATABASE YARDIMÇI (Render + Lokal üçün) ==================
 def ensure_main_db():
+    """Əsas besthome.db faylını yoxlayır, yoxdursa Dropbox-dan endirir və çıxarır."""
     if os.path.exists(MAIN_DB):
         print("📦 Mövcud besthome.db tapıldı.")
         return
+
     if not DROPBOX_ZIP_URL:
-        print("⚠️ besthome.db yoxdur və DROPBOX_ZIP_URL təyin edilməyib.")
+        print("⚠️ besthome.db tapılmadı və Dropbox linki təyin edilməyib.")
         return
-    print("⬇️ besthome.zip endirilir...")
-    r = requests.get(DROPBOX_ZIP_URL)
-    if r.status_code == 200:
-        try:
+
+    print("⬇️ besthome.zip Dropbox-dan endirilir və açılır...")
+    try:
+        r = requests.get(DROPBOX_ZIP_URL, timeout=40)
+        if r.status_code == 200:
             with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-                z.extractall(".")
-            print("✅ besthome.db ZIP-dən çıxarıldı.")
-        except zipfile.BadZipFile:
-            print("❌ ZIP formatı səhvdir.")
-    else:
-        print(f"❌ Endirmə alınmadı: {r.status_code}")
+                z.extractall(BASE_DIR)  # eyni qovluğa çıxar
+            if os.path.exists(MAIN_DB):
+                print("✅ besthome.db ZIP-dən uğurla çıxarıldı.")
+            else:
+                print("⚠️ ZIP açıldı, amma besthome.db tapılmadı!")
+        else:
+            print(f"❌ Endirmə alınmadı: status {r.status_code}")
+    except Exception as e:
+        print(f"❌ Dropbox endirmə zamanı xəta: {e}")
 
 
 def get_main_conn():
+    """Əsas bazaya təhlükəsiz bağlantı (Dropbox-dan gələn)."""
+    if not os.path.exists(MAIN_DB):
+        ensure_main_db()
     conn = sqlite3.connect(MAIN_DB)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def get_local_conn():
+    """Lokal sabit baza (yeni elanlar, agentlər, favorilər və təsdiqlər)."""
     conn = sqlite3.connect(LOCAL_DB)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def init_local_db():
+    """Lokal baza mövcud deyilsə yaradır (Render-də də sabit qalır)."""
+    if not os.path.exists(LOCAL_DB):
+        print("📦 Yeni local_data.db yaradılır...")
+    else:
+        print("📂 Mövcud local_data.db tapıldı.")
+
     conn = get_local_conn()
     cur = conn.cursor()
 
@@ -95,7 +114,7 @@ def init_local_db():
     """
     )
 
-    # Təsdiqlənmiş elanlar (lokal yaddaş üçün)
+    # Təsdiqlənmiş elanlar (lokal arxiv kimi)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS listings_approved (
@@ -119,7 +138,7 @@ def init_local_db():
     """
     )
 
-    # Vasitəçilər
+    # Vasitəçilər (əlaqə üçün)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS agents (
@@ -131,7 +150,7 @@ def init_local_db():
     """
     )
 
-    # Favorilər
+    # Favorilər (istifadəçi tərəfindən saxlanılan elanlar)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS favorites (
@@ -147,30 +166,29 @@ def init_local_db():
 
     conn.commit()
     conn.close()
+    print("✅ Lokal baza cədvəlləri hazırdır.")
 
 
 def init_main_db_indices():
-    """Əsas bazada axtarışı sürətləndirmək üçün indexlər (yoxdursa yaradır)."""
+    """Əsas bazada indeksləri yoxlayır və yaradaraq axtarışı sürətləndirir."""
     if not os.path.exists(MAIN_DB):
+        print("⚠️ besthome.db tapılmadı, indekslər yaradıla bilmədi.")
         return
-    conn = get_main_conn()
-    cur = conn.cursor()
+
     try:
+        conn = get_main_conn()
+        cur = conn.cursor()
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_main_operation ON listings(operation)"
         )
-    except:
-        pass
-    try:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_main_price ON listings(price)")
-    except:
-        pass
-    try:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_main_date ON listings(date_read)")
-    except:
-        pass
-    conn.commit()
-    conn.close()
+        conn.commit()
+        print("⚡ Əsas bazada indekslər yoxlanıldı və ya yaradıldı.")
+    except Exception as e:
+        print(f"⚠️ İndex yaradılmadı: {e}")
+    finally:
+        conn.close()
 
 
 # ================== UTIL FUNKSİYALAR ==================
@@ -276,14 +294,13 @@ def cmd_start(message):
     chat_id = message.chat.id
     send_logo(chat_id)
     text = (
-        "👋 *BestHome Unified Bot-a xoş gəlmisən!*\n\n"
+        "👋 *Best Home Əmlak Botuna xoş gəlmisən!*\n\n"
         "Bu bot vasitəsilə:\n"
         "• 📝 Elan əlavə edə bilərsən (vasitəçi və ya ev sahibi kimi)\n"
         "• 📋 Filtrlərlə elan axtara bilərsən\n"
         "• 🔎 Açar sözlə istənilən formada axtarış edə bilərsən\n"
         "• ⭐ Seçilmiş elanları Favorilərim-də saxlaya bilərsən\n"
         "• 📋 Öz elanlarını və statuslarını izləyə bilərsən\n"
-        "• 📊 Admin üçün ayrıca idarəetmə paneli mövcuddur\n\n"
         "Başlamaq üçün menyudan seçim et ⬇️"
     )
     bot.send_message(
@@ -1301,16 +1318,15 @@ def do_admin_search(message):
 @bot.message_handler(func=lambda m: m.text == "ℹ️ Haqqında")
 def about(message):
     text = (
-        "🏠 *BestHome Unified Bot*\n"
+        "🏠 *Best Home Əmlak Botu*\n"
         "• 📝 Yeni elan əlavə et (vasitəçi / ev sahibi)\n"
         "• 📋 Filtrlərlə elan axtar (əməliyyat, rayon, qiymət, daha çox göstər)\n"
         "• 🔎 Açar sözlə axtarış (yasamal 2 otaq 600 azn və s.)\n"
         "• ⭐ Favorilərim — saxladığın elanlar\n"
         "• 📋 Elanlarım — öz göndərdiyin elanlar və statuslar\n"
-        "• 📊 Admin Panel — yalnız admin ID üçün aktivdir\n"
         "• 📢 Təsdiqlənən elanlar avtomatik kanalına göndərilir\n"
         "• 📞 Admin: @esedovesed\n"
-        "✅ Tək bot, tam emlak idarəetmə sistemi."
+        "✅ Tək bot, tam əmlak idarəetmə sistemi."
     )
     bot.send_message(message.chat.id, text, parse_mode="Markdown")
 
