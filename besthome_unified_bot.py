@@ -1903,10 +1903,21 @@ if __name__ == "__main__":
     def home():
         return "✅ BestHome Bot işləyir."
 
+    import threading, time
+
     def run_bot():
-        bot.infinity_polling(skip_pending=True)
+        while True:
+            try:
+                print("🤖 Bot polling başladı...")
+                bot.infinity_polling(
+                    timeout=10, long_polling_timeout=20, skip_pending=True
+                )
+            except Exception as e:
+                print("⚠️ Polling error:", e)
+                time.sleep(5)
 
     threading.Thread(target=run_bot, daemon=True).start()
 
+    # 🔹 BU HİSSƏ MÜTLƏQ BELƏ OLMALIDIR
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
