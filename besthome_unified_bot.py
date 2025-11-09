@@ -7,16 +7,22 @@
 import os, requests, zipfile, io
 
 DB_PATH = "besthome.db"
-DRIVE_ZIP_URL = (
-    "https://drive.google.com/uc?export=download&id=1s2lD7Hmm8q7E3lI4lO7S4fvArBRrQWQx"
-)
+DRIVE_ZIP_URL = "https://drive.usercontent.google.com/download?id=1s2lD7Hmm8q7E3lI4lO7S4fvArBRrQWQx&export=download&authuser=0&confirm=t&uuid=41bb8cb2-095c-4e22-b5b8-7519b199990f&at=ALWLOp4hCg0RTAzXilmErNQQvMpO:1762650294915"
 
 if not os.path.exists(DB_PATH):
     print("⬇️ besthome.zip Google Drive-dan endirilir və açılır...")
     r = requests.get(DRIVE_ZIP_URL)
-    z = zipfile.ZipFile(io.BytesIO(r.content))
-    z.extractall(".")
-    print("✅ besthome.db ZIP-dən uğurla çıxarıldı.")
+    if r.status_code == 200:
+        try:
+            z = zipfile.ZipFile(io.BytesIO(r.content))
+            z.extractall(".")
+            print("✅ besthome.db ZIP-dən uğurla çıxarıldı.")
+        except zipfile.BadZipFile:
+            with open("besthome.db", "wb") as f:
+                f.write(r.content)
+            print("⚙️ ZIP yox, birbaşa DB kimi endirildi və yazıldı.")
+    else:
+        print(f"⚠️ Fayl endirilə bilmədi, status: {r.status_code}")
 else:
     print("📦 Mövcud baza tapıldı, yenidən endirməyə ehtiyac yoxdur.")
 
