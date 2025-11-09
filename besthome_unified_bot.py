@@ -7,7 +7,7 @@
 import os, requests, zipfile, io
 
 DB_PATH = "besthome.db"
-DROPBOX_ZIP_URL = "https://www.dropbox.com/scl/fi/sz7qimsrchi0kel6qiobd/besthome.zip?rlkey=8oa40k3eg4g50tpqxjf8pve1c&st=ikax6wqb&dl=1"
+DROPBOX_ZIP_URL = "https://www.dropbox.com/scl/fi/56yi62s82zj0lv7ouebyj/besthome.zip?rlkey=qm33d26daqx74evsr1x2tso0x&st=xhffgc2g&dl=1"
 
 
 def ensure_database():
