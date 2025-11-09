@@ -327,7 +327,7 @@ def move_to_listings(row):
             addr,
             "",  # document
             row["summary"],
-            row["link"] or "BestHomeBot",
+            row["link"] if row.get("link", "").startswith("http") else "",
         ),
     )
 
