@@ -7,26 +7,27 @@
 import os, requests, zipfile, io
 
 DB_PATH = "besthome.db"
-DRIVE_ZIP_URL = (
-    "https://drive.google.com/uc?export=download&id=1GYsw7UN9CVxyL50uRtC6To-EGEl9IKX3"
-)
+DROPBOX_ZIP_URL = "https://www.dropbox.com/scl/fi/sz7qimsrchi0kel6qiobd/besthome.zip?rlkey=8oa40k3eg4g50tpqxjf8pve1c&st=ikax6wqb&dl=1"
 
-if not os.path.exists(DB_PATH):
-    print("⬇️ besthome.zip Google Drive-dan endirilir və açılır...")
-    r = requests.get(DRIVE_ZIP_URL)
-    if r.status_code == 200:
-        try:
-            z = zipfile.ZipFile(io.BytesIO(r.content))
-            z.extractall(".")
-            print("✅ besthome.db ZIP-dən uğurla çıxarıldı.")
-        except zipfile.BadZipFile:
-            with open("besthome.db", "wb") as f:
-                f.write(r.content)
-            print("⚙️ ZIP yox, birbaşa DB kimi endirildi və yazıldı.")
+
+def ensure_database():
+    if not os.path.exists(DB_PATH):
+        print("⬇️ besthome.zip Dropbox-dan endirilir və açılır...")
+        r = requests.get(DROPBOX_ZIP_URL)
+        if r.status_code == 200:
+            try:
+                with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+                    z.extractall(".")
+                print("✅ besthome.db ZIP-dən uğurla çıxarıldı.")
+            except zipfile.BadZipFile:
+                print("❌ Xəta: Fayl ZIP formatında deyil. Dropbox linkini yoxla.")
+        else:
+            print(f"⚠️ Fayl endirilə bilmədi, status: {r.status_code}")
     else:
-        print(f"⚠️ Fayl endirilə bilmədi, status: {r.status_code}")
-else:
-    print("📦 Mövcud baza tapıldı, yenidən endirməyə ehtiyac yoxdur.")
+        print("📦 Mövcud baza tapıldı, yenidən endirməyə ehtiyac yoxdur.")
+
+
+ensure_database()
 
 
 import telebot
