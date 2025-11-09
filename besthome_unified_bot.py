@@ -280,12 +280,13 @@ def add_listing_new(data):
 def move_to_listings(row):
     """
     listings_new -> listings
-    dublikat nəzarəti; yeni id qaytarır (yoxdursa None)
+    Dublikat nəzarəti; yeni id qaytarır (yoxdursa None)
     """
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
+    # Dublikat yoxlaması
     cur.execute(
         """
         SELECT id FROM listings
@@ -297,10 +298,11 @@ def move_to_listings(row):
     exists = cur.fetchone()
     if exists:
         conn.close()
-        return None
+        return None  # artıq var, təkrar yazılmasın
 
     addr = (row["rayon"] or "") + ((", " + row["metro"]) if row["metro"] else "")
 
+    # Yeni elan yazılır
     cur.execute(
         """
         INSERT INTO listings (
@@ -315,20 +317,21 @@ def move_to_listings(row):
             row["operation"],
             row["metro"],
             row["rooms"],
-            "",
-            "",
+            "",  # building
+            "",  # floor
             row["area_kvm"],
             row["price"],
             row["currency"],
             row["phone"],
             row["contact_name"],
             addr,
-            "",
+            "",  # document
             row["summary"],
             row["link"] or "BestHomeBot",
         ),
     )
-    new_id = cur.lastrowid
+
+    new_id = cur.lastrowid  # 🔹 yeni ID alınır
     conn.commit()
     conn.close()
     return new_id
@@ -1352,6 +1355,8 @@ def about(message):
 if __name__ == "__main__":
     import threading
     from flask import Flask
+    import os
+    import logging
 
     print("⚙️ BestHome Unified Bot işə düşür...")
     init_db()
@@ -1363,15 +1368,31 @@ if __name__ == "__main__":
     def home():
         return "✅ BestHome Bot is running on Render!"
 
-    def run_flask():
-        import os
+    # Telebot səhvləri terminalda göstərsin
+    telebot.logger.setLevel(logging.INFO)
 
+    def run_flask():
         port = int(os.environ.get("PORT", 10000))
-        app.run(host="0.0.0.0", port=port)
+        # host və threaded=True botun paralel işləməsinə kömək edir
+        app.run(host="0.0.0.0", port=port, threaded=True)
 
     def run_bot():
-        bot.infinity_polling(skip_pending=True)
+        try:
+            bot.infinity_polling(timeout=60, long_polling_timeout=60, skip_pending=True)
+        except Exception as e:
+            print(f"❌ Bot polling xəta verdi: {e}")
+            # Render avtomatik yenidən işə salacaq, amma yenə də 5 san fasilə et
+            import time
+
+            time.sleep(5)
+            run_bot()  # retry
 
     # --- İki prosesi paralel işə salırıq ---
-    threading.Thread(target=run_flask).start()
+    threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=run_bot).start()
+
+    # proqramın dayanmaması üçün
+    while True:
+        import time
+
+        time.sleep(60)
