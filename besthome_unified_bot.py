@@ -1,105 +1,76 @@
 # ============================================
-# 🏠 BestHome Unified Bot v5 (FULL)
-# Elan əlavə + Filtrli axtarış + Açar sözlə axtarış
-# Favorilər + Elanlarım + Admin Panel + Kanal paylaşımı
-# Render üçün uyğundur (Flask + Bot birlikdə)
-# Əsəd Əsədov © 2025 | BestHome Systems
+# 🏠 BestHome Unified Bot — Full v7
+# Elan əlavə • Elan axtarış • Favori • Admin Panel
+# Dual DB (besthome.db + local_data.db)
+# © 2025 Əsəd Əsədov (@esedovesed)
 # ============================================
 
 import os
-import io
-import zipfile
-import requests
 import sqlite3
-import datetime
 import threading
+from datetime import datetime
+from flask import Flask
+import requests
+import zipfile
+import io
 
 import telebot
 from telebot import types
-from flask import Flask
 
-# ============ KONFİQURASİYA ============
+# ================== KONFİQURASİYA ==================
 BOT_TOKEN = "6202216323:AAEOWdglrcYTJfCr9oRSJtufjsNAkaLWyTc"
-ADMIN_ID = 1311851277  # yalnız sən
-DB_PATH = "besthome.db"
-LOGO_PATH = "besthomelogo.jpeg"
-CHANNEL_ID = -1001878623087  # təsdiqlənən elanlar bu kanala
+ADMIN_ID = 1311851277
+CHANNEL_ID = -1001878623087  # Kanal ID (bot kanalda admin olmalıdır!)
 
-# Dropbox ZIP (böyük bazanı Render-də çəkmək üçün)
-DROPBOX_ZIP_URL = (
-    "https://www.dropbox.com/scl/fi/56yi62s82zj0lv7ouebyj/besthome.zip"
-    "?rlkey=qm33d26daqx74evsr1x2tso0x&st=xhffgc2g&dl=1"
-)
+MAIN_DB = "besthome.db"  # Gündəlik yenilənən böyük baza
+LOCAL_DB = "local_data.db"  # Sabit baza (yeni elanlar, təsdiqlər, agentlər, favorilər)
 
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
-user_state = {}  # elan əlavə prosesi
-admin_tmp = {}  # admin üçün
+# Əgər Render-də main db zip şəklindədirsə, burdan çəkə bilərsən (istəyirsənsə istifadə et)
+DROPBOX_ZIP_URL = None  # "https://.../besthome.zip?dl=1"
+
+bot = telebot.TeleBot(BOT_TOKEN)
+user_state = {}  # istifadəçi addım prosesi (yeni elan)
+search_state = {}  # "daha çox göstər" üçün yaddaş
 
 
-# ============ BAZA YOXLA / ENDİR ============
-def ensure_database():
-    if os.path.exists(DB_PATH):
+# ================== DB YARDIMÇI ==================
+def ensure_main_db():
+    if os.path.exists(MAIN_DB):
         print("📦 Mövcud besthome.db tapıldı.")
         return
-
-    print("⬇️ besthome.zip Dropbox-dan endirilir...")
-    try:
-        r = requests.get(DROPBOX_ZIP_URL, timeout=60)
-    except Exception as e:
-        print("❌ Baza endirmə xətası:", e)
+    if not DROPBOX_ZIP_URL:
+        print("⚠️ besthome.db yoxdur və DROPBOX_ZIP_URL təyin edilməyib.")
         return
-
-    if r.status_code != 200:
-        print("❌ Baza endirilə bilmədi, status:", r.status_code)
-        return
-
-    try:
-        with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-            z.extractall(".")
-        print("✅ besthome.db ZIP-dən uğurla çıxarıldı.")
-    except zipfile.BadZipFile:
-        print("❌ ZIP faylı korlanıb və ya düzgün deyil.")
-
-
-# ============ DB STRUKTUR ============
-def safe_add_column(cur, table, col_def):
-    try:
-        cur.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
-    except Exception:
-        pass  # varsa susuruq
+    print("⬇️ besthome.zip endirilir...")
+    r = requests.get(DROPBOX_ZIP_URL)
+    if r.status_code == 200:
+        try:
+            with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+                z.extractall(".")
+            print("✅ besthome.db ZIP-dən çıxarıldı.")
+        except zipfile.BadZipFile:
+            print("❌ ZIP formatı səhvdir.")
+    else:
+        print(f"❌ Endirmə alınmadı: {r.status_code}")
 
 
-def init_db():
-    ensure_database()
-    conn = sqlite3.connect(DB_PATH)
+def get_main_conn():
+    conn = sqlite3.connect(MAIN_DB)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def get_local_conn():
+    conn = sqlite3.connect(LOCAL_DB)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_local_db():
+    conn = get_local_conn()
     cur = conn.cursor()
 
-    # Əsas baza (əgər yoxdursa minimal struktur)
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS listings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date_read TEXT,
-            prop_type TEXT,
-            operation TEXT,
-            metro TEXT,
-            rooms TEXT,
-            building TEXT,
-            floor TEXT,
-            area_kvm TEXT,
-            price TEXT,
-            currency TEXT,
-            phone TEXT,
-            contact_name TEXT,
-            address TEXT,
-            document TEXT,
-            summary TEXT,
-            source_link TEXT
-        )
-        """
-    )
-
-    # Yeni elanlar (botdan gələnlər)
+    # Gözləyən elanlar
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS listings_new (
@@ -121,7 +92,31 @@ def init_db():
             link TEXT,
             approved INTEGER DEFAULT 0
         )
+    """
+    )
+
+    # Təsdiqlənmiş elanlar (lokal yaddaş üçün)
+    cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS listings_approved (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date_added TEXT,
+            chat_id INTEGER,
+            role TEXT,
+            prop_type TEXT,
+            operation TEXT,
+            rayon TEXT,
+            metro TEXT,
+            rooms TEXT,
+            area_kvm TEXT,
+            price TEXT,
+            currency TEXT,
+            phone TEXT,
+            contact_name TEXT,
+            summary TEXT,
+            link TEXT
+        )
+    """
     )
 
     # Vasitəçilər
@@ -133,7 +128,7 @@ def init_db():
             phone TEXT,
             name TEXT
         )
-        """
+    """
     )
 
     # Favorilər
@@ -143,31 +138,42 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             chat_id INTEGER,
             listing_id INTEGER,
+            source TEXT,        -- 'main' və ya 'local'
             added_at TEXT,
-            UNIQUE(chat_id, listing_id)
+            UNIQUE(chat_id, listing_id, source)
         )
-        """
+    """
     )
-
-    # Köhnə bazalar üçün struktur düzəlişləri
-    safe_add_column(cur, "listings_new", "chat_id INTEGER")
-    safe_add_column(cur, "listings_new", "approved INTEGER DEFAULT 0")
-    safe_add_column(cur, "agents", "role TEXT")
-    safe_add_column(cur, "agents", "phone TEXT")
-    safe_add_column(cur, "agents", "name TEXT")
-
-    # indekslər
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_listings_op ON listings(operation)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_listings_price ON listings(price)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_listings_date ON listings(date_read)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_listings_addr ON listings(address)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_new_approved ON listings_new(approved)")
 
     conn.commit()
     conn.close()
 
 
-# ============ KÖMƏKÇİ FUNKSİYALAR ============
+def init_main_db_indices():
+    """Əsas bazada axtarışı sürətləndirmək üçün indexlər (yoxdursa yaradır)."""
+    if not os.path.exists(MAIN_DB):
+        return
+    conn = get_main_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_main_operation ON listings(operation)"
+        )
+    except:
+        pass
+    try:
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_main_price ON listings(price)")
+    except:
+        pass
+    try:
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_main_date ON listings(date_read)")
+    except:
+        pass
+    conn.commit()
+    conn.close()
+
+
+# ================== UTIL FUNKSİYALAR ==================
 def is_admin(chat_id: int) -> bool:
     return chat_id == ADMIN_ID
 
@@ -176,280 +182,160 @@ def format_price(v):
     if v is None:
         return "-"
     s = str(v).strip()
-    if not s:
-        return "-"
     try:
         val = int(float(s.replace(" ", "").replace(",", "")))
         return f"{val:,}".replace(",", " ")
-    except Exception:
+    except:
         return s
 
 
-def save_agent_if_needed(data):
-    if data.get("role") != "Vasitəçi":
-        return
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT OR IGNORE INTO agents (chat_id, role, phone, name)
-        VALUES (?, ?, ?, ?)
-        """,
-        (
-            data.get("chat_id"),
-            data.get("role"),
-            data.get("phone"),
-            data.get("contact_name"),
-        ),
-    )
-    conn.commit()
-    conn.close()
+def clean_text(x):
+    return (x or "").strip()
 
 
-def add_listing_new(data):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO listings_new (
-            date_added, chat_id, role, prop_type, operation, rayon, metro,
-            rooms, area_kvm, price, currency, phone, contact_name, summary, link
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            datetime.date.today().isoformat(),
-            data.get("chat_id"),
-            data.get("role"),
-            data.get("prop_type"),
-            data.get("operation"),
-            data.get("rayon"),
-            data.get("metro"),
-            data.get("rooms"),
-            data.get("area_kvm"),
-            data.get("price"),
-            data.get("currency"),
-            data.get("phone"),
-            data.get("contact_name"),
-            data.get("summary"),
-            data.get("link", ""),
-        ),
-    )
-    conn.commit()
-    conn.close()
+def send_logo(chat_id):
+    if os.path.exists("besthomelogo.jpeg"):
+        try:
+            with open("besthomelogo.jpeg", "rb") as f:
+                bot.send_photo(chat_id, f)
+        except:
+            pass
 
 
-def move_to_listings(row):
+def build_main_menu(chat_id):
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("📝 Yeni elan əlavə et", "📋 Elan axtar")
+    kb.add("🔎 Açar sözlə axtarış", "⭐ Favorilərim")
+    kb.add("📋 Elanlarım", "♻️ Sıfırla")
+    kb.add("ℹ️ Haqqında", "📞 Adminlə əlaqə")
+    if is_admin(chat_id):
+        kb.add("📊 Admin Panel")
+    return kb
+
+
+def send_listing_card(chat_id, ev: dict, source: str = None, show_fav: bool = True):
     """
-    listings_new -> listings
-    Dublikat nəzarəti; yeni id qaytarır (yoxdursa None).
+    ev — dict (main listings, listings_approved və ya listings_new)
+    source — 'main' və ya 'local' (favorit üçün)
     """
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-
-    # Dublikat: eyni phone+price+summary varsa yazmırıq
-    cur.execute(
-        """
-        SELECT id FROM listings
-        WHERE phone = ? AND price = ? AND summary = ?
-        LIMIT 1
-        """,
-        (row["phone"], row["price"], row["summary"]),
-    )
-    exists = cur.fetchone()
-    if exists:
-        conn.close()
-        return None
-
-    addr = (row["rayon"] or "") + ((", " + row["metro"]) if row["metro"] else "")
-
-    src_link = (
-        row["link"] if row["link"] and str(row["link"]).startswith("http") else ""
+    date_val = clean_text(
+        ev.get("date_read")
+        or ev.get("date_added")
+        or datetime.now().strftime("%Y-%m-%d")
     )
 
-    cur.execute(
-        """
-        INSERT INTO listings (
-            date_read, prop_type, operation, metro, rooms, building, floor,
-            area_kvm, price, currency, phone, contact_name, address,
-            document, summary, source_link
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            row["date_added"],
-            row["prop_type"],
-            row["operation"],
-            row["metro"],
-            row["rooms"],
-            "",
-            "",
-            row["area_kvm"],
-            row["price"],
-            row["currency"],
-            row["phone"],
-            row["contact_name"],
-            addr,
-            "",
-            row["summary"],
-            src_link,
-        ),
-    )
-    new_id = cur.lastrowid
-    conn.commit()
-    conn.close()
-    return new_id
+    prop = clean_text(ev.get("prop_type"))
+    rooms = clean_text(ev.get("rooms"))
+    op = clean_text(ev.get("operation"))
+    price = format_price(ev.get("price"))
+    cur = clean_text(ev.get("currency") or "AZN")
+    metro = clean_text(ev.get("metro"))
+    rayon = clean_text(ev.get("rayon"))
+    addr = clean_text(ev.get("address"))
+    phone = clean_text(ev.get("phone"))
+    name = clean_text(ev.get("contact_name"))
+    summ = clean_text(ev.get("summary"))
+    link = clean_text(ev.get("link") or ev.get("source_link"))
 
+    loc = ""
+    if rayon:
+        loc += rayon
+    if metro:
+        if loc:
+            loc += " — "
+        loc += metro
+    if not loc and addr:
+        loc = addr
 
-def send_listing_card(chat_id, ev, with_fav_button=True):
-    """Elanı şablonla göndər (kanal + user üçün uyğundur)."""
-    date_val = ev.get("date_read") or ev.get("date_added") or "-"
     txt = (
         f"📅 {date_val}\n"
-        f"🏠 {ev.get('prop_type','-')} | {ev.get('rooms','-')}\n"
-        f"💸 {ev.get('operation','-')} | 💰 {format_price(ev.get('price'))} {ev.get('currency','AZN')}\n"
+        f"🏠 {rooms} {prop}\n"
+        f"💸 {op} | 💰 {price} {cur}\n"
+        f"📍 {loc or '-'}\n"
+        f"📞 {phone} ({name})\n"
+        f"🧾 {summ or '-'}"
     )
 
-    addr = ev.get("address") or ev.get("rayon") or ""
-    if addr or ev.get("metro"):
-        txt += "📍 "
-        if addr:
-            txt += addr
-        if ev.get("metro") and ev.get("metro") != "Metro yoxdur":
-            if addr:
-                txt += " — "
-            txt += ev.get("metro")
-        txt += "\n"
-
-    txt += f"📞 {ev.get('phone','-')} ({ev.get('contact_name','-')})\n"
-    txt += f"🧾 {ev.get('summary','-')}"
-
-    link = ev.get("link") or ev.get("source_link")
-    if link and str(link).startswith("http"):
-        txt += f"\n🔗 {link}"
-
-    mk = types.InlineKeyboardMarkup(row_width=2)
-
-    # Favori yalnız user chat (mənfi id = kanal/qrup üçün göstərmirik)
-    if with_fav_button and ev.get("id") and chat_id > 0:
-        mk.add(types.InlineKeyboardButton("⭐ Saxla", callback_data=f"fav|{ev['id']}"))
-
-    if link and str(link).startswith("http"):
+    mk = types.InlineKeyboardMarkup()
+    if link:
         mk.add(types.InlineKeyboardButton("🌐 Elana bax", url=link))
+    if show_fav and source and ev.get("id"):
+        mk.add(
+            types.InlineKeyboardButton(
+                "⭐ Favorilərə əlavə et",
+                callback_data=f"fav|{source}|{ev['id']}",
+            )
+        )
 
-    if mk.keyboard:
-        bot.send_message(chat_id, txt, reply_markup=mk)
-    else:
-        bot.send_message(chat_id, txt)
-
-
-# ============ /myid ============
-@bot.message_handler(commands=["myid"])
-def cmd_myid(message):
-    bot.send_message(message.chat.id, f"Sənin Telegram ID-n: `{message.chat.id}`")
+    bot.send_message(chat_id, txt, reply_markup=mk)
 
 
-# ============ /start + əsas menyu ============
+# ================== /start + xoş gəldin ==================
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
     chat_id = message.chat.id
-
-    # Xoş gəldin + logo
-    if os.path.exists(LOGO_PATH):
-        try:
-            with open(LOGO_PATH, "rb") as f:
-                bot.send_photo(
-                    chat_id,
-                    f,
-                    caption=(
-                        "👋 *BestHome Unified Bot-a xoş gəlmisiniz!*\n\n"
-                        "📌 Bu bot vasitəsilə:\n"
-                        "• Yeni elan əlavə edə bilərsiniz (vasitəçi / ev sahibi)\n"
-                        "• Filtrli elan axtarışı edə bilərsiniz\n"
-                        "• Açar sözlə axtarış yaza bilərsiniz\n"
-                        "• Sevimli elanları ⭐ Favorilərə yığa bilərsiniz\n"
-                        "• Öz elanlarınızın statusuna baxa bilərsiniz\n"
-                        "• Admin paneli ilə bazanı idarə edə bilərsiniz (yalnız admin)\n"
-                    ),
-                )
-        except Exception:
-            bot.send_message(
-                chat_id,
-                "👋 *BestHome Unified Bot-a xoş gəlmisiniz!*",
-            )
-    else:
-        bot.send_message(
-            chat_id,
-            "👋 *BestHome Unified Bot-a xoş gəlmisiniz!*",
-        )
-
-    send_main_menu(chat_id)
+    send_logo(chat_id)
+    text = (
+        "👋 *BestHome Unified Bot-a xoş gəlmisən!*\n\n"
+        "Bu bot vasitəsilə:\n"
+        "• 📝 Elan əlavə edə bilərsən (vasitəçi və ya ev sahibi kimi)\n"
+        "• 📋 Filtrlərlə elan axtara bilərsən\n"
+        "• 🔎 Açar sözlə istənilən formada axtarış edə bilərsən\n"
+        "• ⭐ Seçilmiş elanları Favorilərim-də saxlaya bilərsən\n"
+        "• 📋 Öz elanlarını və statuslarını izləyə bilərsən\n"
+        "• 📊 Admin üçün ayrıca idarəetmə paneli mövcuddur\n\n"
+        "Başlamaq üçün menyudan seçim et ⬇️"
+    )
+    bot.send_message(
+        chat_id, text, parse_mode="Markdown", reply_markup=build_main_menu(chat_id)
+    )
 
 
-def send_main_menu(chat_id):
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("📝 Yeni elan əlavə et")
-    kb.add("📋 Elan axtar", "🔎 Açar sözlə axtarış")
-    kb.add("⭐ Favorilərim", "📋 Elanlarım")
-    kb.add("📞 Adminlə əlaqə", "🔄 Sıfırla")
-    kb.add("ℹ️ Haqqında")
-    if is_admin(chat_id):
-        kb.add("📊 Admin Panel")
-    bot.send_message(chat_id, "⬇️ Menyudan seçim et:", reply_markup=kb)
-
-
-# ============ 🔄 Sıfırla ============
-@bot.message_handler(func=lambda m: m.text == "🔄 Sıfırla")
-def reset_user(message):
+# ================== ♻️ Sıfırla ==================
+@bot.message_handler(func=lambda m: m.text == "♻️ Sıfırla")
+def reset_flow(message):
     chat_id = message.chat.id
     user_state.pop(chat_id, None)
-    bot.send_message(chat_id, "♻️ Bütün proses sıfırlandı.")
-    send_main_menu(chat_id)
+    search_state.pop(chat_id, None)
+    bot.send_message(
+        chat_id,
+        "✅ Bütün aktiv proseslər sıfırlandı. Yenidən seçim edə bilərsən.",
+        reply_markup=build_main_menu(chat_id),
+    )
 
 
-# ============ 📞 Adminlə əlaqə ============
+# ================== 📞 Adminlə əlaqə ==================
 @bot.message_handler(func=lambda m: m.text == "📞 Adminlə əlaqə")
 def contact_admin(message):
     bot.send_message(
         message.chat.id,
-        "📞 Admin: @esedovesed\n"
-        "Texniki problem, təklif və əməkdaşlıq üçün yaza bilərsiniz.",
+        "📞 Adminlə əlaqə üçün: @esedovesed\n"
+        "Hər hansı texniki problem, təklif və ya əməkdaşlıq üçün yaza bilərsən.",
     )
 
 
-# ============ Wizard: Yeni elan əlavə et ============
-def check_cancel(message):
-    if message.text == "❌ Ləğv et":
-        user_state.pop(message.chat.id, None)
-        bot.send_message(message.chat.id, "❌ Proses dayandırıldı.")
-        send_main_menu(message.chat.id)
-        return True
-    return False
-
-
+# ================== 📝 Yeni elan əlavə et (FSM) ==================
 @bot.message_handler(func=lambda m: m.text == "📝 Yeni elan əlavə et")
-def start_new_listing(message):
+def new_listing_start(message):
     chat_id = message.chat.id
     user_state[chat_id] = {"step": "role", "chat_id": chat_id}
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("Vasitəçi", "Əmlak sahibi")
-    kb.add("❌ Ləğv et")
+    kb.add("♻️ Sıfırla")
     bot.send_message(
-        chat_id,
-        "👤 Siz vasitəçisiniz, yoxsa əmlak sahibi?",
-        reply_markup=kb,
+        chat_id, "👤 Siz vasitəçisiniz, yoxsa əmlak sahibi?", reply_markup=kb
     )
 
 
 @bot.message_handler(func=lambda m: user_state.get(m.chat.id, {}).get("step") == "role")
 def step_role(message):
     chat_id = message.chat.id
-    if check_cancel(message):
-        return
-    if message.text not in ["Vasitəçi", "Əmlak sahibi"]:
-        bot.send_message(chat_id, "Zəhmət olmasa seç: Vasitəçi / Əmlak sahibi")
+    choice = message.text.strip()
+    if choice not in ["Vasitəçi", "Əmlak sahibi"]:
+        bot.send_message(chat_id, "Zəhmət olmasa seçim edin: Vasitəçi / Əmlak sahibi")
         return
     st = user_state[chat_id]
-    st["role"] = message.text
+    st["role"] = choice
 
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     props = [
@@ -463,7 +349,7 @@ def step_role(message):
     ]
     for i in range(0, len(props), 2):
         kb.add(*props[i : i + 2])
-    kb.add("❌ Ləğv et")
+    kb.add("♻️ Sıfırla")
     bot.send_message(chat_id, "🏠 Əmlak növünü seç:", reply_markup=kb)
     st["step"] = "prop_type"
 
@@ -473,17 +359,13 @@ def step_role(message):
 )
 def step_prop_type(message):
     chat_id = message.chat.id
-    if check_cancel(message):
-        return
-    st = user_state.get(chat_id)
-    if not st:
-        return
-    st["prop_type"] = message.text
+    st = user_state[chat_id]
+    st["prop_type"] = message.text.strip()
 
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("Satılır", "Kirayə", "Günlük")
-    kb.add("❌ Ləğv et")
-    bot.send_message(chat_id, "💸 Əməliyyat növü:", reply_markup=kb)
+    kb.add("♻️ Sıfırla")
+    bot.send_message(chat_id, "💸 Əməliyyat növünü seç:", reply_markup=kb)
     st["step"] = "operation"
 
 
@@ -492,12 +374,8 @@ def step_prop_type(message):
 )
 def step_operation(message):
     chat_id = message.chat.id
-    if check_cancel(message):
-        return
-    st = user_state.get(chat_id)
-    if not st:
-        return
-    st["operation"] = message.text
+    st = user_state[chat_id]
+    st["operation"] = message.text.strip()
 
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     rayonlar = [
@@ -519,7 +397,7 @@ def step_operation(message):
     ]
     for i in range(0, len(rayonlar), 2):
         kb.add(*rayonlar[i : i + 2])
-    kb.add("❌ Ləğv et")
+    kb.add("♻️ Sıfırla")
     bot.send_message(chat_id, "📍 Rayon seç:", reply_markup=kb)
     st["step"] = "rayon"
 
@@ -529,12 +407,8 @@ def step_operation(message):
 )
 def step_rayon(message):
     chat_id = message.chat.id
-    if check_cancel(message):
-        return
-    st = user_state.get(chat_id)
-    if not st:
-        return
-    st["rayon"] = message.text
+    st = user_state[chat_id]
+    st["rayon"] = message.text.strip()
 
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     metros = [
@@ -563,7 +437,7 @@ def step_rayon(message):
     ]
     for i in range(0, len(metros), 2):
         kb.add(*metros[i : i + 2])
-    kb.add("❌ Ləğv et")
+    kb.add("♻️ Sıfırla")
     bot.send_message(chat_id, "🚇 Metro seç:", reply_markup=kb)
     st["step"] = "metro"
 
@@ -573,13 +447,9 @@ def step_rayon(message):
 )
 def step_metro(message):
     chat_id = message.chat.id
-    if check_cancel(message):
-        return
-    st = user_state.get(chat_id)
-    if not st:
-        return
-    st["metro"] = message.text
-    bot.send_message(chat_id, "🔢 Otaq sayı:")
+    st = user_state[chat_id]
+    st["metro"] = message.text.strip()
+    bot.send_message(chat_id, "🔢 Otaq sayı (məs: 2, 3, 4):")
     st["step"] = "rooms"
 
 
@@ -588,25 +458,19 @@ def step_metro(message):
 )
 def step_rooms(message):
     chat_id = message.chat.id
-    if check_cancel(message):
-        return
-    st = user_state.get(chat_id)
-    if not st:
-        return
-    st["rooms"] = message.text
+    st = user_state[chat_id]
+    st["rooms"] = message.text.strip()
     bot.send_message(chat_id, "📏 Sahə (m²):")
-    st["step"] = "area"
+    st["step"] = "area_kvm"
 
 
-@bot.message_handler(func=lambda m: user_state.get(m.chat.id, {}).get("step") == "area")
+@bot.message_handler(
+    func=lambda m: user_state.get(m.chat.id, {}).get("step") == "area_kvm"
+)
 def step_area(message):
     chat_id = message.chat.id
-    if check_cancel(message):
-        return
-    st = user_state.get(chat_id)
-    if not st:
-        return
-    st["area_kvm"] = message.text
+    st = user_state[chat_id]
+    st["area_kvm"] = message.text.strip()
     bot.send_message(chat_id, "💰 Qiymət:")
     st["step"] = "price"
 
@@ -616,16 +480,12 @@ def step_area(message):
 )
 def step_price(message):
     chat_id = message.chat.id
-    if check_cancel(message):
-        return
-    st = user_state.get(chat_id)
-    if not st:
-        return
-    st["price"] = message.text
+    st = user_state[chat_id]
+    st["price"] = message.text.strip()
 
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("AZN", "USD")
-    kb.add("❌ Ləğv et")
+    kb.add("♻️ Sıfırla")
     bot.send_message(chat_id, "💱 Valyuta:", reply_markup=kb)
     st["step"] = "currency"
 
@@ -635,12 +495,8 @@ def step_price(message):
 )
 def step_currency(message):
     chat_id = message.chat.id
-    if check_cancel(message):
-        return
-    st = user_state.get(chat_id)
-    if not st:
-        return
-    st["currency"] = message.text
+    st = user_state[chat_id]
+    st["currency"] = message.text.strip()
     bot.send_message(chat_id, "📞 Əlaqə nömrəsi:")
     st["step"] = "phone"
 
@@ -650,12 +506,8 @@ def step_currency(message):
 )
 def step_phone(message):
     chat_id = message.chat.id
-    if check_cancel(message):
-        return
-    st = user_state.get(chat_id)
-    if not st:
-        return
-    st["phone"] = message.text
+    st = user_state[chat_id]
+    st["phone"] = message.text.strip()
     bot.send_message(chat_id, "👤 Əlaqədar şəxsin adı:")
     st["step"] = "contact_name"
 
@@ -665,12 +517,8 @@ def step_phone(message):
 )
 def step_contact_name(message):
     chat_id = message.chat.id
-    if check_cancel(message):
-        return
-    st = user_state.get(chat_id)
-    if not st:
-        return
-    st["contact_name"] = message.text
+    st = user_state[chat_id]
+    st["contact_name"] = message.text.strip()
     bot.send_message(chat_id, "🧾 Qısa təsvir yaz:")
     st["step"] = "summary"
 
@@ -680,20 +528,17 @@ def step_contact_name(message):
 )
 def step_summary(message):
     chat_id = message.chat.id
-    if check_cancel(message):
-        return
-    st = user_state.get(chat_id)
-    if not st:
-        return
-    st["summary"] = message.text
+    st = user_state[chat_id]
+    st["summary"] = message.text.strip()
 
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("Link yoxdur, elanı göndər ✅")
-    kb.add("❌ Ləğv et")
+    kb.add("♻️ Sıfırla")
     bot.send_message(
         chat_id,
-        "🔗 Əgər elan linki varsa (tap.az, bina.az və s.) yaz.\n"
+        "🔗 Əgər elan linki varsa (bina.az, tap.az və s.) göndər.\n"
         "Yoxdursa *Link yoxdur, elanı göndər ✅* seç:",
+        parse_mode="Markdown",
         reply_markup=kb,
     )
     st["step"] = "link"
@@ -702,28 +547,66 @@ def step_summary(message):
 @bot.message_handler(func=lambda m: user_state.get(m.chat.id, {}).get("step") == "link")
 def step_link(message):
     chat_id = message.chat.id
-    if check_cancel(message):
-        return
-    st = user_state.get(chat_id)
-    if not st:
-        return
-
+    st = user_state[chat_id]
     txt = message.text.strip()
+
     if txt.startswith("http"):
         st["link"] = txt
     elif txt != "Link yoxdur, elanı göndər ✅":
         bot.send_message(
-            chat_id,
-            "⚠️ Düzgün link yaz və ya 'Link yoxdur, elanı göndər ✅' seç.",
+            chat_id, "⚠️ Düzgün link yaz və ya 'Link yoxdur, elanı göndər ✅' seç."
         )
         return
 
-    save_agent_if_needed(st)
-    add_listing_new(st)
+    # Vasitəçini qeyd al
+    if st.get("role") == "Vasitəçi":
+        conn = get_local_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT OR REPLACE INTO agents (chat_id, role, phone, name)
+            VALUES (?, ?, ?, ?)
+        """,
+            (chat_id, st.get("role"), st.get("phone"), st.get("contact_name")),
+        )
+        conn.commit()
+        conn.close()
+
+    # listings_new-ə yaz
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO listings_new (
+            date_added, chat_id, role, prop_type, operation, rayon, metro,
+            rooms, area_kvm, price, currency, phone, contact_name, summary, link, approved
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+    """,
+        (
+            datetime.now().strftime("%Y-%m-%d %H:%M"),
+            chat_id,
+            st.get("role"),
+            st.get("prop_type"),
+            st.get("operation"),
+            st.get("rayon"),
+            st.get("metro"),
+            st.get("rooms"),
+            st.get("area_kvm"),
+            st.get("price"),
+            st.get("currency"),
+            st.get("phone"),
+            st.get("contact_name"),
+            st.get("summary"),
+            st.get("link", ""),
+        ),
+    )
+    new_id = cur.lastrowid
+    conn.commit()
+    conn.close()
 
     # Adminə preview
     preview = (
-        f"📢 *Yeni elan (gözləmədə)*\n\n"
+        f"📢 *Yeni elan (GÖZLƏMƏDƏ)* [ID: {new_id}]\n\n"
         f"👤 {st['role']}\n"
         f"🏠 {st['prop_type']} | {st['rooms']}\n"
         f"💸 {st['operation']} | 💰 {format_price(st['price'])} {st['currency']}\n"
@@ -731,31 +614,37 @@ def step_link(message):
         f"📞 {st['phone']} ({st['contact_name']})\n"
         f"🧾 {st['summary']}"
     )
-    if st.get("link") and st["link"].startswith("http"):
+    if st.get("link"):
         preview += f"\n🔗 {st['link']}"
 
+    mk = types.InlineKeyboardMarkup()
+    mk.add(
+        types.InlineKeyboardButton("✅ Təsdiqlə", callback_data=f"aprv_{new_id}"),
+        types.InlineKeyboardButton("❌ Sil", callback_data=f"del_{new_id}"),
+    )
     try:
-        bot.send_message(ADMIN_ID, preview)
-    except Exception:
+        bot.send_message(ADMIN_ID, preview, parse_mode="Markdown", reply_markup=mk)
+    except:
         pass
 
     bot.send_message(
         chat_id,
         "✅ Elan uğurla əlavə olundu.\n" "⏳ Hal-hazırda *admin təsdiqini gözləyir.*",
+        parse_mode="Markdown",
+        reply_markup=build_main_menu(chat_id),
     )
+
     user_state.pop(chat_id, None)
-    send_main_menu(chat_id)
 
 
-# ============ 📋 Elanlarım ============
+# ================== 📋 Elanlarım ==================
 @bot.message_handler(func=lambda m: m.text == "📋 Elanlarım")
 def my_listings(message):
     chat_id = message.chat.id
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = get_local_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT * FROM listings_new WHERE chat_id = ? ORDER BY id DESC",
+        "SELECT * FROM listings_new WHERE chat_id=? ORDER BY id DESC",
         (chat_id,),
     )
     rows = cur.fetchall()
@@ -768,111 +657,104 @@ def my_listings(message):
     bot.send_message(chat_id, "📋 Sənin elanların:")
     for r in rows:
         ev = dict(r)
-        status = "✅ Təsdiqlənib" if ev.get("approved") == 1 else "⏳ Gözləmədə"
-        txt = (
+        status = "✅ Təsdiqlənib" if ev["approved"] == 1 else "⏳ Gözləmədə"
+        ev_txt = (
             f"{status}\n"
             f"🏠 {ev.get('prop_type','-')} | {ev.get('rooms','-')}\n"
             f"💸 {ev.get('operation','-')} | 💰 {format_price(ev.get('price'))} {ev.get('currency','AZN')}\n"
-            f"📍 {ev.get('rayon','-')} {('— ' + ev.get('metro')) if ev.get('metro') else ''}\n"
+            f"📍 {ev.get('rayon','-')} — {ev.get('metro','')}\n"
             f"🧾 {ev.get('summary','-')}"
         )
-        if ev.get("link") and str(ev["link"]).startswith("http"):
-            txt += f"\n🔗 {ev['link']}"
-        bot.send_message(chat_id, txt)
+        if ev.get("link"):
+            ev_txt += f"\n🔗 {ev['link']}"
+        bot.send_message(chat_id, ev_txt)
 
 
-# ============ ⭐ Favorilərim ============
+# ================== ⭐ Favorilərim ==================
 @bot.message_handler(func=lambda m: m.text == "⭐ Favorilərim")
 def show_favorites(message):
     chat_id = message.chat.id
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = get_local_conn()
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT l.*
-        FROM favorites f
-        JOIN listings l ON l.id = f.listing_id
-        WHERE f.chat_id = ?
-        ORDER BY f.added_at DESC
+        SELECT listing_id, source, added_at
+        FROM favorites
+        WHERE chat_id=?
+        ORDER BY added_at DESC
         LIMIT 50
-        """,
+    """,
         (chat_id,),
     )
-    rows = cur.fetchall()
+    favs = cur.fetchall()
     conn.close()
 
-    if not rows:
-        bot.send_message(chat_id, "⭐ Favorilərdə heç bir elan yoxdur.")
+    if not favs:
+        bot.send_message(chat_id, "⭐ Favori siyahın boşdur.")
         return
 
-    bot.send_message(chat_id, f"⭐ Favorilər ({len(rows)} ədəd):")
-    for r in rows:
-        send_listing_card(chat_id, dict(r), with_fav_button=False)
+    bot.send_message(chat_id, f"⭐ Favorilər ({len(favs)} ədəd):")
+
+    for f in favs:
+        lid = f["listing_id"]
+        src = f["source"]
+
+        if src == "main":
+            if not os.path.exists(MAIN_DB):
+                continue
+            conn_m = get_main_conn()
+            cur_m = conn_m.cursor()
+            cur_m.execute("SELECT * FROM listings WHERE id=?", (lid,))
+            row = cur_m.fetchone()
+            conn_m.close()
+            if not row:
+                continue
+            send_listing_card(chat_id, dict(row), source="main", show_fav=False)
+
+        elif src == "local":
+            conn_l = get_local_conn()
+            cur_l = conn_l.cursor()
+            cur_l.execute("SELECT * FROM listings_approved WHERE id=?", (lid,))
+            row = cur_l.fetchone()
+            conn_l.close()
+            if not row:
+                continue
+            send_listing_card(chat_id, dict(row), source="local", show_fav=False)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("fav|"))
 def cb_favorite(c):
-    chat_id = c.message.chat.id
-    if chat_id <= 0:
-        bot.answer_callback_query(c.id, "Kanal/qrup üçün əlçatan deyil.")
-        return
     try:
-        listing_id = int(c.data.split("|")[1])
-    except Exception:
+        _, src, sid = c.data.split("|")
+        listing_id = int(sid)
+    except:
+        bot.answer_callback_query(c.id, "Xəta.")
         return
 
-    conn = sqlite3.connect(DB_PATH)
+    chat_id = c.from_user.id
+
+    conn = get_local_conn()
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT OR IGNORE INTO favorites (chat_id, listing_id, added_at)
-        VALUES (?, ?, ?)
-        """,
-        (chat_id, listing_id, datetime.datetime.now().isoformat()),
+        INSERT OR IGNORE INTO favorites (chat_id, listing_id, source, added_at)
+        VALUES (?, ?, ?, ?)
+    """,
+        (chat_id, listing_id, src, datetime.now().isoformat()),
     )
     conn.commit()
     conn.close()
-    bot.answer_callback_query(c.id, "⭐ Favorilərə əlavə olundu")
+
+    bot.answer_callback_query(c.id, "✅ Favorilərə əlavə olundu.")
 
 
-# ============ 📋 Elan axtar (filtrli + Daha çox) ============
-RAYON_CODES = {
-    "all": "Bütün ərazilər",
-    "bin": "Binəqədi",
-    "qar": "Qaradağ",
-    "xez": "Xəzər",
-    "seb": "Səbail",
-    "sab": "Sabunçu",
-    "sur": "Suraxanı",
-    "nar": "Nərimanov",
-    "nes": "Nəsimi",
-    "niz": "Nizami",
-    "pir": "Pirallahı",
-    "xet": "Xətai",
-    "yas": "Yasamal",
-    "abs": "Abşeron",
-    "sum": "Sumqayıt",
-}
-
-PRICE_CODES = {
-    "p0": (None, None),
-    "p1": (0, 500),
-    "p2": (500, 1000),
-    "p3": (1000, 2000),
-    "p4": (2000, None),
-}
-
-OP_CODES = {
-    "all": None,
-    "sat": "satıl",
-    "kir": "kiray",
-    "gun": "günlük",
-}
-
-
+# ================== 📋 Elan axtar (filtrlə + daha çox) ==================
 @bot.message_handler(func=lambda m: m.text == "📋 Elan axtar")
 def search_menu(message):
+    if not os.path.exists(MAIN_DB):
+        bot.send_message(message.chat.id, "⚠️ Əsas baza hazır deyil.")
+        return
+
     mk = types.InlineKeyboardMarkup()
     mk.add(
         types.InlineKeyboardButton("💸 Satılır", callback_data="sop|sat"),
@@ -882,25 +764,25 @@ def search_menu(message):
         types.InlineKeyboardButton("🏡 Günlük", callback_data="sop|gun"),
         types.InlineKeyboardButton("🌐 Hamısı", callback_data="sop|all"),
     )
-    bot.send_message(
-        message.chat.id,
-        "🔍 Əməliyyat növü seç:",
-        reply_markup=mk,
-    )
+    bot.send_message(message.chat.id, "🔍 Əməliyyat növü seç:", reply_markup=mk)
+
+
+OP_MAP = {
+    "sat": "satıl",
+    "kir": "kiray",
+    "gun": "günlük",
+    "all": None,
+}
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("sop|"))
 def cb_search_op(c):
     _, op = c.data.split("|")
     mk = types.InlineKeyboardMarkup()
+    mk.add(types.InlineKeyboardButton("Bütün ərazilər", callback_data=f"sray|{op}|all"))
+    mk.add(types.InlineKeyboardButton("Bakı rayonları", callback_data=f"sray|{op}|bak"))
     mk.add(
-        types.InlineKeyboardButton("Bütün ərazilər", callback_data=f"spr|{op}|all|p0")
-    )
-    mk.add(
-        types.InlineKeyboardButton("Bakı rayonları", callback_data=f"sray|{op}|bak"),
-        types.InlineKeyboardButton(
-            "Abşeron / Sumqayıt", callback_data=f"sray|{op}|abs"
-        ),
+        types.InlineKeyboardButton("Abşeron / Sumqayıt", callback_data=f"sray|{op}|abs")
     )
     bot.edit_message_text(
         "📍 Ərazi seç:",
@@ -911,43 +793,32 @@ def cb_search_op(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("sray|"))
-def cb_search_rayon_group(c):
-    _, op, grp = c.data.split("|")
+def cb_search_rayon(c):
+    _, op, area = c.data.split("|")
     mk = types.InlineKeyboardMarkup()
 
-    if grp == "bak":
-        mk.add(
-            types.InlineKeyboardButton("Bütün Bakı", callback_data=f"spr|{op}|all|p0")
-        )
-        mk.add(
-            types.InlineKeyboardButton("Binəqədi", callback_data=f"spr|{op}|bin|p0"),
-            types.InlineKeyboardButton("Qaradağ", callback_data=f"spr|{op}|qar|p0"),
-        )
-        mk.add(
-            types.InlineKeyboardButton("Xəzər", callback_data=f"spr|{op}|xez|p0"),
-            types.InlineKeyboardButton("Səbail", callback_data=f"spr|{op}|seb|p0"),
-        )
-        mk.add(
-            types.InlineKeyboardButton("Sabunçu", callback_data=f"spr|{op}|sab|p0"),
-            types.InlineKeyboardButton("Suraxanı", callback_data=f"spr|{op}|sur|p0"),
-        )
-        mk.add(
-            types.InlineKeyboardButton("Nərimanov", callback_data=f"spr|{op}|nar|p0"),
-            types.InlineKeyboardButton("Nəsimi", callback_data=f"spr|{op}|nes|p0"),
-        )
-        mk.add(
-            types.InlineKeyboardButton("Nizami", callback_data=f"spr|{op}|niz|p0"),
-            types.InlineKeyboardButton("Pirallahı", callback_data=f"spr|{op}|pir|p0"),
-        )
-        mk.add(
-            types.InlineKeyboardButton("Xətai", callback_data=f"spr|{op}|xet|p0"),
-            types.InlineKeyboardButton("Yasamal", callback_data=f"spr|{op}|yas|p0"),
-        )
-    elif grp == "abs":
-        mk.add(
-            types.InlineKeyboardButton("Abşeron", callback_data=f"spr|{op}|abs|p0"),
-            types.InlineKeyboardButton("Sumqayıt", callback_data=f"spr|{op}|sum|p0"),
-        )
+    if area == "all":
+        add_price_buttons(mk, op, "all")
+    elif area == "bak":
+        # Bakı rayonları
+        for code, name in [
+            ("yas", "Yasamal"),
+            ("nes", "Nəsimi"),
+            ("nar", "Nərimanov"),
+            ("xet", "Xətai"),
+            ("seb", "Səbail"),
+            ("bin", "Binəqədi"),
+            ("sab", "Sabunçu"),
+            ("sur", "Suraxanı"),
+            ("niz", "Nizami"),
+            ("xez", "Xəzər"),
+            ("qar", "Qaradağ"),
+            ("pir", "Pirallahı"),
+        ]:
+            mk.add(types.InlineKeyboardButton(name, callback_data=f"sray2|{op}|{code}"))
+    elif area == "abs":
+        mk.add(types.InlineKeyboardButton("Abşeron", callback_data=f"sray2|{op}|abs"))
+        mk.add(types.InlineKeyboardButton("Sumqayıt", callback_data=f"sray2|{op}|sum"))
 
     bot.edit_message_text(
         "📍 Dəqiq rayon seç:",
@@ -957,142 +828,139 @@ def cb_search_rayon_group(c):
     )
 
 
-def add_price_buttons(op, rayon):
-    mk = types.InlineKeyboardMarkup()
+RAYON_FILTER = {
+    "yas": "yasamal",
+    "nes": "nəsimi",
+    "nar": "nərimanov",
+    "xet": "xətai",
+    "seb": "səbail",
+    "bin": "binəqədi",
+    "sab": "sabunçu",
+    "sur": "suraxanı",
+    "niz": "nizami",
+    "xez": "xəzər",
+    "qar": "qaradağ",
+    "pir": "pirallahı",
+    "abs": "abşeron",
+    "sum": "sumqayıt",
+    "all": None,
+}
+
+PRICE_RANGES = {
+    "p0": (None, None),
+    "p1": (0, 500),
+    "p2": (500, 1000),
+    "p3": (1000, 2000),
+    "p4": (2000, None),
+}
+
+
+def add_price_buttons(mk, op, rayon_code):
     mk.add(
-        types.InlineKeyboardButton("Hamısı", callback_data=f"spr|{op}|{rayon}|p0"),
-        types.InlineKeyboardButton("0-500", callback_data=f"spr|{op}|{rayon}|p1"),
+        types.InlineKeyboardButton("Hamısı", callback_data=f"spr|{op}|{rayon_code}|p0"),
+        types.InlineKeyboardButton("0-500", callback_data=f"spr|{op}|{rayon_code}|p1"),
     )
     mk.add(
-        types.InlineKeyboardButton("500-1000", callback_data=f"spr|{op}|{rayon}|p2"),
-        types.InlineKeyboardButton("1000-2000", callback_data=f"spr|{op}|{rayon}|p3"),
+        types.InlineKeyboardButton(
+            "500-1000", callback_data=f"spr|{op}|{rayon_code}|p2"
+        ),
+        types.InlineKeyboardButton(
+            "1000-2000", callback_data=f"spr|{op}|{rayon_code}|p3"
+        ),
     )
     mk.add(
-        types.InlineKeyboardButton("2000+", callback_data=f"spr|{op}|{rayon}|p4"),
+        types.InlineKeyboardButton("2000+", callback_data=f"spr|{op}|{rayon_code}|p4"),
     )
-    return mk
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("spr|"))
 def cb_search_price(c):
-    _, op, rayon, pcode = c.data.split("|")
-    mk = add_price_buttons(op, rayon)
-    bot.edit_message_text(
-        f"💰 Qiymət aralığı seç:",
-        chat_id=c.message.chat.id,
-        message_id=c.message.message_id,
-        reply_markup=mk,
-    )
-    # Burada seçilən qiymət düyməsinə yenidən spr gələcək
-    # Amma bu dəfə aşağıda more/search-lə işləyəcəyik
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("spr|"))
-def cb_search_run(c):  # eyni prefix, amma artıq seçimdən sonra
-    # Bu handler yuxarıdakı ilə toqquşmasın deyə ehtiyatlı olaq
-    parts = c.data.split("|")
-    if len(parts) != 4:
-        return
-    _, op, rayon, pcode = parts
-    run_search(
-        chat_id=c.message.chat.id,
-        op_code=op,
-        rayon_code=rayon,
-        price_code=pcode,
-        offset=0,
-        from_callback=True,
-        msg=c.message,
+    _, op, rayon_code, pcode = c.data.split("|")
+    run_filtered_search(
+        c.message.chat.id,
+        op,
+        rayon_code,
+        pcode,
+        0,
+        edit_msg=(c.message.chat.id, c.message.message_id),
     )
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("more|"))
 def cb_search_more(c):
-    _, op, rayon, pcode, offset = c.data.split("|")
-    run_search(
-        chat_id=c.message.chat.id,
-        op_code=op,
-        rayon_code=rayon,
-        price_code=pcode,
-        offset=int(offset),
-        from_callback=False,
-        msg=None,
+    _, op, rayon_code, pcode, off = c.data.split("|")
+    run_filtered_search(
+        c.message.chat.id, op, rayon_code, pcode, int(off), edit_msg=None
     )
 
 
-def search_listings(op_code, rayon_code, price_code, offset, limit):
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+def run_filtered_search(
+    chat_id, op_code, rayon_code, price_code, offset, edit_msg=None, limit=10
+):
+    if not os.path.exists(MAIN_DB):
+        if edit_msg:
+            bot.edit_message_text(
+                "⚠️ Əsas baza yoxdur.", chat_id=edit_msg[0], message_id=edit_msg[1]
+            )
+        else:
+            bot.send_message(chat_id, "⚠️ Əsas baza yoxdur.")
+        return
+
+    conn = get_main_conn()
     cur = conn.cursor()
 
     sql = "SELECT * FROM listings WHERE 1=1"
     params = []
 
-    # əməliyyat
-    op_kw = OP_CODES.get(op_code)
+    # operation
+    op_kw = OP_MAP.get(op_code)
     if op_kw:
         sql += " AND LOWER(operation) LIKE ?"
         params.append(f"%{op_kw}%")
 
-    # rayon
-    if rayon_code != "all":
-        rayon_name = RAYON_CODES.get(rayon_code, "").lower()
-        if rayon_name:
-            like = f"%{rayon_name}%"
-            sql += " AND (LOWER(address) LIKE ? OR LOWER(summary) LIKE ?)"
-            params.extend([like, like])
+    # rayon filter (address/summary/metro daxilində)
+    rayon_kw = RAYON_FILTER.get(rayon_code)
+    if rayon_kw:
+        like = f"%{rayon_kw}%"
+        sql += " AND (LOWER(address) LIKE ? OR LOWER(summary) LIKE ? OR LOWER(metro) LIKE ?)"
+        params.extend([like, like, like])
 
-    # qiymət
-    min_p, max_p = PRICE_CODES.get(price_code, (None, None))
-    if min_p is not None:
+    # price
+    mn, mx = PRICE_RANGES.get(price_code, (None, None))
+    if mn is not None:
         sql += " AND CAST(price AS INTEGER) >= ?"
-        params.append(min_p)
-    if max_p is not None:
+        params.append(mn)
+    if mx is not None:
         sql += " AND CAST(price AS INTEGER) <= ?"
-        params.append(max_p)
+        params.append(mx)
 
     sql += " ORDER BY date_read DESC, id DESC LIMIT ? OFFSET ?"
     params.extend([limit, offset])
 
     cur.execute(sql, params)
-    rows = [dict(r) for r in cur.fetchall()]
+    rows = cur.fetchall()
     conn.close()
-    return rows
-
-
-def run_search(chat_id, op_code, rayon_code, price_code, offset, from_callback, msg):
-    limit = 10
-    rows = search_listings(op_code, rayon_code, price_code, offset, limit)
-
-    title_rayon = RAYON_CODES.get(rayon_code, "Bütün ərazilər")
-    op_title = {
-        "sat": "Satılır",
-        "kir": "Kirayə",
-        "gun": "Günlük",
-        "all": "Bütün əməliyyatlar",
-    }.get(op_code, "Elanlar")
 
     if not rows and offset == 0:
-        text = f"😕 {op_title} | {title_rayon} üzrə uyğun elan tapılmadı."
-        if from_callback and msg:
-            bot.edit_message_text(text, chat_id=msg.chat.id, message_id=msg.message_id)
+        msg = "😕 Uyğun elan tapılmadı."
+        if edit_msg:
+            bot.edit_message_text(msg, chat_id=edit_msg[0], message_id=edit_msg[1])
         else:
-            bot.send_message(chat_id, text)
+            bot.send_message(chat_id, msg)
         return
     elif not rows:
         bot.send_message(chat_id, "✅ Bütün uyğun elanlar göstərildi.")
         return
 
-    if from_callback and msg and offset == 0:
+    if edit_msg:
         bot.edit_message_text(
-            f"🔎 {op_title} | {title_rayon} — nəticələr:",
-            chat_id=msg.chat.id,
-            message_id=msg.message_id,
+            "🔎 Axtarış nəticələri:", chat_id=edit_msg[0], message_id=edit_msg[1]
         )
     elif offset == 0:
-        bot.send_message(chat_id, f"🔎 {op_title} | {title_rayon} — nəticələr:")
+        bot.send_message(chat_id, "🔎 Axtarış nəticələri:")
 
-    for ev in rows:
-        send_listing_card(chat_id, ev)
+    for r in rows:
+        send_listing_card(chat_id, dict(r), source="main", show_fav=True)
 
     # Daha çox göstər
     mk = types.InlineKeyboardMarkup()
@@ -1105,75 +973,82 @@ def run_search(chat_id, op_code, rayon_code, price_code, offset, from_callback, 
     bot.send_message(chat_id, "⬇️ Daha çox elan üçün:", reply_markup=mk)
 
 
-# ============ 🔎 Açar sözlə axtarış ============
+# ================== 🔎 Açar sözlə axtarış ==================
 @bot.message_handler(func=lambda m: m.text == "🔎 Açar sözlə axtarış")
-def keyword_search_prompt(message):
+def ask_keyword_search(message):
     msg = bot.send_message(
         message.chat.id,
-        "✍️ Açar sözləri yaz (məs: *yasamal 2 otaqli 600 azn yeni tikili*):",
+        "✍️ Axtarış üçün açar söz(lər) yaz:\nMəsələn: `yasamal 2 otaq 600 azn yeni tikili`",
+        parse_mode="Markdown",
     )
-    bot.register_next_step_handler(msg, keyword_search_run)
+    bot.register_next_step_handler(msg, do_keyword_search)
 
 
-def keyword_search_run(message):
+def do_keyword_search(message):
     chat_id = message.chat.id
-    query = (message.text or "").strip().lower()
+    query = message.text.strip().lower()
     if not query:
-        bot.send_message(chat_id, "Boş sorğu göndərdin 😅")
+        bot.send_message(chat_id, "Boş sorğu göndərdin.")
         return
 
-    words = [w for w in query.split() if len(w) > 1]
-    if not words:
-        bot.send_message(chat_id, "Çox qısa sorğu yazdın, yenidən yoxla.")
-        return
+    like = f"%{query}%"
 
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
+    results = []
 
-    sql = "SELECT * FROM listings WHERE 1=1"
-    params = []
-
-    for w in words:
-        like = f"%{w}%"
-        sql += """
-        AND (
-            LOWER(prop_type) LIKE ?
-            OR LOWER(operation) LIKE ?
-            OR LOWER(metro) LIKE ?
-            OR LOWER(rooms) LIKE ?
-            OR LOWER(address) LIKE ?
-            OR LOWER(summary) LIKE ?
-            OR LOWER(price) LIKE ?
+    if os.path.exists(MAIN_DB):
+        conn = get_main_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT * FROM listings
+            WHERE LOWER(prop_type || ' ' || operation || ' ' || metro || ' ' ||
+                        rooms || ' ' || address || ' ' || summary || ' ' ||
+                        IFNULL(price,'') || ' ' || IFNULL(currency,''))
+                  LIKE ?
+            ORDER BY date_read DESC, id DESC
+            LIMIT 30
+        """,
+            (like,),
         )
+        results += [("main", dict(r)) for r in cur.fetchall()]
+        conn.close()
+
+    # lokal təsdiqlənmişlər
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
         """
-        params.extend([like, like, like, like, like, like, like])
-
-    sql += " ORDER BY date_read DESC, id DESC LIMIT 40"
-
-    cur.execute(sql, params)
-    rows = cur.fetchall()
+        SELECT * FROM listings_approved
+        WHERE LOWER(prop_type || ' ' || operation || ' ' || metro || ' ' ||
+                    rooms || ' ' || rayon || ' ' || summary || ' ' ||
+                    IFNULL(price,'') || ' ' || IFNULL(currency,''))
+              LIKE ?
+        ORDER BY id DESC
+        LIMIT 20
+    """,
+        (like,),
+    )
+    results += [("local", dict(r)) for r in cur.fetchall()]
     conn.close()
 
-    if not rows:
-        bot.send_message(chat_id, "😕 Bu açar sözlərlə uyğun elan tapılmadı.")
+    if not results:
+        bot.send_message(chat_id, "😕 Heç nə tapılmadı.")
         return
 
-    bot.send_message(chat_id, f"🔍 Nəticələr ({len(rows)} ədəd):")
-    for r in rows:
-        send_listing_card(chat_id, dict(r))
+    bot.send_message(chat_id, f"🔍 Tapıldı: {len(results)} elan.")
+
+    for src, ev in results:
+        send_listing_card(chat_id, ev, source=src, show_fav=True)
 
 
-# ============ 📊 Admin Panel ============
+# ================== 📊 Admin Panel ==================
 @bot.message_handler(func=lambda m: m.text == "📊 Admin Panel")
 def admin_panel(message):
     if not is_admin(message.chat.id):
         return
     mk = types.InlineKeyboardMarkup()
     mk.add(
-        types.InlineKeyboardButton(
-            "✅ Təsdiqlənməyən elanlar", callback_data="admin_pending"
-        )
+        types.InlineKeyboardButton("⏳ Gözləyən elanlar", callback_data="admin_pending")
     )
     mk.add(
         types.InlineKeyboardButton("📊 Statistik hesabat", callback_data="admin_stats")
@@ -1184,35 +1059,34 @@ def admin_panel(message):
         )
     )
     mk.add(
-        types.InlineKeyboardButton("🔎 Axtar (əsas baza)", callback_data="admin_search")
+        types.InlineKeyboardButton("🔎 Əsas bazada axtar", callback_data="admin_search")
     )
     bot.send_message(message.chat.id, "🛠 Admin Panel:", reply_markup=mk)
 
 
 def send_pending_listings(chat_id):
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = get_local_conn()
     cur = conn.cursor()
     cur.execute("SELECT * FROM listings_new WHERE approved=0 ORDER BY id DESC LIMIT 30")
     rows = cur.fetchall()
     conn.close()
 
     if not rows:
-        bot.send_message(chat_id, "⛔ Təsdiq gözləyən elan yoxdur.")
+        bot.send_message(chat_id, "✅ Gözləyən elan yoxdur.")
         return
 
     for r in rows:
         ev = dict(r)
         txt = (
             f"ID: {ev['id']}\n"
-            f"👤 {ev.get('role','-')}\n"
-            f"🏠 {ev.get('prop_type','-')} | {ev.get('rooms','-')}\n"
-            f"💸 {ev.get('operation','-')} | 💰 {format_price(ev.get('price'))} {ev.get('currency','AZN')}\n"
-            f"📍 {ev.get('rayon','-')} — {ev.get('metro','-')}\n"
-            f"📞 {ev.get('phone','-')} ({ev.get('contact_name','-')})\n"
-            f"🧾 {ev.get('summary','-')}"
+            f"👤 {ev['role']}\n"
+            f"🏠 {ev['prop_type']} | {ev['rooms']}\n"
+            f"💸 {ev['operation']} | 💰 {format_price(ev['price'])} {ev['currency']}\n"
+            f"📍 {ev['rayon']} — {ev['metro']}\n"
+            f"📞 {ev['phone']} ({ev['contact_name']})\n"
+            f"🧾 {ev['summary']}"
         )
-        if ev.get("link") and str(ev["link"]).startswith("http"):
+        if ev.get("link"):
             txt += f"\n🔗 {ev['link']}"
         mk = types.InlineKeyboardMarkup()
         mk.add(
@@ -1230,12 +1104,12 @@ def cb_admin_pending(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("aprv_"))
-def cb_approve(c):
+def cb_admin_approve(c):
     if not is_admin(c.message.chat.id):
         return
     lid = int(c.data.split("_")[1])
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_local_conn()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT * FROM listings_new WHERE id=? AND approved=0", (lid,))
@@ -1245,43 +1119,61 @@ def cb_approve(c):
         conn.close()
         return
 
-    # 💥 Əlavə etdiyimiz sətir:
-    row = dict(row)
+    ev = dict(row)
 
-    new_id = move_to_listings(row)
+    # listings_approved-ə əlavə et
+    cur.execute(
+        """
+        INSERT INTO listings_approved (
+            date_added, chat_id, role, prop_type, operation,
+            rayon, metro, rooms, area_kvm, price, currency,
+            phone, contact_name, summary, link
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """,
+        (
+            ev["date_added"],
+            ev["chat_id"],
+            ev["role"],
+            ev["prop_type"],
+            ev["operation"],
+            ev["rayon"],
+            ev["metro"],
+            ev["rooms"],
+            ev["area_kvm"],
+            ev["price"],
+            ev["currency"],
+            ev["phone"],
+            ev["contact_name"],
+            ev["summary"],
+            ev["link"],
+        ),
+    )
+
     cur.execute("UPDATE listings_new SET approved=1 WHERE id=?", (lid,))
     conn.commit()
     conn.close()
 
-    # Elan sahibinə xəbər
+    # sahibinə mesaj
     try:
-        bot.send_message(
-            row["chat_id"],
-            "🎉 Elanınız təsdiqləndi və artıq sistemdə aktivdir.",
-        )
-    except Exception:
+        bot.send_message(ev["chat_id"], "🎉 Elanınız təsdiqləndi və artıq aktivdir.")
+    except:
         pass
 
     # Kanala paylaşım
-    if CHANNEL_ID and new_id:
-        conn2 = sqlite3.connect(DB_PATH)
-        conn2.row_factory = sqlite3.Row
-        cur2 = conn2.cursor()
-        cur2.execute("SELECT * FROM listings WHERE id=?", (new_id,))
-        lrow = cur2.fetchone()
-        conn2.close()
-        if lrow:
-            send_listing_card(CHANNEL_ID, dict(lrow), with_fav_button=False)
+    try:
+        send_listing_card(CHANNEL_ID, ev, source="local", show_fav=False)
+    except:
+        pass
 
-    bot.answer_callback_query(c.id, "✅ Təsdiq olundu.")
+    bot.answer_callback_query(c.id, "✅ Elan təsdiqləndi.")
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("del_"))
-def cb_delete(c):
+def cb_admin_delete(c):
     if not is_admin(c.message.chat.id):
         return
     lid = int(c.data.split("_")[1])
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_local_conn()
     cur = conn.cursor()
     cur.execute("DELETE FROM listings_new WHERE id=?", (lid,))
     conn.commit()
@@ -1293,67 +1185,57 @@ def cb_delete(c):
 def cb_admin_stats(c):
     if not is_admin(c.message.chat.id):
         return
-    conn = sqlite3.connect(DB_PATH)
+
+    total_main = 0
+    if os.path.exists(MAIN_DB):
+        conn = get_main_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM listings")
+        total_main = cur.fetchone()[0]
+        conn.close()
+
+    conn = get_local_conn()
     cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM listings_approved")
+    total_local = cur.fetchone()[0]
 
-    cur.execute("SELECT COUNT(*) FROM listings")
-    total = cur.fetchone()[0]
-
-    cur.execute(
-        "SELECT LOWER(operation), COUNT(*) FROM listings GROUP BY LOWER(operation)"
-    )
-    ops = cur.fetchall()
-
-    types_stats = {}
-    for key, label in [
-        ("yeni", "Yeni tikili"),
-        ("köhnə", "Köhnə tikili"),
-        ("həyət", "Həyət evi"),
-        ("bağ", "Bağ evi"),
-        ("villa", "Villa"),
-        ("obyekt", "Obyekt"),
-        ("torpaq", "Torpaq"),
-    ]:
+    (
         cur.execute(
-            "SELECT COUNT(*) FROM listings WHERE LOWER(prop_type) LIKE ?",
-            (f"%{key}%",),
+            """
+        SELECT LOWER(operation), COUNT(*) FROM listings
+        GROUP BY LOWER(operation)
+    """
         )
-        types_stats[label] = cur.fetchone()[0]
+        if os.path.exists(MAIN_DB)
+        else None
+    )
 
-    conn.close()
+    txt = (
+        "📊 *Statistik hesabat*\n\n"
+        f"Əsas baza elanları: *{total_main}*\n"
+        f"Bot vasitəsilə təsdiqlənən elanlar: *{total_local}*\n"
+    )
 
-    txt = f"📊 *Statistik hesabat*\n\nToplam elan: *{total}*\n\n💸 Əməliyyat növləri:\n"
-    for op, cnt in ops:
-        if op:
-            txt += f"• {op.capitalize()}: {cnt}\n"
-
-    txt += "\n🏠 Əmlak tipləri:\n"
-    for label, cnt in types_stats.items():
-        txt += f"• {label}: {cnt}\n"
-
-    bot.send_message(c.message.chat.id, txt)
+    bot.send_message(c.message.chat.id, txt, parse_mode="Markdown")
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "admin_agents_msg")
-def cb_agents_msg(c):
+def cb_admin_agents_msg(c):
     if not is_admin(c.message.chat.id):
         return
-    msg = bot.send_message(
-        c.message.chat.id,
-        "✍️ Vasitəçilərə göndəriləcək mesajı yaz:",
-    )
+    msg = bot.send_message(c.message.chat.id, "✍️ Vasitəçilərə göndəriləcək mesajı yaz:")
     bot.register_next_step_handler(msg, do_agents_broadcast)
 
 
 def do_agents_broadcast(message):
     if not is_admin(message.chat.id):
         return
-    text = (message.text or "").strip()
+    text = message.text.strip()
     if not text:
         bot.send_message(message.chat.id, "Boş mesaj göndərilə bilməz.")
         return
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_local_conn()
     cur = conn.cursor()
     cur.execute("SELECT chat_id FROM agents")
     agents = [r[0] for r in cur.fetchall()]
@@ -1364,7 +1246,7 @@ def do_agents_broadcast(message):
         try:
             bot.send_message(cid, f"📢 Yeni bildiriş:\n{text}")
             sent += 1
-        except Exception:
+        except:
             pass
 
     bot.send_message(message.chat.id, f"✅ Bildiriş {sent} vasitəçiyə göndərildi.")
@@ -1374,40 +1256,34 @@ def do_agents_broadcast(message):
 def cb_admin_search(c):
     if not is_admin(c.message.chat.id):
         return
-    msg = bot.send_message(
-        c.message.chat.id,
-        "🔎 Əsas bazada açar sözlə axtar:",
-    )
+    msg = bot.send_message(c.message.chat.id, "🔎 Əsas bazada açar sözlə axtar:")
     bot.register_next_step_handler(msg, do_admin_search)
 
 
 def do_admin_search(message):
     if not is_admin(message.chat.id):
         return
-    kw = (message.text or "").strip().lower()
+    kw = message.text.strip().lower()
     if not kw:
         bot.send_message(message.chat.id, "Boş sorğu.")
         return
+    if not os.path.exists(MAIN_DB):
+        bot.send_message(message.chat.id, "Əsas baza yoxdur.")
+        return
 
     like = f"%{kw}%"
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = get_main_conn()
     cur = conn.cursor()
     cur.execute(
         """
         SELECT * FROM listings
-        WHERE
-            LOWER(prop_type) LIKE ?
-            OR LOWER(operation) LIKE ?
-            OR LOWER(metro) LIKE ?
-            OR LOWER(rooms) LIKE ?
-            OR LOWER(address) LIKE ?
-            OR LOWER(summary) LIKE ?
-            OR LOWER(source_link) LIKE ?
+        WHERE LOWER(prop_type || ' ' || operation || ' ' || metro || ' ' ||
+                    rooms || ' ' || address || ' ' || summary)
+              LIKE ?
         ORDER BY date_read DESC, id DESC
-        LIMIT 80
-        """,
-        (like, like, like, like, like, like, like),
+        LIMIT 50
+    """,
+        (like,),
     )
     rows = cur.fetchall()
     conn.close()
@@ -1416,48 +1292,52 @@ def do_admin_search(message):
         bot.send_message(message.chat.id, "Heç nə tapılmadı.")
         return
 
-    bot.send_message(
-        message.chat.id,
-        f"🔍 Nəticələr ({len(rows)} ədəd):",
-    )
+    bot.send_message(message.chat.id, f"🔍 {len(rows)} nəticə tapıldı:")
     for r in rows:
-        send_listing_card(message.chat.id, dict(r))
+        send_listing_card(message.chat.id, dict(r), source="main", show_fav=True)
 
 
-# ============ ℹ️ Haqqında ============
+# ================== ℹ️ Haqqında ==================
 @bot.message_handler(func=lambda m: m.text == "ℹ️ Haqqında")
 def about(message):
     text = (
-        "🏠 *Best Home Əmlak Bot*\n"
+        "🏠 *BestHome Unified Bot*\n"
         "• 📝 Yeni elan əlavə et (vasitəçi / ev sahibi)\n"
-        "• 📋 Filtrlə elan axtar + ➕ Daha çox göstər\n"
-        "• 🔎 Açar sözlə axtarış (çox sözlü)\n"
+        "• 📋 Filtrlərlə elan axtar (əməliyyat, rayon, qiymət, daha çox göstər)\n"
+        "• 🔎 Açar sözlə axtarış (yasamal 2 otaq 600 azn və s.)\n"
         "• ⭐ Favorilərim — saxladığın elanlar\n"
-        "• 📋 Elanlarım — öz elanlarının statusu\n"
-        "• 📢 Təsdiqlənən elanlar avtomatik kanala göndərilir\n"
-        "• 📞 Adminlə əlaqə: @esedovesed\n"
-        "✅ Tək bot, tam əmlak ekosistemi."
+        "• 📋 Elanlarım — öz göndərdiyin elanlar və statuslar\n"
+        "• 📊 Admin Panel — yalnız admin ID üçün aktivdir\n"
+        "• 📢 Təsdiqlənən elanlar avtomatik kanalına göndərilir\n"
+        "• 📞 Admin: @esedovesed\n"
+        "✅ Tək bot, tam emlak idarəetmə sistemi."
     )
-    bot.send_message(message.chat.id, text)
+    bot.send_message(message.chat.id, text, parse_mode="Markdown")
 
 
-# ============ RUN (Render uyğun) ============
+# ================== Flask + Bot (Render üçün) ==================
+app = Flask(__name__)
+
+
+@app.route("/")
+def home():
+    return "✅ BestHome Bot is running!"
+
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+
+def run_bot():
+    ensure_main_db()
+    init_local_db()
+    init_main_db_indices()
+    print("🤖 Telegram bot start...")
+    bot.infinity_polling(skip_pending=True)
+
+
 if __name__ == "__main__":
-    print("⚙️ BestHome Unified Bot işə düşür...")
-    init_db()
-
-    app = Flask(__name__)
-
-    @app.route("/")
-    def home():
-        return "✅ BestHome Bot Render üzərində işləyir!"
-
-    def run_flask():
-        port = int(os.environ.get("PORT", 10000))
-        app.run(host="0.0.0.0", port=port)
-
-    def run_bot():
-        bot.infinity_polling(skip_pending=True)
-
+    print("⚙️ BestHome Unified Bot FULL v7 işə düşür...")
     threading.Thread(target=run_flask, daemon=True).start()
     run_bot()
