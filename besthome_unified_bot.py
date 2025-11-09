@@ -4,19 +4,19 @@
 # Əsəd Əsədov ©️ 2025 | BestHome Systems
 # ============================================
 
-import os, requests
+import os, requests, zipfile, io
 
-# 🔹 Google Drive-dan besthome.db avtomatik endir
 DB_PATH = "besthome.db"
-DRIVE_URL = (
+DRIVE_ZIP_URL = (
     "https://drive.google.com/uc?export=download&id=1s2lD7Hmm8q7E3lI4lO7S4fvArBRrQWQx"
 )
 
 if not os.path.exists(DB_PATH):
-    print("⬇️ besthome.db Google Drive-dan endirilir...")
-    r = requests.get(DRIVE_URL)
-    open(DB_PATH, "wb").write(r.content)
-    print("✅ Baza uğurla endirildi.")
+    print("⬇️ besthome.zip Google Drive-dan endirilir və açılır...")
+    r = requests.get(DRIVE_ZIP_URL)
+    z = zipfile.ZipFile(io.BytesIO(r.content))
+    z.extractall(".")
+    print("✅ besthome.db ZIP-dən uğurla çıxarıldı.")
 else:
     print("📦 Mövcud baza tapıldı, yenidən endirməyə ehtiyac yoxdur.")
 
