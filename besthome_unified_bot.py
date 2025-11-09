@@ -6,7 +6,7 @@
 
 import os, requests
 
-# 🔹 Google Drive-dan besthome.db faylını avtomatik endir
+# 🔹 Google Drive-dan besthome.db avtomatik endir
 DB_PATH = "besthome.db"
 DRIVE_URL = (
     "https://drive.google.com/uc?export=download&id=1s2lD7Hmm8q7E3lI4lO7S4fvArBRrQWQx"
