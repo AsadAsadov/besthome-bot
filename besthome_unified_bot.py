@@ -417,13 +417,11 @@ def cmd_start(message):
 @bot.message_handler(func=lambda m: m.text == "ℹ️ Haqqında")
 def about(message):
     text = (
-        "🏠 *BestHome Unified Bot*\n"
-        "• Dual baza: əsas besthome.db + lokal sistem\n"
+        "🏠 *Best Home Əmlak Botu*\n"
         "• 📝 Yeni elan əlavə (vasitəçi / ev sahibi)\n"
         "• 🔎 Axtarış sistemi: filtrlə, açar sözlə, nömrə ilə\n"
         "• ⭐ Favorilərim: saxladığın elanlar\n"
         "• 📋 Elanlarım: öz elanlarınız və statusu\n"
-        "• 📊 Admin Panel: yalnız admin üçün\n"
         "• 📞 Admin: @esedovesed\n"
         "✅ Tək bot — peşəkar emlak idarəetmə sistemi."
     )
@@ -982,7 +980,7 @@ def cb_search_select(c):
             return
         msg = bot.send_message(
             chat_id,
-            "🔍 Açar söz və ya bir neçə söz yazın (məs: *Yasamal 3 otaqlı 600 AZN*):",
+            "🔍 Açar söz və ya bir neçə söz yazın (məs: *Kristal Abşeron*):",
             parse_mode="Markdown",
         )
         bot.register_next_step_handler(msg, keyword_search_handler)
@@ -1391,7 +1389,8 @@ def run_structured_search(
         bot.send_message(chat_id, "⬇️ Daha çox elan üçün:", reply_markup=mk)
 
 
-# === 2) AÇAR SÖZLƏ AXTARIŞ ===
+# === 🔍 AÇAR SÖZLƏ AXTARIŞ (səhifələmə ilə) ===
+@bot.message_handler(func=lambda m: m.text and not m.text.startswith("/"))
 def keyword_search_handler(message):
     chat_id = message.chat.id
     if not check_limit(chat_id, "keyword", 30):
@@ -1406,6 +1405,7 @@ def keyword_search_handler(message):
     like = f"%{query}%"
     results = []
 
+    # Əsas baza
     if os.path.exists(MAIN_DB):
         conn = get_main_conn()
         cur = conn.cursor()
@@ -1430,6 +1430,7 @@ def keyword_search_handler(message):
             results.append(d)
         conn.close()
 
+    # Lokal baza
     conn = get_local_conn()
     cur = conn.cursor()
     cur.execute(
@@ -1440,12 +1441,11 @@ def keyword_search_handler(message):
             OR LOWER(operation) LIKE ?
             OR LOWER(metro) LIKE ?
             OR LOWER(rooms) LIKE ?
-            OR LOWER(rayon) LIKE ?
             OR LOWER(summary) LIKE ?
         ORDER BY date_added DESC, id DESC
         LIMIT 200
         """,
-        (like, like, like, like, like, like),
+        (like, like, like, like, like),
     )
     for r in cur.fetchall():
         d = dict(r)
@@ -1458,21 +1458,63 @@ def keyword_search_handler(message):
         return
 
     inc_limit(chat_id, "keyword", 1)
-
     results.sort(key=lambda x: safe_date(x), reverse=True)
-    max_show = 30
-    bot.send_message(
-        chat_id, f"🔍 Tapıldı: {len(results)} elan. İlk {max_show} göstərilir:"
-    )
-    for ev in results[:max_show]:
+
+    # Nəticələri yadda saxla (müvəqqəti RAM-də)
+    global search_results_cache
+    search_results_cache[chat_id] = results
+
+    send_keyword_page(chat_id, offset=0)
+
+
+# === 🔁 Daha çox düyməsinə cavab ===
+@bot.callback_query_handler(func=lambda c: c.data.startswith("kw_more|"))
+def cb_kw_more(c):
+    chat_id = c.message.chat.id
+    offset = int(c.data.split("|")[1])
+    send_keyword_page(chat_id, offset)
+    try:
+        bot.delete_message(chat_id, c.message.message_id)
+    except:
+        pass
+
+
+# === 📄 Nəticə səhifələyici ===
+search_results_cache = {}
+
+
+def send_keyword_page(chat_id, offset=0):
+    results = search_results_cache.get(chat_id, [])
+    page_size = 10
+
+    if not results:
+        bot.send_message(chat_id, "⚠️ Axtarış məlumatı tapılmadı. Yenidən axtarın.")
+        return
+
+    end_index = offset + page_size
+    slice_results = results[offset:end_index]
+
+    if offset == 0:
+        bot.send_message(
+            chat_id, f"🔍 Tapıldı: {len(results)} elan. İlk {page_size} göstərilir:"
+        )
+
+    for ev in slice_results:
         send_listing_card(
             chat_id, ev, source=ev.get("__source", "main"), with_fav_button=True
         )
-    if len(results) > max_show:
-        bot.send_message(
-            chat_id,
-            "📌 Daha dəqiq filter üçün '📋 Filtrlə axtar' istifadə edə bilərsiniz.",
+
+    # Daha çox düyməsi
+    if end_index < len(results):
+        mk = types.InlineKeyboardMarkup()
+        mk.add(
+            types.InlineKeyboardButton(
+                "➡️ Daha çox göstər", callback_data=f"kw_more|{end_index}"
+            )
         )
+        bot.send_message(chat_id, "⬇️ Daha çox elan üçün:", reply_markup=mk)
+    else:
+        bot.send_message(chat_id, "✅ Bütün elanlar göstərildi.")
 
 
 # === 3) NÖMRƏ İLƏ AXTARIŞ ===
