@@ -4,6 +4,23 @@
 # Əsəd Əsədov ©️ 2025 | BestHome Systems
 # ============================================
 
+import os, requests
+
+# 🔹 Google Drive-dan besthome.db faylını avtomatik endir
+DB_PATH = "besthome.db"
+DRIVE_URL = (
+    "https://drive.google.com/uc?export=download&id=1s2lD7Hmm8q7E3lI4lO7S4fvArBRrQWQx"
+)
+
+if not os.path.exists(DB_PATH):
+    print("⬇️ besthome.db Google Drive-dan endirilir...")
+    r = requests.get(DRIVE_URL)
+    open(DB_PATH, "wb").write(r.content)
+    print("✅ Baza uğurla endirildi.")
+else:
+    print("📦 Mövcud baza tapıldı, yenidən endirməyə ehtiyac yoxdur.")
+
+
 import telebot
 from telebot import types
 import sqlite3
