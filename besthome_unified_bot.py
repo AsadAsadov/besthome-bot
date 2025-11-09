@@ -7,7 +7,9 @@
 import os, requests, zipfile, io
 
 DB_PATH = "besthome.db"
-DRIVE_ZIP_URL = "https://drive.usercontent.google.com/download?id=1GYsw7UN9CVxyL50uRtC6To-EGEl9IKX3&export=download&authuser=0&confirm=t&uuid=121d0aa5-653c-4de2-a7f3-47d28836e29e&at=ALWLOp6YJRESaQkXIFYpbEyKetQj:1762650751770"
+DRIVE_ZIP_URL = (
+    "https://drive.google.com/uc?export=download&id=1GYsw7UN9CVxyL50uRtC6To-EGEl9IKX3"
+)
 
 if not os.path.exists(DB_PATH):
     print("⬇️ besthome.zip Google Drive-dan endirilir və açılır...")
