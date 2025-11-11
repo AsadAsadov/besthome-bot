@@ -27,7 +27,7 @@ MAIN_DB = "besthome.db"  # əsas böyük baza (Dropbox-dan gəlir)
 LOCAL_DB = "local_data.db"  # sabit baza (yeni elanlar, təsdiqlər, agentlər, favorilər, limitlər)
 
 # Əsas baza ZIP linki
-DROPBOX_ZIP_URL = "https://www.dropbox.com/scl/fi/08jskiis43hezgl1btim5/besthome.zip?rlkey=jrkmbuv14sal08zpcthb2l7ba&st=h92jg1o7&dl=1"
+DROPBOX_ZIP_URL = "https://www.dropbox.com/scl/fi/olemk2a7ezp4x1wjp4ozd/besthome.zip?rlkey=5l965d1y6pl3qajdewqi7wqe9&st=wj2sb438&dl=1"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 user_state = {}  # yeni elan əlavə axını
