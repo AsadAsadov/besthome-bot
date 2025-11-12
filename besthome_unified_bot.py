@@ -609,7 +609,7 @@ def start_cmd(message):
 def about(message):
     text = (
         "🏠 *Best Home Əmlak Botu*\n"
-        "• Vasitəçi bazası: ayrıca agents.db\n"
+        "• Vasitəçi bazası: Admin nəzarət edə bilər ancaq"
         "• 🔎 Filtrlə, açar sözlə, nömrə ilə axtarış\n"
         "• ⭐ Favorilər, 📋 Elanlarım, 🛠 Admin Panel\n"
         "• 👥 Yalnız admin təsdiqli istifadəçilər üçün giriş\n"
