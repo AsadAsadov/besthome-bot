@@ -42,6 +42,33 @@ user_state = {}  # Yeni elan proses state
 search_state = {}  # Açar sözlə axtarış paging state
 
 
+# =============== BESTHOME DROPBOX YÜKLƏNMƏSİ ===============
+
+
+def ensure_main_db():
+    """Dropbox-dan besthome.zip yükləyib besthome.db çıxardır."""
+    if os.path.exists(MAIN_DB):
+        print("✅ besthome.db artıq mövcuddur, yükləməyə ehtiyac yoxdur.")
+        return
+
+    print("⬇️ Dropbox-dan besthome.zip yüklənir...")
+    try:
+        r = requests.get(DROPBOX_ZIP_URL)
+        if r.status_code != 200:
+            print("⚠️ Dropbox cavab kodu:", r.status_code)
+            return
+        with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+            for name in z.namelist():
+                if name.endswith(".db"):
+                    z.extract(name, ".")
+                    os.rename(name, MAIN_DB)
+                    print(f"✅ {MAIN_DB} uğurla çıxarıldı!")
+                    return
+        print("⚠️ ZIP daxilində .db faylı tapılmadı.")
+    except Exception as e:
+        print("❌ Dropbox yükləmə xətası:", e)
+
+
 # =============== DB HELPERS ===============
 
 
