@@ -35,7 +35,7 @@ MAIN_DB = "besthome.db"  # Əsas gündəlik baza (Dropbox-dan)
 LOCAL_DB = "local_data.db"  # Yeni elanlar, təsdiqlər, users, favorilər, limitlər
 AGENTS_DB = "agents.db"  # Vasitəçi elanları (parserdən gələn)
 
-DROPBOX_ZIP_URL = "https://www.dropbox.com/scl/fi/08jskiis43hezgl1btim5/besthome.zip?rlkey=jrkmbuv14sal08zpcthb2l7ba&st=h92jg1o7&dl=1"
+DROPBOX_ZIP_URL = "https://www.dropbox.com/scl/fi/kxs7jt1pukuua2ygkdbsj/besthome.zip?rlkey=5ywsoarxuwr7svcfnitgn5tvo&st=8v9sgeq3&dl=1"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 user_state = {}  # Yeni elan proses state
