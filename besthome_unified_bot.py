@@ -1927,13 +1927,59 @@ def phone_search_handler(message):
         )
 
 
-# =============== 🏢 VASITƏÇİ ELANLARI (ADMIN - MENYU) ===============
+# =====================================================
+#  🏢 VASITƏÇİ ELANLARI – FULL BLOK
+# =====================================================
 
 
-@bot.callback_query_handler(func=lambda c: c.data == "adm|agents")
-def cb_agents_panel(c):
-    """Admin üçün Vasitəçi elanları menyusu"""
-    if not is_admin(c.message.chat.id):
+def send_agent_card(chat_id, ev):
+    """Vasitəçi və ya əmlak sahibi elan kartını botda göstərən funksiya."""
+
+    # 📌 Mətni qur
+    txt = (
+        f"🏠 <b>{ev.get('Emlakin_novu', '-')}</b>\n"
+        f"📍 {ev.get('Rayon_Qesebe', '-')}\n"
+        f"💰 {ev.get('Qiymet', '-')}\n"
+        f"📞 {ev.get('Elaqe_nomresi', '-')}\n"
+        f"🧾 {ev.get('Umumi_melumat', '-')}\n"
+    )
+
+    link = ev.get("Link")
+
+    if link:
+        txt += f"\n🔗 <a href='{link}'>Elana keçid</a>"
+
+    # 📌 Düymələr
+    mk = types.InlineKeyboardMarkup()
+
+    txt_lower = (
+        (ev.get("Umumi_melumat") or "") + (ev.get("Rayon_Qesebe") or "")
+    ).lower()
+
+    if "vasitəçi" in txt_lower or "agent" in txt_lower or "ofis" in txt_lower:
+        # 🔵 Vasitəçi düyməsi
+        if link:
+            mk.add(types.InlineKeyboardButton("🔵 Vasitəçi Elanı – Bax", url=link))
+    else:
+        # 🟢 Əmlak sahibi düyməsi
+        if link:
+            mk.add(
+                types.InlineKeyboardButton("🟢 Əmlak Sahibinin Elanı – Aç", url=link)
+            )
+
+    bot.send_message(chat_id, txt, parse_mode="HTML", reply_markup=mk)
+
+
+# ============================
+# 🏢 VASITƏÇİ ELANLARI (ADMIN)
+# ============================
+
+
+def agents_panel(c):
+    """Admin üçün vasitəçi elanları paneli."""
+    chat_id = c.message.chat.id
+
+    if not is_admin(chat_id):
         return
 
     mk = types.InlineKeyboardMarkup()
@@ -1953,26 +1999,24 @@ def cb_agents_panel(c):
         )
     )
 
-    try:
-        bot.edit_message_text(
-            "🏢 Vasitəçi elanları axtarış sistemi:",
-            chat_id=c.message.chat.id,
-            message_id=c.message.message_id,
-            reply_markup=mk,
-        )
-    except:
-        # əgər əvvəlki mesaj edit olmursa, yeni mesaj göndərək
-        bot.send_message(
-            c.message.chat.id, "🏢 Vasitəçi elanları axtarış sistemi:", reply_markup=mk
-        )
+    bot.edit_message_text(
+        "🏢 Vasitəçi elanları axtarış sistemi:",
+        chat_id=chat_id,
+        message_id=c.message.message_id,
+        reply_markup=mk,
+    )
 
 
-# =============== VASITƏÇİ ELANLARINDA AXTARIŞ ===============
+# =======================
+# 🔍 FILTER MENYUSU
+# =======================
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "agent_search|filter")
 def cb_agent_filter(c):
-    if not is_admin(c.message.chat.id):
+    chat_id = c.message.chat.id
+
+    if not is_admin(chat_id):
         return
 
     mk = types.InlineKeyboardMarkup()
@@ -1986,32 +2030,33 @@ def cb_agent_filter(c):
     )
     mk.add(types.InlineKeyboardButton("💰 Qiymət", callback_data="agent_filter|price"))
 
-    try:
-        bot.edit_message_text(
-            "🔍 Vasitəçi elanları üçün filtr seç:",
-            chat_id=c.message.chat.id,
-            message_id=c.message.message_id,
-            reply_markup=mk,
-        )
-    except:
-        bot.send_message(
-            c.message.chat.id,
-            "🔍 Vasitəçi elanları üçün filtr seç:",
-            reply_markup=mk,
-        )
+    bot.edit_message_text(
+        "🔍 Vasitəçi elanları üçün filtr seç:",
+        chat_id=chat_id,
+        message_id=c.message.message_id,
+        reply_markup=mk,
+    )
+
+
+# =============================
+# 📍 RAYON üzrə axtarış
+# =============================
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "agent_filter|rayon")
 def cb_agent_filter_rayon(c):
-    if not is_admin(c.message.chat.id):
+    chat_id = c.message.chat.id
+    if not is_admin(chat_id):
         return
-    msg = bot.send_message(c.message.chat.id, "📍 Rayon / qəsəbə adı yaz:")
+
+    msg = bot.send_message(chat_id, "📍 Rayon / qəsəbə adı yaz:")
     bot.register_next_step_handler(msg, agent_search_by_rayon)
 
 
 def agent_search_by_rayon(message):
     if not is_admin(message.chat.id):
         return
+
     rayon = (message.text or "").strip().lower()
     if not rayon:
         bot.send_message(message.chat.id, "⚠️ Boş sorğu.")
@@ -2023,7 +2068,7 @@ def agent_search_by_rayon(message):
         """
         SELECT * FROM arenda_data
         WHERE LOWER(Rayon_Qesebe) LIKE ?
-        ORDER BY Elanin_tarixi DESC
+        ORDER BY added_at DESC
         LIMIT 50
         """,
         (f"%{rayon}%",),
@@ -2040,17 +2085,25 @@ def agent_search_by_rayon(message):
         send_agent_card(message.chat.id, dict(r))
 
 
+# =============================
+# 🔎 Açar sözlə Axtarış
+# =============================
+
+
 @bot.callback_query_handler(func=lambda c: c.data == "agent_search|keyword")
 def cb_agent_keyword(c):
-    if not is_admin(c.message.chat.id):
+    chat_id = c.message.chat.id
+    if not is_admin(chat_id):
         return
-    msg = bot.send_message(c.message.chat.id, "🔎 Vasitəçi elanlarında açar söz yaz:")
+
+    msg = bot.send_message(chat_id, "🔎 Vasitəçi elanlarında açar söz yaz:")
     bot.register_next_step_handler(msg, agent_search_by_keyword)
 
 
 def agent_search_by_keyword(message):
     if not is_admin(message.chat.id):
         return
+
     kw = (message.text or "").strip().lower()
     if not kw:
         bot.send_message(message.chat.id, "⚠️ Boş sorğu.")
@@ -2065,7 +2118,7 @@ def agent_search_by_keyword(message):
            OR LOWER(Unvan) LIKE ?
            OR LOWER(Rayon_Qesebe) LIKE ?
            OR LOWER(Emlakin_novu) LIKE ?
-        ORDER BY Elanin_tarixi DESC
+        ORDER BY added_at DESC
         LIMIT 50
         """,
         (f"%{kw}%", f"%{kw}%", f"%{kw}%", f"%{kw}%"),
@@ -2082,17 +2135,25 @@ def agent_search_by_keyword(message):
         send_agent_card(message.chat.id, dict(r))
 
 
+# =============================
+# 📞 Nömrə ilə Axtarış
+# =============================
+
+
 @bot.callback_query_handler(func=lambda c: c.data == "agent_search|phone")
 def cb_agent_phone(c):
-    if not is_admin(c.message.chat.id):
+    chat_id = c.message.chat.id
+    if not is_admin(chat_id):
         return
-    msg = bot.send_message(c.message.chat.id, "📞 Nömrə daxil et:")
+
+    msg = bot.send_message(chat_id, "📞 Nömrə daxil et:")
     bot.register_next_step_handler(msg, agent_search_by_phone)
 
 
 def agent_search_by_phone(message):
     if not is_admin(message.chat.id):
         return
+
     num = "".join(ch for ch in (message.text or "") if ch.isdigit())
     if len(num) < 7:
         bot.send_message(message.chat.id, "⚠️ Minimum 7 rəqəm yaz.")
@@ -2104,7 +2165,7 @@ def agent_search_by_phone(message):
         """
         SELECT * FROM arenda_data
         WHERE REPLACE(Elaqe_nomresi,' ','') LIKE ?
-        ORDER BY Elanin_tarixi DESC
+        ORDER BY added_at DESC
         LIMIT 50
         """,
         (f"%{num}%",),
@@ -2119,6 +2180,35 @@ def agent_search_by_phone(message):
     bot.send_message(message.chat.id, f"✅ Tapıldı: {len(rows)} elan.")
     for r in rows:
         send_agent_card(message.chat.id, dict(r))
+
+
+# =============================
+# 🎫 Elan kartı — Link + status
+# =============================
+
+
+def send_agent_card(chat_id, ev):
+    txt = (
+        f"🏠 <b>{ev['Emlakin_novu']}</b>\n"
+        f"📍 {ev['Rayon_Qesebe']} — {ev['Unvan']}\n"
+        f"💰 {ev['Qiymet']} AZN\n"
+        f"📞 {ev['Elaqe_nomresi']}\n"
+        f"🧾 {ev['Umumi_melumat']}"
+    )
+
+    # 🔗 LINK ƏLAVƏ ET
+    if ev.get("Link"):
+        txt += f"\n\n🔗 <a href='{ev['Link']}'>Elana keçid</a>"
+
+    # Vasitəçi olub-olmadığını göstər
+    if ev.get("Mulk_sahibi_veya_Vasiteci"):
+        role = ev["Mulk_sahibi_veya_Vasiteci"].lower()
+        if "sahib" in role:
+            txt += "\n\n🟩 <b>Əmlak sahibi</b>"
+        else:
+            txt += "\n\n🟦 Vasitəçi"
+
+    bot.send_message(chat_id, txt, parse_mode="HTML")
 
 
 # =============== 📊 ADMIN PANEL (MENYU + CALLBACK) ===============
@@ -2205,8 +2295,7 @@ def cb_admin(c):
         show_users_menu(c.message.chat.id)
 
     elif cmd == "agents":
-        # Burda artıq MENYUNU açırıq
-        cb_agents_panel(c)
+        agents_panel(c)  # ⚡ BURADA ARTIQ DÜZGÜNDÜR
 
     elif cmd == "notify_update":
         broadcast_bot_update(c.message.chat.id)
