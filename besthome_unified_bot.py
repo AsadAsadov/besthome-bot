@@ -35,7 +35,9 @@ MAIN_DB = "besthome.db"  # Əsas gündəlik baza (Dropbox-dan)
 LOCAL_DB = "local_data.db"  # Yeni elanlar, təsdiqlər, users, favorilər, limitlər
 AGENTS_DB = "agents.db"  # Vasitəçi elanları (parserdən gələn)
 
-DROPBOX_ZIP_URL = "https://www.dropbox.com/scl/fi/kxs7jt1pukuua2ygkdbsj/besthome.zip?rlkey=5ywsoarxuwr7svcfnitgn5tvo&st=8v9sgeq3&dl=1"
+DROPBOX_ZIP_URL = "https://www.dropbox.com/scl/fi/b4uoii44z4v9ve98ei5fz/besthome.zip?rlkey=ecb8is34x4uytewvoi0dz8jyt&st=6lnl06ty&dl=1"
+DROPBOX_LOCAL_URL = "https://www.dropbox.com/scl/fi/dggenz0su7mvlxfjpn08l/local_data.zip?rlkey=nmgiip3ze32zovms6lgnwzib7&st=yxttebj5&dl=1"
+DROPBOX_AGENTS_URL = "https://www.dropbox.com/scl/fi/a4q28aq343ncgf89mcb4g/agents.zip?rlkey=iu5kgmpxv19k993fkc3l054uf&st=1tasdhg8&dl=1"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 user_state = {}  # Yeni elan proses state
@@ -67,6 +69,58 @@ def ensure_main_db():
         print("⚠️ ZIP daxilində .db faylı tapılmadı.")
     except Exception as e:
         print("❌ Dropbox yükləmə xətası:", e)
+
+
+def ensure_local_db():
+    if os.path.exists(LOCAL_DB):
+        print("✅ local_data.db mövcuddur, yenidən yüklənmir.")
+        return
+
+    print("⬇️ Dropbox-dan local_data.zip yüklənir...")
+    try:
+        r = requests.get(DROPBOX_LOCAL_URL)
+        if r.status_code != 200:
+            print("⚠️ Dropbox cavab kodu:", r.status_code)
+            return
+
+        with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+            for name in z.namelist():
+                if name.endswith(".db"):
+                    z.extract(name, ".")
+                    os.rename(name, LOCAL_DB)
+                    print("✅ local_data.db çıxarıldı!")
+                    return
+
+        print("⚠️ ZIP-də local_data.db tapılmadı!")
+
+    except Exception as e:
+        print("❌ local_data.zip yükləmə xətası:", e)
+
+
+def ensure_agents_db():
+    if os.path.exists(AGENTS_DB):
+        print("✅ agents.db mövcuddur, yenidən yüklənmir.")
+        return
+
+    print("⬇️ Dropbox-dan agents.zip yüklənir...")
+    try:
+        r = requests.get(DROPBOX_AGENTS_URL)
+        if r.status_code != 200:
+            print("⚠️ Dropbox cavab kodu:", r.status_code)
+            return
+
+        with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+            for name in z.namelist():
+                if name.endswith(".db"):
+                    z.extract(name, ".")
+                    os.rename(name, AGENTS_DB)
+                    print("✅ agents.db çıxarıldı!")
+                    return
+
+        print("⚠️ ZIP-də agents.db tapılmadı!")
+
+    except Exception as e:
+        print("❌ agents.zip yükləmə xətası:", e)
 
 
 # =============== DB HELPERS ===============
@@ -2811,6 +2865,8 @@ def main_menu(chat_id):
 if __name__ == "__main__":
     print("⚙️ BestHome Unified Bot FULL v9 işə düşür...")
     ensure_main_db()
+    ensure_local_db()  # 🔥 bunu əlavə et
+    ensure_agents_db()  # 🔥 agents üçün
     init_local_db()
     init_agents_db()
     init_main_db_indices()
