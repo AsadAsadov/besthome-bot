@@ -2861,9 +2861,29 @@ def main_menu(chat_id):
     mk.add("🔎 Axtarış sistemi")
     mk.add("⭐ Favorilərim", "📋 Elanlarım")
     mk.add("ℹ️ Haqqında")
+
+    # 🌐 Buraya MiniApp düyməsini əlavə edirik
+    miniapp_btn = types.KeyboardButton(
+        text="🌐 MiniApp aç",
+        web_app=types.WebAppInfo(url="https://besthome-bot-144q.onrender.com")
+    )
+    mk.add(miniapp_btn)
+
     if is_admin(chat_id):
         mk.add("📊 Admin Panel")
+
     bot.send_message(chat_id, "📋 Əsas menyudan seçim et:", reply_markup=mk)
+
+
+@bot.message_handler(func=lambda m: m.text == "🌐 MiniApp aç")
+def open_miniapp(message):
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    btn = types.KeyboardButton(
+        text="🌐 MiniApp aç",
+        web_app=types.WebAppInfo(url="https://besthome-bot-144q.onrender.com")
+    )
+    kb.add(btn)
+    bot.send_message(message.chat.id, "🌐 MiniApp:", reply_markup=kb)
 
 
 if __name__ == "__main__":
