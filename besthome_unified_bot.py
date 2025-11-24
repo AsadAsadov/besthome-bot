@@ -27,7 +27,7 @@ import telebot
 from telebot import types
 
 # =============== KONFİQURASİYA ===============
-BOT_TOKEN = "6202216323:AAEOWdglrcYTJfCr9oRSJtufjsNAkaLWyTc"
+BOT_TOKEN = "7938311608:AAHmzsTqnVJ7cVtStp2lmzGe2-1oj9LN1JM"
 ADMIN_ID = 1311851277
 CHANNEL_ID = -1001878623087  # Bot bu kanalda admin olmalıdır
 
@@ -45,30 +45,6 @@ search_state = {}  # Açar sözlə axtarış paging state
 
 
 # =============== BESTHOME DROPBOX YÜKLƏNMƏSİ ===============
-
-
-def ensure_main_db():
-    """Dropbox-dan besthome.zip yükləyib besthome.db çıxardır."""
-    if os.path.exists(MAIN_DB):
-        print("✅ besthome.db artıq mövcuddur, yükləməyə ehtiyac yoxdur.")
-        return
-
-    print("⬇️ Dropbox-dan besthome.zip yüklənir...")
-    try:
-        r = requests.get(DROPBOX_ZIP_URL)
-        if r.status_code != 200:
-            print("⚠️ Dropbox cavab kodu:", r.status_code)
-            return
-        with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-            for name in z.namelist():
-                if name.endswith(".db"):
-                    z.extract(name, ".")
-                    os.rename(name, MAIN_DB)
-                    print(f"✅ {MAIN_DB} uğurla çıxarıldı!")
-                    return
-        print("⚠️ ZIP daxilində .db faylı tapılmadı.")
-    except Exception as e:
-        print("❌ Dropbox yükləmə xətası:", e)
 
 
 def ensure_local_db():
@@ -581,31 +557,6 @@ def send_listing_card(
     bot.send_message(chat_id, text, reply_markup=mk)
 
 
-def send_agent_card(chat_id: int, row: dict):
-    phone = row.get("Elaqe_nomresi") or ""
-    text = (
-        f"🏢 Vasitəçi elan\n"
-        f"🏠 {row.get('Emlakin_novu','-')} | {row.get('Emeliyyat','-')}\n"
-        f"📍 {row.get('Rayon_Qesebe','-')} — {row.get('Unvan','')}\n"
-        f"🚇 {row.get('Metro','')}\n"
-        f"💰 {row.get('Qiymet','-')}\n"
-        f"🧾 {row.get('Umumi_melumat','')}\n"
-        f"👤 {row.get('Ad','-')} ({row.get('Elani_veren','-')})\n"
-        f"📅 {row.get('Elanin_tarixi','-')}\n"
-        f"📞 {phone}"
-    )
-
-    mk = types.InlineKeyboardMarkup()
-    wa_url = make_whatsapp_url(phone, "Salam, vasitəçi elanınız barədə yazıram.")
-    if wa_url:
-        mk.add(types.InlineKeyboardButton("💬 WhatsApp-da yaz", url=wa_url))
-
-    bot.send_message(chat_id, text, reply_markup=mk)
-
-
-# =============== /start ===============
-
-
 @bot.message_handler(commands=["start"])
 def start_cmd(message):
     chat_id = message.chat.id
@@ -1037,6 +988,7 @@ def save_agent_if_needed(data: dict):
 def add_listing_new(data: dict) -> int:
     conn = get_local_conn()
     cur = conn.cursor()
+
     cur.execute(
         """
         INSERT INTO listings_new (
@@ -1064,9 +1016,15 @@ def add_listing_new(data: dict) -> int:
             data.get("link", ""),
         ),
     )
+
     new_id = cur.lastrowid
     conn.commit()
     conn.close()
+
+    # 🔥 Pylance üçün 100% ziplənmiş fix
+    if new_id is None:
+        return 0  # və ya raise Exception, amma 0 normaldır
+
     return new_id
 
 
@@ -1930,49 +1888,6 @@ def phone_search_handler(message):
 # =====================================================
 #  🏢 VASITƏÇİ ELANLARI – FULL BLOK
 # =====================================================
-
-
-def send_agent_card(chat_id, ev):
-    """Vasitəçi və ya əmlak sahibi elan kartını botda göstərən funksiya."""
-
-    # 📌 Mətni qur
-    txt = (
-        f"🏠 <b>{ev.get('Emlakin_novu', '-')}</b>\n"
-        f"📍 {ev.get('Rayon_Qesebe', '-')}\n"
-        f"💰 {ev.get('Qiymet', '-')}\n"
-        f"📞 {ev.get('Elaqe_nomresi', '-')}\n"
-        f"🧾 {ev.get('Umumi_melumat', '-')}\n"
-    )
-
-    link = ev.get("Link")
-
-    if link:
-        txt += f"\n🔗 <a href='{link}'>Elana keçid</a>"
-
-    # 📌 Düymələr
-    mk = types.InlineKeyboardMarkup()
-
-    txt_lower = (
-        (ev.get("Umumi_melumat") or "") + (ev.get("Rayon_Qesebe") or "")
-    ).lower()
-
-    if "vasitəçi" in txt_lower or "agent" in txt_lower or "ofis" in txt_lower:
-        # 🔵 Vasitəçi düyməsi
-        if link:
-            mk.add(types.InlineKeyboardButton("🔵 Vasitəçi Elanı – Bax", url=link))
-    else:
-        # 🟢 Əmlak sahibi düyməsi
-        if link:
-            mk.add(
-                types.InlineKeyboardButton("🟢 Əmlak Sahibinin Elanı – Aç", url=link)
-            )
-
-    bot.send_message(chat_id, txt, parse_mode="HTML", reply_markup=mk)
-
-
-# ============================
-# 🏢 VASITƏÇİ ELANLARI (ADMIN)
-# ============================
 
 
 def agents_panel(c):
