@@ -1696,57 +1696,57 @@ def keyword_search_handler(message):
         bot.send_message(chat_id, "Günlük açar sözlə axtarış limitiniz bitib.")
         return
 
-    query = (message.text or "").strip().lower()
-    if not query:
+    text = (message.text or "").strip().lower()
+    if not text:
         bot.send_message(chat_id, "Boş sorğu göndərdiniz.")
         return
 
-    like = f"%{query}%"
+    # 🔥 Sorğunu sözlərə ayırırıq
+    words = [w for w in text.split() if w]
+
     results = []
 
-    # MAIN
+    # --- FILTER FUNKSIYASI ---
+    def build_multi_like_sql(fields):
+        sql_parts = []
+        params = []
+
+        # hər söz üçün AND, hər field üçün OR
+        for w in words:
+            part = "(" + " OR ".join([f"LOWER({f}) LIKE ?" for f in fields]) + ")"
+            sql_parts.append(part)
+            like = f"%{w}%"
+            params.extend([like] * len(fields))
+
+        sql = " AND ".join(sql_parts)
+        return sql, params
+
+    FIELDS_MAIN = ["prop_type", "operation", "metro", "rooms", "address", "summary"]
+    FIELDS_LOCAL = ["prop_type", "operation", "metro", "rooms", "rayon", "summary"]
+
+    # MAIN DB
     if os.path.exists(MAIN_DB):
         conn = get_main_conn()
         cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT * FROM listings
-            WHERE
-                LOWER(prop_type) LIKE ?
-                OR LOWER(operation) LIKE ?
-                OR LOWER(metro) LIKE ?
-                OR LOWER(rooms) LIKE ?
-                OR LOWER(address) LIKE ?
-                OR LOWER(summary) LIKE ?
-            ORDER BY date_read DESC, id DESC
-            LIMIT 300
-        """,
-            (like, like, like, like, like, like),
-        )
+
+        sql_where, params = build_multi_like_sql(FIELDS_MAIN)
+        sql = f"SELECT * FROM listings WHERE {sql_where} ORDER BY date_read DESC LIMIT 300"
+
+        cur.execute(sql, params)
         for r in cur.fetchall():
             d = dict(r)
             d["__source"] = "main"
             results.append(d)
         conn.close()
 
-    # LOCAL
+    # LOCAL DB
     conn = get_local_conn()
     cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT * FROM listings_approved
-        WHERE
-            LOWER(prop_type) LIKE ?
-            OR LOWER(operation) LIKE ?
-            OR LOWER(metro) LIKE ?
-            OR LOWER(rooms) LIKE ?
-            OR LOWER(rayon) LIKE ?
-            OR LOWER(summary) LIKE ?
-        ORDER BY date_added DESC, id DESC
-        LIMIT 300
-    """,
-        (like, like, like, like, like, like),
-    )
+
+    sql_where, params = build_multi_like_sql(FIELDS_LOCAL)
+    sql = f"SELECT * FROM listings_approved WHERE {sql_where} ORDER BY date_added DESC LIMIT 300"
+
+    cur.execute(sql, params)
     for r in cur.fetchall():
         d = dict(r)
         d["__source"] = "local"
