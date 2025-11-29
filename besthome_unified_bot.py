@@ -35,8 +35,8 @@ MAIN_DB = "besthome.db"  # Əsas gündəlik baza (Dropbox-dan)
 LOCAL_DB = "local_data.db"  # Yeni elanlar, təsdiqlər, users, favorilər, limitlər
 AGENTS_DB = "agents.db"  # Vasitəçi elanları (parserdən gələn)
 
-DROPBOX_ZIP_URL = "https://www.dropbox.com/scl/fi/8xsml2m6x7yqffqk95j46/besthome.zip?rlkey=8cf1zmv0at0cybqjvewnywd4x&st=0r0kt1si&dl=1"
-DROPBOX_LOCAL_URL = "https://www.dropbox.com/scl/fi/dggenz0su7mvlxfjpn08l/local_data.zip?rlkey=nmgiip3ze32zovms6lgnwzib7&st=ogwe61vc&dl=1"
+DROPBOX_ZIP_URL = "https://www.dropbox.com/scl/fi/8xsml2m6x7yqffqk95j46/besthome.zip?rlkey=8cf1zmv0at0cybqjvewnywd4x&st=ebvjkepn&dl=1"
+DROPBOX_LOCAL_URL = "https://www.dropbox.com/scl/fi/mahmbrcys639brd6ns6xp/local_data.zip?rlkey=gpqrs9n3zkk3kw0ng4e2jrip7&st=f0oifnvc&dl=1"
 DROPBOX_AGENTS_URL = "https://www.dropbox.com/scl/fi/a4q28aq343ncgf89mcb4g/agents.zip?rlkey=iu5kgmpxv19k993fkc3l054uf&st=1tasdhg8&dl=1"
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -2865,7 +2865,7 @@ def main_menu(chat_id):
     # 🌐 Buraya MiniApp düyməsini əlavə edirik
     miniapp_btn = types.KeyboardButton(
         text="🌐 MiniApp aç",
-        web_app=types.WebAppInfo(url="https://besthome-bot-144q.onrender.com")
+        web_app=types.WebAppInfo(url="https://besthome-bot-144q.onrender.com"),
     )
     mk.add(miniapp_btn)
 
@@ -2880,7 +2880,7 @@ def open_miniapp(message):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     btn = types.KeyboardButton(
         text="🌐 MiniApp aç",
-        web_app=types.WebAppInfo(url="https://besthome-bot-144q.onrender.com")
+        web_app=types.WebAppInfo(url="https://besthome-bot-144q.onrender.com"),
     )
     kb.add(btn)
     bot.send_message(message.chat.id, "🌐 MiniApp:", reply_markup=kb)
