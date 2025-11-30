@@ -36,7 +36,7 @@ LOCAL_DB = "local_data.db"  # Yeni elanlar, təsdiqlər, users, favorilər, limi
 AGENTS_DB = "agents.db"  # Vasitəçi elanları (parserdən gələn)
 
 DROPBOX_ZIP_URL = "https://www.dropbox.com/scl/fi/b4uoii44z4v9ve98ei5fz/besthome.zip?rlkey=ecb8is34x4uytewvoi0dz8jyt&st=6lnl06ty&dl=1"
-DROPBOX_LOCAL_URL = "https://www.dropbox.com/scl/fi/byg4ioywhkmk7qs18zb73/local_data.zip?rlkey=jvq1x3klk0b04mprk08e3ibcq&st=u3tkcwrx&dl=1"
+DROPBOX_LOCAL_URL = "https://www.dropbox.com/scl/fi/byg4ioywhkmk7qs18zb73/local_data.zip?rlkey=jvq1x3klk0b04mprk08e3ibcq&st=0me2mhnp&dl=1"
 DROPBOX_AGENTS_URL = "https://www.dropbox.com/scl/fi/a4q28aq343ncgf89mcb4g/agents.zip?rlkey=iu5kgmpxv19k993fkc3l054uf&st=1tasdhg8&dl=1"
 
 bot = telebot.TeleBot(BOT_TOKEN)
