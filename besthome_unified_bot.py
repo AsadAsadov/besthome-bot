@@ -27,7 +27,7 @@ import telebot
 from telebot import types
 
 # =============== KONFİQURASİYA ===============
-BOT_TOKEN = "7938311608:AAHmzsTqnVJ7cVtStp2lmzGe2-1oj9LN1JM"
+BOT_TOKEN = "6202216323:AAEOWdglrcYTJfCr9oRSJtufjsNAkaLWyTc"
 ADMIN_ID = 1311851277
 CHANNEL_ID = -1001878623087  # Bot bu kanalda admin olmalıdır
 
@@ -35,8 +35,8 @@ MAIN_DB = "besthome.db"  # Əsas gündəlik baza (Dropbox-dan)
 LOCAL_DB = "local_data.db"  # Yeni elanlar, təsdiqlər, users, favorilər, limitlər
 AGENTS_DB = "agents.db"  # Vasitəçi elanları (parserdən gələn)
 
-DROPBOX_ZIP_URL = "https://www.dropbox.com/scl/fi/7ne0n5havbzihjvgi2w44/besthome.zip?rlkey=e3p9zaxxpzqpa1xpsac72tygv&st=r3w6sndx&dl=1"
-DROPBOX_LOCAL_URL = "https://www.dropbox.com/scl/fi/mahmbrcys639brd6ns6xp/local_data.zip?rlkey=gpqrs9n3zkk3kw0ng4e2jrip7&st=f0oifnvc&dl=1"
+DROPBOX_ZIP_URL = "https://www.dropbox.com/scl/fi/b4uoii44z4v9ve98ei5fz/besthome.zip?rlkey=ecb8is34x4uytewvoi0dz8jyt&st=6lnl06ty&dl=1"
+DROPBOX_LOCAL_URL = "https://www.dropbox.com/scl/fi/byg4ioywhkmk7qs18zb73/local_data.zip?rlkey=jvq1x3klk0b04mprk08e3ibcq&st=u3tkcwrx&dl=1"
 DROPBOX_AGENTS_URL = "https://www.dropbox.com/scl/fi/a4q28aq343ncgf89mcb4g/agents.zip?rlkey=iu5kgmpxv19k993fkc3l054uf&st=1tasdhg8&dl=1"
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -45,6 +45,30 @@ search_state = {}  # Açar sözlə axtarış paging state
 
 
 # =============== BESTHOME DROPBOX YÜKLƏNMƏSİ ===============
+
+
+def ensure_main_db():
+    """Dropbox-dan besthome.zip yükləyib besthome.db çıxardır."""
+    if os.path.exists(MAIN_DB):
+        print("✅ besthome.db artıq mövcuddur, yükləməyə ehtiyac yoxdur.")
+        return
+
+    print("⬇️ Dropbox-dan besthome.zip yüklənir...")
+    try:
+        r = requests.get(DROPBOX_ZIP_URL)
+        if r.status_code != 200:
+            print("⚠️ Dropbox cavab kodu:", r.status_code)
+            return
+        with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+            for name in z.namelist():
+                if name.endswith(".db"):
+                    z.extract(name, ".")
+                    os.rename(name, MAIN_DB)
+                    print(f"✅ {MAIN_DB} uğurla çıxarıldı!")
+                    return
+        print("⚠️ ZIP daxilində .db faylı tapılmadı.")
+    except Exception as e:
+        print("❌ Dropbox yükləmə xətası:", e)
 
 
 def ensure_local_db():
@@ -557,6 +581,31 @@ def send_listing_card(
     bot.send_message(chat_id, text, reply_markup=mk)
 
 
+def send_agent_card(chat_id: int, row: dict):
+    phone = row.get("Elaqe_nomresi") or ""
+    text = (
+        f"🏢 Vasitəçi elan\n"
+        f"🏠 {row.get('Emlakin_novu','-')} | {row.get('Emeliyyat','-')}\n"
+        f"📍 {row.get('Rayon_Qesebe','-')} — {row.get('Unvan','')}\n"
+        f"🚇 {row.get('Metro','')}\n"
+        f"💰 {row.get('Qiymet','-')}\n"
+        f"🧾 {row.get('Umumi_melumat','')}\n"
+        f"👤 {row.get('Ad','-')} ({row.get('Elani_veren','-')})\n"
+        f"📅 {row.get('Elanin_tarixi','-')}\n"
+        f"📞 {phone}"
+    )
+
+    mk = types.InlineKeyboardMarkup()
+    wa_url = make_whatsapp_url(phone, "Salam, vasitəçi elanınız barədə yazıram.")
+    if wa_url:
+        mk.add(types.InlineKeyboardButton("💬 WhatsApp-da yaz", url=wa_url))
+
+    bot.send_message(chat_id, text, reply_markup=mk)
+
+
+# =============== /start ===============
+
+
 @bot.message_handler(commands=["start"])
 def start_cmd(message):
     chat_id = message.chat.id
@@ -988,7 +1037,6 @@ def save_agent_if_needed(data: dict):
 def add_listing_new(data: dict) -> int:
     conn = get_local_conn()
     cur = conn.cursor()
-
     cur.execute(
         """
         INSERT INTO listings_new (
@@ -1016,15 +1064,9 @@ def add_listing_new(data: dict) -> int:
             data.get("link", ""),
         ),
     )
-
     new_id = cur.lastrowid
     conn.commit()
     conn.close()
-
-    # 🔥 Pylance üçün 100% ziplənmiş fix
-    if new_id is None:
-        return 0  # və ya raise Exception, amma 0 normaldır
-
     return new_id
 
 
@@ -1696,57 +1738,57 @@ def keyword_search_handler(message):
         bot.send_message(chat_id, "Günlük açar sözlə axtarış limitiniz bitib.")
         return
 
-    text = (message.text or "").strip().lower()
-    if not text:
+    query = (message.text or "").strip().lower()
+    if not query:
         bot.send_message(chat_id, "Boş sorğu göndərdiniz.")
         return
 
-    # 🔥 Sorğunu sözlərə ayırırıq
-    words = [w for w in text.split() if w]
-
+    like = f"%{query}%"
     results = []
 
-    # --- FILTER FUNKSIYASI ---
-    def build_multi_like_sql(fields):
-        sql_parts = []
-        params = []
-
-        # hər söz üçün AND, hər field üçün OR
-        for w in words:
-            part = "(" + " OR ".join([f"LOWER({f}) LIKE ?" for f in fields]) + ")"
-            sql_parts.append(part)
-            like = f"%{w}%"
-            params.extend([like] * len(fields))
-
-        sql = " AND ".join(sql_parts)
-        return sql, params
-
-    FIELDS_MAIN = ["prop_type", "operation", "metro", "rooms", "address", "summary"]
-    FIELDS_LOCAL = ["prop_type", "operation", "metro", "rooms", "rayon", "summary"]
-
-    # MAIN DB
+    # MAIN
     if os.path.exists(MAIN_DB):
         conn = get_main_conn()
         cur = conn.cursor()
-
-        sql_where, params = build_multi_like_sql(FIELDS_MAIN)
-        sql = f"SELECT * FROM listings WHERE {sql_where} ORDER BY date_read DESC LIMIT 300"
-
-        cur.execute(sql, params)
+        cur.execute(
+            """
+            SELECT * FROM listings
+            WHERE
+                LOWER(prop_type) LIKE ?
+                OR LOWER(operation) LIKE ?
+                OR LOWER(metro) LIKE ?
+                OR LOWER(rooms) LIKE ?
+                OR LOWER(address) LIKE ?
+                OR LOWER(summary) LIKE ?
+            ORDER BY date_read DESC, id DESC
+            LIMIT 300
+        """,
+            (like, like, like, like, like, like),
+        )
         for r in cur.fetchall():
             d = dict(r)
             d["__source"] = "main"
             results.append(d)
         conn.close()
 
-    # LOCAL DB
+    # LOCAL
     conn = get_local_conn()
     cur = conn.cursor()
-
-    sql_where, params = build_multi_like_sql(FIELDS_LOCAL)
-    sql = f"SELECT * FROM listings_approved WHERE {sql_where} ORDER BY date_added DESC LIMIT 300"
-
-    cur.execute(sql, params)
+    cur.execute(
+        """
+        SELECT * FROM listings_approved
+        WHERE
+            LOWER(prop_type) LIKE ?
+            OR LOWER(operation) LIKE ?
+            OR LOWER(metro) LIKE ?
+            OR LOWER(rooms) LIKE ?
+            OR LOWER(rayon) LIKE ?
+            OR LOWER(summary) LIKE ?
+        ORDER BY date_added DESC, id DESC
+        LIMIT 300
+    """,
+        (like, like, like, like, like, like),
+    )
     for r in cur.fetchall():
         d = dict(r)
         d["__source"] = "local"
@@ -1888,6 +1930,49 @@ def phone_search_handler(message):
 # =====================================================
 #  🏢 VASITƏÇİ ELANLARI – FULL BLOK
 # =====================================================
+
+
+def send_agent_card(chat_id, ev):
+    """Vasitəçi və ya əmlak sahibi elan kartını botda göstərən funksiya."""
+
+    # 📌 Mətni qur
+    txt = (
+        f"🏠 <b>{ev.get('Emlakin_novu', '-')}</b>\n"
+        f"📍 {ev.get('Rayon_Qesebe', '-')}\n"
+        f"💰 {ev.get('Qiymet', '-')}\n"
+        f"📞 {ev.get('Elaqe_nomresi', '-')}\n"
+        f"🧾 {ev.get('Umumi_melumat', '-')}\n"
+    )
+
+    link = ev.get("Link")
+
+    if link:
+        txt += f"\n🔗 <a href='{link}'>Elana keçid</a>"
+
+    # 📌 Düymələr
+    mk = types.InlineKeyboardMarkup()
+
+    txt_lower = (
+        (ev.get("Umumi_melumat") or "") + (ev.get("Rayon_Qesebe") or "")
+    ).lower()
+
+    if "vasitəçi" in txt_lower or "agent" in txt_lower or "ofis" in txt_lower:
+        # 🔵 Vasitəçi düyməsi
+        if link:
+            mk.add(types.InlineKeyboardButton("🔵 Vasitəçi Elanı – Bax", url=link))
+    else:
+        # 🟢 Əmlak sahibi düyməsi
+        if link:
+            mk.add(
+                types.InlineKeyboardButton("🟢 Əmlak Sahibinin Elanı – Aç", url=link)
+            )
+
+    bot.send_message(chat_id, txt, parse_mode="HTML", reply_markup=mk)
+
+
+# ============================
+# 🏢 VASITƏÇİ ELANLARI (ADMIN)
+# ============================
 
 
 def agents_panel(c):
@@ -2861,29 +2946,9 @@ def main_menu(chat_id):
     mk.add("🔎 Axtarış sistemi")
     mk.add("⭐ Favorilərim", "📋 Elanlarım")
     mk.add("ℹ️ Haqqında")
-
-    # 🌐 Buraya MiniApp düyməsini əlavə edirik
-    miniapp_btn = types.KeyboardButton(
-        text="🌐 MiniApp aç",
-        web_app=types.WebAppInfo(url="https://besthome-bot-144q.onrender.com"),
-    )
-    mk.add(miniapp_btn)
-
     if is_admin(chat_id):
         mk.add("📊 Admin Panel")
-
     bot.send_message(chat_id, "📋 Əsas menyudan seçim et:", reply_markup=mk)
-
-
-@bot.message_handler(func=lambda m: m.text == "🌐 MiniApp aç")
-def open_miniapp(message):
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    btn = types.KeyboardButton(
-        text="🌐 MiniApp aç",
-        web_app=types.WebAppInfo(url="https://besthome-bot-144q.onrender.com"),
-    )
-    kb.add(btn)
-    bot.send_message(message.chat.id, "🌐 MiniApp:", reply_markup=kb)
 
 
 if __name__ == "__main__":
