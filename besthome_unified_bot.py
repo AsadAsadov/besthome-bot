@@ -35,7 +35,7 @@ MAIN_DB = "besthome.db"  # Əsas gündəlik baza (Dropbox-dan)
 LOCAL_DB = "local_data.db"  # Yeni elanlar, təsdiqlər, users, favorilər, limitlər
 AGENTS_DB = "agents.db"  # Vasitəçi elanları (parserdən gələn)
 
-DROPBOX_ZIP_URL = "https://www.dropbox.com/scl/fi/7ne0n5havbzihjvgi2w44/besthome.zip?rlkey=e3p9zaxxpzqpa1xpsac72tygv&st=r3w6sndx&dl=1"
+DROPBOX_ZIP_URL = "https://www.dropbox.com/scl/fi/7ne0n5havbzihjvgi2w44/besthome.zip?rlkey=e3p9zaxxpzqpa1xpsac72tygv&st=tum2ttzt&dl=1"
 DROPBOX_LOCAL_URL = "https://www.dropbox.com/scl/fi/byg4ioywhkmk7qs18zb73/local_data.zip?rlkey=jvq1x3klk0b04mprk08e3ibcq&st=ft5d9x78&dl=1"
 DROPBOX_AGENTS_URL = "https://www.dropbox.com/scl/fi/a4q28aq343ncgf89mcb4g/agents.zip?rlkey=iu5kgmpxv19k993fkc3l054uf&st=1tasdhg8&dl=1"
 
