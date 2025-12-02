@@ -1348,7 +1348,7 @@ def decode_price_range(code: str):
     if code == "k1":
         return 0, 500
     if code == "k2":
-        return 600, 1000
+        return 520, 1000
     if code == "k3":
         return 1050, 1500
     if code == "k4":
@@ -1490,7 +1490,7 @@ def cb_s_rg(c):
         mk.add(
             types.InlineKeyboardButton("0-500", callback_data=f"spr|{op}|{tp}|{rg}|k1"),
             types.InlineKeyboardButton(
-                "600-1000", callback_data=f"spr|{op}|{tp}|{rg}|k2"
+                "520-1000", callback_data=f"spr|{op}|{tp}|{rg}|k2"
             ),
         )
         mk.add(
@@ -1569,7 +1569,7 @@ def cb_more(c):
 def run_structured_search(
     chat_id, op_code, prop_code, rayon_group, price_code, offset, edit_msg=None
 ):
-    page_size = 10
+    page_size = 20
     min_p, max_p = decode_price_range(price_code)
     results = []
 
@@ -1730,7 +1730,7 @@ def keyword_search_handler(message):
         cur = conn.cursor()
 
         sql_where, params = build_multi_like_sql(FIELDS_MAIN)
-        sql = f"SELECT * FROM listings WHERE {sql_where} ORDER BY date_read DESC LIMIT 300"
+        sql = f"SELECT * FROM listings WHERE {sql_where} ORDER BY date_read DESC LIMIT 5000"
 
         cur.execute(sql, params)
         for r in cur.fetchall():
@@ -1744,7 +1744,7 @@ def keyword_search_handler(message):
     cur = conn.cursor()
 
     sql_where, params = build_multi_like_sql(FIELDS_LOCAL)
-    sql = f"SELECT * FROM listings_approved WHERE {sql_where} ORDER BY date_added DESC LIMIT 300"
+    sql = f"SELECT * FROM listings_approved WHERE {sql_where} ORDER BY date_added DESC LIMIT 5000"
 
     cur.execute(sql, params)
     for r in cur.fetchall():
@@ -1771,7 +1771,7 @@ def _send_keyword_page(chat_id, offset):
         bot.send_message(chat_id, "Sessiya tapılmadı. Yenidən axtarın.")
         return
     results = state["results"]
-    page_size = 10
+    page_size = 20
 
     if offset == 0:
         bot.send_message(
