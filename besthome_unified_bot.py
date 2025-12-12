@@ -1326,6 +1326,34 @@ def make_whatsapp_url(
     return f"https://wa.me/{p}?text={quote(text)}"
 
 
+def build_whatsapp_message(ev: dict) -> str:
+    op_raw = (ev.get("operation") or ev.get("Emeliyyat") or "").lower()
+    is_rent = "kir" in op_raw or "rent" in op_raw
+
+    rooms_val = ev.get("rooms") or ev.get("Otaq_sayi") or ""
+    rooms_txt = f"{rooms_val} otaqlı" if rooms_val else "mənzil"
+
+    location = ev.get("rayon") or ev.get("Rayon_Qesebe") or ""
+    if not location:
+        location = ev.get("address") or ev.get("Unvan") or ""
+
+    body = "Salam, "
+    if location:
+        body += f"{location} paylaşdığınız "
+    else:
+        body += "paylaşdığınız "
+
+    if is_rent:
+        body += f"{rooms_txt} kirayə mənzil hələ mövcuddur?"
+    else:
+        body += f"{rooms_txt} satışda olan mənzil satılıb?"
+
+    link = ev.get("link") or ev.get("source_link")
+    if link:
+        body += f"\n{link}"
+    return body
+
+
 def send_listing_card(
     chat_id: int,
     ev: dict,
@@ -2242,7 +2270,8 @@ def cb_whatsapp_click(c):
         bot.answer_callback_query(c.id, "❌ Elan tapılmadı.")
         return
     phone = ev.get("phone") or ev.get("Elaqe_nomresi")
-    wa_url = make_whatsapp_url(phone)
+    wa_message = build_whatsapp_message(ev)
+    wa_url = make_whatsapp_url(phone, wa_message)
     record_listing_stat(lid, "contact", c.message.chat.id)
     if wa_url:
         try:
