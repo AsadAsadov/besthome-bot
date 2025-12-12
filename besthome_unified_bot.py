@@ -190,6 +190,19 @@ def init_local_db():
     """
     )
 
+    # Elan statusları
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS listing_status (
+            source TEXT,
+            listing_id INTEGER,
+            status TEXT,
+            updated_at TEXT,
+            PRIMARY KEY (source, listing_id)
+        )
+    """
+    )
+
     conn.commit()
     conn.close()
     print("✅ local_data.db hazırdır.")
@@ -402,6 +415,88 @@ def reset_user_state(chat_id: int):
     user_state.pop(chat_id, None)
 
 
+def reset_search_state(chat_id: int):
+    state = search_state.get(chat_id)
+    if state and state.get("mode") == "structured" and state.get("awaiting_floor_range"):
+        try:
+            bot.send_message(chat_id, "↩️ Filter mərhələsi ləğv edildi.")
+        except:
+            pass
+    search_state.pop(chat_id, None)
+
+
+def get_status_map():
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT source, listing_id, status FROM listing_status")
+    rows = cur.fetchall()
+    conn.close()
+    return {(r["source"], r["listing_id"]): r["status"] for r in rows}
+
+
+def get_listing_status(source: str, listing_id: int) -> str:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT status FROM listing_status WHERE source=? AND listing_id=?",
+        (source, listing_id),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row[0] if row else "active"
+
+
+def update_listing_status(source: str, listing_id: int, status: str):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO listing_status (source, listing_id, status, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(source, listing_id) DO UPDATE SET
+            status=excluded.status,
+            updated_at=excluded.updated_at
+        """,
+        (source, listing_id, status, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def fetch_listing_by_source(source: str, listing_id: int):
+    if source == "main" and os.path.exists(MAIN_DB):
+        conn = get_main_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM listings WHERE id=?", (listing_id,))
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            d = dict(row)
+            d["__source"] = "main"
+            return d
+    if source == "local":
+        conn = get_local_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM listings_approved WHERE id=?", (listing_id,))
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            d = dict(row)
+            d["__source"] = "local"
+            return d
+    if source == "agents":
+        conn = get_agents_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM arenda_data WHERE id=?", (listing_id,))
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            d = dict(row)
+            d["__source"] = "agents"
+            return d
+    return None
+
+
 def send_logo_if_exists(chat_id: int):
     try:
         if os.path.exists("besthomelogo.jpeg"):
@@ -415,6 +510,8 @@ def send_main_menu(chat_id: int):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("📝 Yeni elan əlavə et")
     kb.row("🔎 Axtarış sistemi")
+    kb.row("✅ Satılan elanlar", "✅ Kirayə verilənlər")
+    kb.row("⛔ Qara siyahı")
     kb.row("⭐ Favorilərim", "📋 Elanlarım")
     kb.row("ℹ️ Haqqında")
     if is_admin(chat_id):
@@ -442,7 +539,12 @@ def make_whatsapp_url(
 
 
 def send_listing_card(
-    chat_id: int, ev: dict, source: str = "main", with_fav_button: bool = True
+    chat_id: int,
+    ev: dict,
+    source: str = "main",
+    with_fav_button: bool = True,
+    status_controls: bool = True,
+    extra_buttons=None,
 ):
     date_val = (
         ev.get("date_read") or ev.get("date_added") or ev.get("created_at") or "-"
@@ -466,6 +568,13 @@ def send_listing_card(
         else:
             location = metro
 
+    listing_id = ev.get("id") or ev.get("ID") or ev.get("Elan_kodu")
+    try:
+        listing_pk = int(str(listing_id)) if listing_id is not None else None
+    except (TypeError, ValueError):
+        listing_pk = None
+    status = get_listing_status(source, listing_pk) if listing_pk else "active"
+
     text = (
         f"📅 {date_val}\n"
         f"🏠 {title} | {rooms}\n"
@@ -474,6 +583,14 @@ def send_listing_card(
         f"📞 {phone} ({cname})\n"
         f"🧾 {summary}"
     )
+
+    if status != "active":
+        status_txt = {
+            "sold": "✅ Satılıb",
+            "rented": "✅ Kirayə verilib",
+            "blacklisted": "⛔ Qara siyahıda",
+        }.get(status, status)
+        text += f"\n📌 Status: {status_txt}"
 
     link = ev.get("link") or ev.get("source_link")
     if link:
@@ -489,9 +606,28 @@ def send_listing_card(
             )
         )
 
+    if status_controls and listing_pk:
+        mk.add(
+            types.InlineKeyboardButton(
+                "✅ Satılıb", callback_data=f"st|sold|{source}|{listing_pk}"
+            ),
+            types.InlineKeyboardButton(
+                "✅ Kirayə verilib", callback_data=f"st|rent|{source}|{listing_pk}"
+            ),
+        )
+        mk.add(
+            types.InlineKeyboardButton(
+                "⛔ Qara siyahıya", callback_data=f"st|blk|{source}|{listing_pk}"
+            )
+        )
+
     wa_url = make_whatsapp_url(phone)
     if wa_url:
         mk.add(types.InlineKeyboardButton("💬 WhatsApp-da yaz", url=wa_url))
+
+    if extra_buttons:
+        for btn in extra_buttons:
+            mk.add(btn)
 
     if link:
         mk.add(types.InlineKeyboardButton("🌐 Elana bax", url=link))
@@ -1132,6 +1268,113 @@ def cb_add_favorite(c):
     bot.answer_callback_query(c.id, "⭐ Favoriyə əlavə olundu.")
 
 
+
+
+# =============== 📌 ELAN STATUSLARI ===============
+
+
+def status_label(code: str) -> str:
+    return {
+        "sold": "✅ Satılıb",
+        "rented": "✅ Kirayə verilib",
+        "blacklisted": "⛔ Qara siyahıda",
+        "active": "Aktiv",
+    }.get(code, code)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("st|"))
+def cb_listing_status(c):
+    if not ensure_allowed_cb(c):
+        return
+    parts = c.data.split("|")
+    if len(parts) < 4:
+        return
+    action, source, lid = parts[1], parts[2], parts[3]
+    try:
+        lid_int = int(lid)
+    except Exception:
+        return
+
+    new_status = {
+        "sold": "sold",
+        "rent": "rented",
+        "blk": "blacklisted",
+        "undo": "active",
+    }.get(action)
+
+    if not new_status:
+        return
+
+    update_listing_status(source, lid_int, new_status)
+    try:
+        bot.answer_callback_query(c.id, f"Status: {status_label(new_status)}")
+    except Exception:
+        pass
+    try:
+        bot.edit_message_reply_markup(c.message.chat.id, c.message.message_id)
+    except Exception:
+        pass
+
+
+def show_status_bucket(chat_id, status_code: str, title: str, undo_label: str):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT source, listing_id FROM listing_status WHERE status=? ORDER BY updated_at DESC",
+        (status_code,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        bot.send_message(chat_id, "Siyahı boşdur.")
+        return
+
+    bot.send_message(chat_id, title)
+    for r in rows:
+        ev = fetch_listing_by_source(r["source"], r["listing_id"])
+        if not ev:
+            continue
+        btn = types.InlineKeyboardButton(
+            undo_label, callback_data=f"st|undo|{r['source']}|{r['listing_id']}"
+        )
+        send_listing_card(
+            chat_id,
+            ev,
+            source=ev.get("__source", r["source"]),
+            with_fav_button=True,
+            status_controls=False,
+            extra_buttons=[btn],
+        )
+
+
+@bot.message_handler(func=lambda m: m.text == "✅ Satılan elanlar")
+def show_sold_list(message):
+    if not ensure_allowed(message):
+        return
+    show_status_bucket(message.chat.id, "sold", "✅ Satılan elanlar:", "↩️ Geri qaytar")
+
+
+@bot.message_handler(func=lambda m: m.text == "✅ Kirayə verilənlər")
+def show_rented_list(message):
+    if not ensure_allowed(message):
+        return
+    show_status_bucket(
+        message.chat.id, "rented", "✅ Kirayə verilən elanlar:", "↩️ Geri qaytar"
+    )
+
+
+@bot.message_handler(func=lambda m: m.text == "⛔ Qara siyahı")
+def show_blacklist(message):
+    if not ensure_allowed(message):
+        return
+    show_status_bucket(
+        message.chat.id,
+        "blacklisted",
+        "⛔ Qara siyahıdakı elanlar:",
+        "✅ Qara siyahıdan çıxart",
+    )
+
 # =============== 🔎 AXTARIŞ SİSTEMİ ===============
 
 
@@ -1358,256 +1601,537 @@ def build_filters_sql(
     return sql, params
 
 
-def send_structured_start(chat_id, message=None):
-    mk = types.InlineKeyboardMarkup()
-    mk.add(
-        types.InlineKeyboardButton("💸 Satılır", callback_data="s_op|sat"),
-        types.InlineKeyboardButton("🏢 Kirayə verilir", callback_data="s_op|kir"),
-    )
-    mk.add(types.InlineKeyboardButton("🌐 Hamısı", callback_data="s_op|all"))
-    bot.send_message(chat_id, "🔍 Əməliyyat növünü seç:", reply_markup=mk)
+
+BAKU_RAYONS = [
+    "Binəqədi",
+    "Qaradağ",
+    "Xəzər",
+    "Səbail",
+    "Sabunçu",
+    "Suraxanı",
+    "Nərimanov",
+    "Nəsimi",
+    "Nizami",
+    "Pirallahı",
+    "Xətai",
+    "Yasamal",
+]
+ABS_RAYONS = ["Xırdalan", "Abşeron", "Masazır", "Digər"]
+SUM_RAYONS = ["Sumqayıt"]
+ALL_RAYONS = sorted(set(BAKU_RAYONS + ABS_RAYONS + SUM_RAYONS + ["Digər"]))
+REGION_OPTIONS = {
+    "bak": {"title": "Bakı rayonları", "rayons": BAKU_RAYONS},
+    "abs": {"title": "Abşeron", "rayons": ABS_RAYONS},
+    "sum": {"title": "Sumqayıt", "rayons": SUM_RAYONS},
+    "all": {"title": "Bütün ərazilər", "rayons": ALL_RAYONS},
+}
+ROOM_CODES = [("1", "r1"), ("2", "r2"), ("3", "r3"), ("4", "r4"), ("5+", "r5"), ("Hamısı", "r0")]
+FLOOR_PRESETS = {"f13": (1, 3), "f49": (4, 9), "f10": (10, None), "fall": None}
 
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("s_op|"))
-def cb_s_op(c):
-    if not ensure_allowed_cb(c):
-        return
-    _, op = c.data.split("|")
-    mk = types.InlineKeyboardMarkup()
-    mk.add(
-        types.InlineKeyboardButton("Mənzil", callback_data=f"s_tp|{op}|m"),
-        types.InlineKeyboardButton("Fərdi yaşayış evi", callback_data=f"s_tp|{op}|f"),
-    )
-    mk.add(
-        types.InlineKeyboardButton(
-            "Qeyri-yaşayış sahəsi", callback_data=f"s_tp|{op}|q"
-        ),
-        types.InlineKeyboardButton("Bağ evi", callback_data=f"s_tp|{op}|b"),
-    )
-    mk.add(
-        types.InlineKeyboardButton("Torpaq", callback_data=f"s_tp|{op}|t"),
-        types.InlineKeyboardButton("Hamısı", callback_data=f"s_tp|{op}|all"),
-    )
-    bot.edit_message_text(
-        "🏠 Əmlak tipini seç:",
-        chat_id=c.message.chat.id,
-        message_id=c.message.message_id,
-        reply_markup=mk,
-    )
+def structured_send(chat_id, message, text, markup):
+    if message:
+        try:
+            bot.edit_message_text(
+                text, chat_id=message.chat.id, message_id=message.message_id, reply_markup=markup
+            )
+            return
+        except Exception:
+            pass
+    bot.send_message(chat_id, text, reply_markup=markup)
 
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("s_tp|"))
-def cb_s_tp(c):
-    if not ensure_allowed_cb(c):
-        return
-    _, op, tp = c.data.split("|")
-    mk = types.InlineKeyboardMarkup()
-    mk.add(
-        types.InlineKeyboardButton(
-            "Bütün ərazilər", callback_data=f"s_rg|{op}|{tp}|all"
-        )
-    )
-    mk.add(
-        types.InlineKeyboardButton(
-            "Bakı rayonları", callback_data=f"s_rg|{op}|{tp}|bak"
-        ),
-        types.InlineKeyboardButton("Abşeron", callback_data=f"s_rg|{op}|{tp}|abs"),
-    )
-    mk.add(types.InlineKeyboardButton("Sumqayıt", callback_data=f"s_rg|{op}|{tp}|sum"))
-    bot.edit_message_text(
-        "📍 Rayon qrupunu seç:",
-        chat_id=c.message.chat.id,
-        message_id=c.message.message_id,
-        reply_markup=mk,
-    )
+def structured_push_history(chat_id):
+    st = search_state.setdefault(chat_id, {})
+    hist = st.setdefault("history", [])
+    hist.append({"step": st.get("step"), "filters": dict(st.get("filters", {}))})
 
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("s_rg|"))
-def cb_s_rg(c):
-    if not ensure_allowed_cb(c):
-        return
-    _, op, tp, rg = c.data.split("|")
-    mk = types.InlineKeyboardMarkup()
-    if op == "kir":
-        mk.add(
-            types.InlineKeyboardButton("0-500", callback_data=f"spr|{op}|{tp}|{rg}|k1"),
-            types.InlineKeyboardButton(
-                "520-1000", callback_data=f"spr|{op}|{tp}|{rg}|k2"
-            ),
-        )
-        mk.add(
-            types.InlineKeyboardButton(
-                "1050-1500", callback_data=f"spr|{op}|{tp}|{rg}|k3"
-            ),
-            types.InlineKeyboardButton(
-                "1550-2000", callback_data=f"spr|{op}|{tp}|{rg}|k4"
-            ),
-        )
-        mk.add(
-            types.InlineKeyboardButton("2000+", callback_data=f"spr|{op}|{tp}|{rg}|k5"),
-        )
-    else:
-        mk.add(
-            types.InlineKeyboardButton(
-                "Limitsiz", callback_data=f"spr|{op}|{tp}|{rg}|s0"
-            ),
-            types.InlineKeyboardButton(
-                "0-50,000", callback_data=f"spr|{op}|{tp}|{rg}|s1"
-            ),
-        )
-        mk.add(
-            types.InlineKeyboardButton(
-                "50,000-100,000", callback_data=f"spr|{op}|{tp}|{rg}|s2"
-            ),
-            types.InlineKeyboardButton(
-                "100,000-200,000", callback_data=f"spr|{op}|{tp}|{rg}|s3"
-            ),
-        )
-        mk.add(
-            types.InlineKeyboardButton(
-                "200,000+", callback_data=f"spr|{op}|{tp}|{rg}|s4"
-            ),
-        )
-    bot.edit_message_text(
-        "💰 Qiymət aralığını seç:",
-        chat_id=c.message.chat.id,
-        message_id=c.message.message_id,
-        reply_markup=mk,
-    )
+def parse_number(val):
+    try:
+        return int(str(val))
+    except Exception:
+        pass
+    import re as _re
+
+    nums = _re.findall(r"\d+", str(val or ""))
+    return int(nums[0]) if nums else None
 
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("spr|"))
-def cb_s_price(c):
-    if not ensure_allowed_cb(c):
-        return
-    _, op, tp, rg, pc = c.data.split("|")
-    run_structured_search(
-        chat_id=c.message.chat.id,
-        op_code=op,
-        prop_code=tp,
-        rayon_group=rg,
-        price_code=pc,
-        offset=0,
-        edit_msg=(c.message.chat.id, c.message.message_id),
-    )
+def parse_floor_value(ev: dict):
+    for k in ("floor", "Floor", "Mertebe", "mertebe"):
+        if ev.get(k):
+            num = parse_number(ev.get(k))
+            if num is not None:
+                return num
+    text = (ev.get("summary") or ev.get("Umumi_melumat") or "")
+    num = parse_number(text)
+    return num
 
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("more|"))
-def cb_more(c):
-    if not ensure_allowed_cb(c):
-        return
-    _, op, tp, rg, pc, off = c.data.split("|")
-    run_structured_search(
-        chat_id=c.message.chat.id,
-        op_code=op,
-        prop_code=tp,
-        rayon_group=rg,
-        price_code=pc,
-        offset=int(off),
-        edit_msg=None,
-    )
+def matches_region_rayon(ev: dict, filters: dict) -> bool:
+    region = filters.get("region") or "all"
+    rayon = filters.get("rayon")
+    text_block = " ".join(
+        [
+            str(ev.get("rayon") or ""),
+            str(ev.get("Rayon_Qesebe") or ""),
+            str(ev.get("address") or ""),
+            str(ev.get("Unvan") or ""),
+            str(ev.get("summary") or ""),
+        ]
+    ).lower()
+
+    if rayon and rayon != "all":
+        return rayon.lower() in text_block
+
+    region_rayons = REGION_OPTIONS.get(region, {}).get("rayons", [])
+    if region != "all":
+        return any(r.lower() in text_block for r in region_rayons)
+    return True
 
 
-def run_structured_search(
-    chat_id, op_code, prop_code, rayon_group, price_code, offset, edit_msg=None
-):
-    page_size = 20
+def matches_rooms(ev: dict, room_code: str) -> bool:
+    if not room_code or room_code == "r0":
+        return True
+    room_val = parse_number(ev.get("rooms") or ev.get("Otaq_sayi"))
+    if room_val is None:
+        return True
+    if room_code == "r5":
+        return room_val >= 5
+    try:
+        desired = int(room_code.replace("r", ""))
+        return room_val == desired
+    except Exception:
+        return True
+
+
+def matches_floor(ev: dict, floor_range):
+    if not floor_range:
+        return True
+    floor_val = parse_floor_value(ev)
+    if floor_val is None:
+        return True
+    mn, mx = floor_range
+    if mn is not None and floor_val < mn:
+        return False
+    if mx is not None and floor_val > mx:
+        return False
+    return True
+
+
+def is_listing_active(ev: dict, status_map: dict) -> bool:
+    src = ev.get("__source", "main")
+    lid = ev.get("id") or ev.get("ID") or ev.get("Elan_kodu")
+    try:
+        lid = int(str(lid))
+    except Exception:
+        return True
+    status = status_map.get((src, lid), "active")
+    return status not in {"sold", "rented", "blacklisted"}
+
+
+def query_structured_results(filters: dict):
+    op_code = filters.get("op", "all")
+    prop_code = filters.get("prop", "all")
+    price_code = filters.get("price", "s0")
     min_p, max_p = decode_price_range(price_code)
     results = []
 
-    # MAIN DB
     if os.path.exists(MAIN_DB):
         conn = get_main_conn()
         cur = conn.cursor()
         base = "SELECT * FROM listings"
         flt, params = build_filters_sql(
-            op_code,
-            prop_code,
-            rayon_group,
-            min_price=min_p,
-            max_price=max_p,
-            mode="main",
+            op_code, prop_code, None, min_price=min_p, max_price=max_p, mode="main"
         )
-        sql = base + flt + " ORDER BY date_read DESC, id DESC"
-        cur.execute(sql, params)
+        cur.execute(base + flt + " ORDER BY date_read DESC, id DESC", params)
         for r in cur.fetchall():
             d = dict(r)
             d["__source"] = "main"
             results.append(d)
         conn.close()
 
-    # LOCAL APPROVED
     conn = get_local_conn()
     cur = conn.cursor()
     base = "SELECT * FROM listings_approved"
     flt, params = build_filters_sql(
-        op_code,
-        prop_code,
-        rayon_group,
-        min_price=min_p,
-        max_price=max_p,
-        mode="local",
+        op_code, prop_code, None, min_price=min_p, max_price=max_p, mode="local"
     )
-    sql = base + flt + " ORDER BY date_added DESC, id DESC"
-    cur.execute(sql, params)
+    cur.execute(base + flt + " ORDER BY date_added DESC, id DESC", params)
     for r in cur.fetchall():
         d = dict(r)
         d["__source"] = "local"
         results.append(d)
     conn.close()
 
-    results.sort(key=safe_date, reverse=True)
+    status_map = get_status_map()
+    filtered = []
+    for ev in results:
+        if not is_listing_active(ev, status_map):
+            continue
+        if not matches_region_rayon(ev, filters):
+            continue
+        if not matches_rooms(ev, filters.get("rooms")):
+            continue
+        if not matches_floor(ev, filters.get("floor_range")):
+            continue
+        filtered.append(ev)
 
-    if not results and offset == 0:
-        if edit_msg:
+    filtered.sort(key=safe_date, reverse=True)
+    return filtered
+
+
+def render_op_step(chat_id, message=None):
+    st = search_state.setdefault(chat_id, {})
+    st["step"] = "op"
+    mk = types.InlineKeyboardMarkup()
+    mk.add(
+        types.InlineKeyboardButton("💸 Satılır", callback_data="fs|op|sat"),
+        types.InlineKeyboardButton("🏢 Kirayə", callback_data="fs|op|kir"),
+    )
+    mk.add(types.InlineKeyboardButton("🌐 Hamısı", callback_data="fs|op|all"))
+    mk.add(types.InlineKeyboardButton("❌ Bağla", callback_data="fs|cancel"))
+    structured_send(chat_id, message, "🔍 Əməliyyat növünü seç:", mk)
+
+
+def render_prop_step(chat_id, message=None):
+    st = search_state.setdefault(chat_id, {})
+    st["step"] = "prop"
+    mk = types.InlineKeyboardMarkup()
+    mk.add(
+        types.InlineKeyboardButton("Mənzil", callback_data="fs|tp|m"),
+        types.InlineKeyboardButton("Fərdi ev", callback_data="fs|tp|f"),
+    )
+    mk.add(
+        types.InlineKeyboardButton("Qeyri-yaşayış", callback_data="fs|tp|q"),
+        types.InlineKeyboardButton("Bağ evi", callback_data="fs|tp|b"),
+    )
+    mk.add(
+        types.InlineKeyboardButton("Torpaq", callback_data="fs|tp|t"),
+        types.InlineKeyboardButton("Hamısı", callback_data="fs|tp|all"),
+    )
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="fs|bk"))
+    structured_send(chat_id, message, "🏠 Əmlak tipini seç:", mk)
+
+
+def render_region_step(chat_id, message=None):
+    st = search_state.setdefault(chat_id, {})
+    st["step"] = "region"
+    mk = types.InlineKeyboardMarkup()
+    mk.add(types.InlineKeyboardButton("Bütün ərazilər", callback_data="fs|rg|all"))
+    mk.add(
+        types.InlineKeyboardButton("Bakı", callback_data="fs|rg|bak"),
+        types.InlineKeyboardButton("Abşeron", callback_data="fs|rg|abs"),
+    )
+    mk.add(types.InlineKeyboardButton("Sumqayıt", callback_data="fs|rg|sum"))
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="fs|bk"))
+    structured_send(chat_id, message, "📍 Regionu seç:", mk)
+
+
+def render_rayon_step(chat_id, message=None):
+    st = search_state.setdefault(chat_id, {})
+    st["step"] = "rayon"
+    region = st.get("filters", {}).get("region", "all")
+    rayons = REGION_OPTIONS.get(region, REGION_OPTIONS["all"])["rayons"]
+    mk = types.InlineKeyboardMarkup()
+    mk.add(types.InlineKeyboardButton("Hamısı", callback_data="fs|rn|all"))
+    row = []
+    for idx, rn in enumerate(rayons):
+        row.append(types.InlineKeyboardButton(rn, callback_data=f"fs|rn|{idx}"))
+        if len(row) == 2:
+            mk.row(*row)
+            row = []
+    if row:
+        mk.row(*row)
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="fs|bk"))
+    structured_send(chat_id, message, "📍 Rayon seçin:", mk)
+
+
+def render_price_step(chat_id, message=None):
+    st = search_state.setdefault(chat_id, {})
+    st["step"] = "price"
+    op = st.get("filters", {}).get("op", "sat")
+    mk = types.InlineKeyboardMarkup()
+    if op == "kir":
+        mk.add(
+            types.InlineKeyboardButton("0-500", callback_data="fs|pr|k1"),
+            types.InlineKeyboardButton("520-1000", callback_data="fs|pr|k2"),
+        )
+        mk.add(
+            types.InlineKeyboardButton("1050-1500", callback_data="fs|pr|k3"),
+            types.InlineKeyboardButton("1550-2000", callback_data="fs|pr|k4"),
+        )
+        mk.add(types.InlineKeyboardButton("2000+", callback_data="fs|pr|k5"))
+    else:
+        mk.add(
+            types.InlineKeyboardButton("Limitsiz", callback_data="fs|pr|s0"),
+            types.InlineKeyboardButton("0-50,000", callback_data="fs|pr|s1"),
+        )
+        mk.add(
+            types.InlineKeyboardButton("50,000-100,000", callback_data="fs|pr|s2"),
+            types.InlineKeyboardButton("100,000-200,000", callback_data="fs|pr|s3"),
+        )
+        mk.add(types.InlineKeyboardButton("200,000+", callback_data="fs|pr|s4"))
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="fs|bk"))
+    structured_send(chat_id, message, "💰 Qiymət aralığını seç:", mk)
+
+
+def render_room_step(chat_id, message=None):
+    st = search_state.setdefault(chat_id, {})
+    st["step"] = "rooms"
+    mk = types.InlineKeyboardMarkup()
+    row = []
+    for title, code in ROOM_CODES:
+        row.append(types.InlineKeyboardButton(title, callback_data=f"fs|rm|{code}"))
+        if len(row) == 2:
+            mk.row(*row)
+            row = []
+    if row:
+        mk.row(*row)
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="fs|bk"))
+    structured_send(chat_id, message, "🚪 Otaq sayını seç:", mk)
+
+
+def render_floor_step(chat_id, message=None):
+    st = search_state.setdefault(chat_id, {})
+    st["step"] = "floor"
+    mk = types.InlineKeyboardMarkup()
+    mk.add(
+        types.InlineKeyboardButton("1-3", callback_data="fs|fl|f13"),
+        types.InlineKeyboardButton("4-9", callback_data="fs|fl|f49"),
+    )
+    mk.add(types.InlineKeyboardButton("10+", callback_data="fs|fl|f10"))
+    mk.add(types.InlineKeyboardButton("Limitsiz", callback_data="fs|fl|fall"))
+    mk.add(types.InlineKeyboardButton("✏️ Manual interval", callback_data="fs|fm"))
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="fs|bk"))
+    structured_send(chat_id, message, "🏢 Mərtəbə seçin:", mk)
+
+
+def send_structured_start(chat_id, message=None):
+    reset_search_state(chat_id)
+    search_state[chat_id] = {
+        "mode": "structured",
+        "filters": {},
+        "history": [],
+        "awaiting_floor_range": False,
+        "step": "op",
+    }
+    render_op_step(chat_id, message)
+
+
+def structured_go_back(chat_id, message=None):
+    st = search_state.get(chat_id, {})
+    hist = st.get("history", [])
+    if not hist:
+        reset_search_state(chat_id)
+        if message:
+            try:
+                bot.edit_message_text(
+                    "❌ Filtr ləğv edildi.",
+                    chat_id=message.chat.id,
+                    message_id=message.message_id,
+                )
+            except Exception:
+                bot.send_message(chat_id, "❌ Filtr ləğv edildi.")
+        else:
+            bot.send_message(chat_id, "❌ Filtr ləğv edildi.")
+        return
+
+    prev = hist.pop()
+    st["filters"] = prev.get("filters", {})
+    st["step"] = prev.get("step")
+    step = st["step"]
+    if step == "op":
+        render_op_step(chat_id, message)
+    elif step == "prop":
+        render_prop_step(chat_id, message)
+    elif step == "region":
+        render_region_step(chat_id, message)
+    elif step == "rayon":
+        render_rayon_step(chat_id, message)
+    elif step == "price":
+        render_price_step(chat_id, message)
+    elif step == "rooms":
+        render_room_step(chat_id, message)
+    else:
+        render_floor_step(chat_id, message)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("fs|"))
+def cb_structured(c):
+    if not ensure_allowed_cb(c):
+        return
+    parts = c.data.split("|")
+    action = parts[1]
+    chat_id = c.message.chat.id
+    st = search_state.setdefault(chat_id, {
+        "mode": "structured",
+        "filters": {},
+        "history": [],
+        "awaiting_floor_range": False,
+    })
+
+    if action == "cancel":
+        reset_search_state(chat_id)
+        try:
             bot.edit_message_text(
-                "😕 Uyğun elan tapılmadı.",
+                "❌ Filtr ləğv edildi.",
+                chat_id=c.message.chat.id,
+                message_id=c.message.message_id,
+            )
+        except Exception:
+            bot.send_message(chat_id, "❌ Filtr ləğv edildi.")
+        return
+
+    if action == "bk":
+        structured_go_back(chat_id, c.message)
+        try:
+            bot.answer_callback_query(c.id)
+        except Exception:
+            pass
+        return
+
+    if st.get("mode") != "structured":
+        send_structured_start(chat_id, c.message)
+
+    if action == "op":
+        st.setdefault("filters", {})["op"] = parts[2]
+        structured_push_history(chat_id)
+        render_prop_step(chat_id, c.message)
+    elif action == "tp":
+        st.setdefault("filters", {})["prop"] = parts[2]
+        structured_push_history(chat_id)
+        render_region_step(chat_id, c.message)
+    elif action == "rg":
+        st.setdefault("filters", {})["region"] = parts[2]
+        structured_push_history(chat_id)
+        render_rayon_step(chat_id, c.message)
+    elif action == "rn":
+        val = parts[2]
+        region = st.get("filters", {}).get("region", "all")
+        rayons = REGION_OPTIONS.get(region, REGION_OPTIONS["all"])["rayons"]
+        if val == "all":
+            st.setdefault("filters", {})["rayon"] = "all"
+        else:
+            try:
+                idx = int(val)
+                st.setdefault("filters", {})["rayon"] = rayons[idx]
+            except Exception:
+                st.setdefault("filters", {})["rayon"] = "all"
+        structured_push_history(chat_id)
+        render_price_step(chat_id, c.message)
+    elif action == "pr":
+        st.setdefault("filters", {})["price"] = parts[2]
+        structured_push_history(chat_id)
+        render_room_step(chat_id, c.message)
+    elif action == "rm":
+        st.setdefault("filters", {})["rooms"] = parts[2]
+        structured_push_history(chat_id)
+        render_floor_step(chat_id, c.message)
+    elif action == "fl":
+        st.setdefault("filters", {})["floor_range"] = FLOOR_PRESETS.get(parts[2])
+        perform_structured_search(
+            chat_id,
+            offset=0,
+            edit_msg=(c.message.chat.id, c.message.message_id),
+        )
+    elif action == "fm":
+        structured_push_history(chat_id)
+        st["awaiting_floor_range"] = True
+        st["step"] = "floor_manual"
+        bot.send_message(chat_id, "✏️ Mərtəbə intervalı yazın (məs: 1-3):")
+    elif action == "more":
+        try:
+            off = int(parts[2])
+        except Exception:
+            off = 0
+        _send_structured_page(chat_id, off)
+
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.message_handler(func=lambda m: search_state.get(m.chat.id, {}).get("awaiting_floor_range"))
+def handle_floor_range_input(message):
+    chat_id = message.chat.id
+    st = search_state.get(chat_id, {})
+    txt = (message.text or "").strip()
+    import re as _re
+
+    if not st:
+        return
+
+    if not _re.match(r"^\d+\s*-\s*\d+$", txt):
+        bot.send_message(chat_id, "❌ Düzgün format: 1-3, 4-9 və s.")
+        return
+
+    parts = _re.split(r"-", txt)
+    try:
+        mn = int(parts[0].strip())
+        mx = int(parts[1].strip())
+    except Exception:
+        bot.send_message(chat_id, "❌ Rəqəm yazın (məs: 1-5)")
+        return
+
+    st.setdefault("filters", {})["floor_range"] = (mn, mx)
+    st["awaiting_floor_range"] = False
+    perform_structured_search(chat_id, offset=0, edit_msg=None)
+
+
+def perform_structured_search(chat_id, offset=0, edit_msg=None):
+    st = search_state.get(chat_id)
+    if not st or st.get("mode") != "structured":
+        bot.send_message(chat_id, "Sessiya tapılmadı. Yenidən başlayın.")
+        return
+
+    filters = st.get("filters", {})
+    results = query_structured_results(filters)
+    st["results"] = results
+    st["step"] = "results"
+    inc_limit(chat_id, "structured", 1)
+
+    if not results:
+        if edit_msg:
+            try:
+                bot.edit_message_text(
+                    "😕 Uyğun elan tapılmadı.",
+                    chat_id=edit_msg[0],
+                    message_id=edit_msg[1],
+                )
+                return
+            except Exception:
+                pass
+        bot.send_message(chat_id, "😕 Uyğun elan tapılmadı.")
+        return
+
+    if edit_msg:
+        try:
+            bot.edit_message_text(
+                f"🔍 Tapıldı: {len(results)} elan. İlk nəticələr göstərilir.",
                 chat_id=edit_msg[0],
                 message_id=edit_msg[1],
             )
-        else:
-            bot.send_message(chat_id, "😕 Uyğun elan tapılmadı.")
-        return
+        except Exception:
+            pass
+    else:
+        bot.send_message(chat_id, f"🔍 Tapıldı: {len(results)} elan.")
+
+    _send_structured_page(chat_id, offset)
+
+
+def _send_structured_page(chat_id, offset):
+    st = search_state.get(chat_id, {})
+    results = st.get("results", [])
+    page_size = 20
 
     if offset >= len(results):
         bot.send_message(chat_id, "✅ Bütün uyğun elanlar göstərildi.")
         return
 
     slice_results = results[offset : offset + page_size]
-
-    title_op = {
-        "sat": "Satılır",
-        "kir": "Kirayə verilir",
-        "all": "Bütün əməliyyatlar",
-    }.get(op_code, "Elanlar")
-
-    title_tp = {
-        "m": "Mənzil",
-        "f": "Fərdi yaşayış evi",
-        "q": "Qeyri-yaşayış sahəsi",
-        "b": "Bağ evi",
-        "t": "Torpaq",
-        "all": "Bütün tiplər",
-    }.get(prop_code, "Bütün tiplər")
-
-    title_rn = {
-        "all": "Bütün ərazilər",
-        "bak": "Bakı rayonları",
-        "abs": "Abşeron",
-        "sum": "Sumqayıt",
-    }.get(rayon_group, "Bütün ərazilər")
-
-    if offset == 0:
-        header = f"🔎 {title_op} | {title_tp} | {title_rn}"
-        if edit_msg:
-            bot.edit_message_text(
-                header,
-                chat_id=edit_msg[0],
-                message_id=edit_msg[1],
-            )
-        else:
-            bot.send_message(chat_id, header)
-
     for ev in slice_results:
         send_listing_card(
             chat_id,
@@ -1620,8 +2144,7 @@ def run_structured_search(
         mk = types.InlineKeyboardMarkup()
         mk.add(
             types.InlineKeyboardButton(
-                "➡️ Daha çox göstər",
-                callback_data=f"more|{op_code}|{prop_code}|{rayon_group}|{price_code}|{offset + page_size}",
+                "➡️ Daha çox göstər", callback_data=f"fs|more|{offset + page_size}"
             )
         )
         bot.send_message(chat_id, "⬇️ Daha çox elan üçün:", reply_markup=mk)
@@ -1694,6 +2217,9 @@ def keyword_search_handler(message):
         d["__source"] = "local"
         results.append(d)
     conn.close()
+
+    status_map = get_status_map()
+    results = [r for r in results if is_listing_active(r, status_map)]
 
     if not results:
         bot.send_message(chat_id, "😕 Uyğun elan tapılmadı.")
@@ -2801,6 +3327,8 @@ def main_menu(chat_id):
     mk.add("🏠 Əmlak Sahibləri")
     mk.add("📝 Yeni elan əlavə et")
     mk.add("🔎 Axtarış sistemi")
+    mk.add("✅ Satılan elanlar", "✅ Kirayə verilənlər")
+    mk.add("⛔ Qara siyahı")
     mk.add("⭐ Favorilərim", "📋 Elanlarım")
     mk.add("ℹ️ Haqqında")
 
