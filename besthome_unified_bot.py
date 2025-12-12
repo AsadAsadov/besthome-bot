@@ -221,6 +221,19 @@ def init_local_db():
     """
     )
 
+    # Elan baxışları
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS listing_views (
+            source TEXT,
+            listing_id INTEGER,
+            views INTEGER DEFAULT 0,
+            last_viewed_at TEXT,
+            PRIMARY KEY (source, listing_id)
+        )
+    """
+    )
+
     # Saxlanılan axtarışlar
     cur.execute(
         """
@@ -908,6 +921,67 @@ def fetch_listing_by_source(source: str, listing_id: int):
     return None
 
 
+def record_listing_view(source: str, listing_id: Optional[int]):
+    if not listing_id:
+        return
+    conn = None
+    try:
+        conn = get_local_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO listing_views (source, listing_id, views, last_viewed_at)
+            VALUES (?, ?, 1, ?)
+            ON CONFLICT(source, listing_id) DO UPDATE SET
+                views=listing_views.views + 1,
+                last_viewed_at=excluded.last_viewed_at
+            """,
+            (source, listing_id, datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+    except Exception as e:
+        print("⚠️ View track error:", e)
+    finally:
+        if conn:
+            conn.close()
+
+
+def query_top_viewed_listings(days: int = 7, offset: int = 0, limit: int = None):
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT source, listing_id, views, last_viewed_at
+        FROM listing_views
+        WHERE datetime(last_viewed_at) >= datetime(?)
+        ORDER BY views DESC, last_viewed_at DESC
+        """,
+        (cutoff,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    status_map = get_status_map()
+    enriched = []
+    for r in rows:
+        ev = fetch_listing_by_source(r["source"], r["listing_id"])
+        if not ev:
+            continue
+        if not is_listing_active(ev, status_map):
+            continue
+        ev["__views"] = r["views"]
+        ev["__last_viewed_at"] = r["last_viewed_at"]
+        enriched.append(ev)
+
+    total = len(enriched)
+    if limit is not None:
+        enriched = enriched[offset : offset + limit]
+    else:
+        enriched = enriched[offset:]
+    return enriched, total
+
+
 def get_listing_price(ev: dict) -> Optional[int]:
     return parse_price_value(ev.get("price") or ev.get("Qiymet"))
 
@@ -952,6 +1026,7 @@ def send_main_menu(chat_id: int):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("📝 Yeni elan əlavə et")
     kb.row("🔎 Axtarış sistemi")
+    kb.row("🔥 Ən çox baxılan elanlar")
     kb.row("📂 Elan statusları")
     kb.row("⭐ Favorilərim", "📋 Elanlarım")
     kb.row("ℹ️ Haqqında")
@@ -1016,6 +1091,9 @@ def send_listing_card(
         listing_pk = None
     status = get_listing_status(source, listing_pk) if listing_pk else "active"
 
+    if listing_pk:
+        record_listing_view(source, listing_pk)
+
     text = (
         f"📅 {date_val}\n"
         f"🏠 {title} | {rooms}\n"
@@ -1036,6 +1114,9 @@ def send_listing_card(
     link = ev.get("link") or ev.get("source_link")
     if link:
         text += f"\n🔗 {link}"
+
+    if ev.get("__views") is not None:
+        text += f"\n👁️ Baxış: {ev['__views']}"
 
     mk = types.InlineKeyboardMarkup()
 
@@ -1826,6 +1907,15 @@ def status_back_to_main(message):
     if not ensure_allowed(message):
         return
     send_main_menu(message.chat.id)
+
+
+@bot.message_handler(func=lambda m: m.text == "🔥 Ən çox baxılan elanlar")
+def show_top_viewed(message):
+    if not ensure_allowed(message):
+        return
+    chat_id = message.chat.id
+    reset_search_state(chat_id)
+    send_paginated_results(chat_id, "topviews", params={"days": 7}, page=1)
 
 # =============== 🔎 AXTARIŞ SİSTEMİ ===============
 
@@ -2990,6 +3080,10 @@ def fetch_page_results(chat_id: int, mode: str, params: dict, page: int):
         return query_favorites_page(chat_id, offset=offset, limit=PAGE_SIZE)
     if mode == "statuslist":
         return query_status_page(params.get("status", ""), offset=offset, limit=PAGE_SIZE)
+    if mode == "topviews":
+        return query_top_viewed_listings(
+            days=params.get("days", 7), offset=offset, limit=PAGE_SIZE
+        )
     return [], 0
 
 
@@ -3020,6 +3114,7 @@ def send_paginated_results(
         "phone": "☎️ Bu nömrə ilə",
         "favorites": "⭐ Favorilər",
         "statuslist": params.get("title", "📂 Siyahı"),
+        "topviews": "🔥 Ən çox baxılanlar",
     }
 
     if show_summary:
@@ -4455,6 +4550,18 @@ def show_admin_stats(chat_id):
         """
     )
     top_users = cur.fetchall()
+
+    cur.execute(
+        """
+        SELECT source, listing_id, views
+        FROM listing_views
+        WHERE datetime(last_viewed_at) >= datetime(?)
+        ORDER BY views DESC, last_viewed_at DESC
+        LIMIT 10
+        """,
+        (week_cutoff,),
+    )
+    top_viewed = cur.fetchall()
     conn.close()
 
     # Agents DB
@@ -4488,6 +4595,25 @@ def show_admin_stats(chat_id):
             title = full_name or uname or chat_id_u
             lines.append(f"{idx}) {title} ({uname}) — {total_s}")
         sections.append("\n".join(lines))
+
+    if top_viewed:
+        status_map = get_status_map()
+        lines = ["🔥 Son 7 günün TOP baxılan elanları:"]
+        idx = 1
+        for row in top_viewed:
+            ev = fetch_listing_by_source(row["source"], row["listing_id"])
+            if not ev or not is_listing_active(ev, status_map):
+                continue
+            title = ev.get("prop_type") or ev.get("Emlakin_novu") or "-"
+            rooms = ev.get("rooms") or ev.get("Otaq_sayi") or "-"
+            op = ev.get("operation") or ev.get("Emeliyyat") or "-"
+            price = format_price(ev.get("price") or ev.get("Qiymet"))
+            lines.append(
+                f"{idx}) {title} | {rooms} — {op}, {price} ({row['views']} baxış)"
+            )
+            idx += 1
+        if len(lines) > 1:
+            sections.append("\n".join(lines))
 
     sections.append(
         "📂 Baza xülasəsi:\n"
