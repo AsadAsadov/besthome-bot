@@ -1422,7 +1422,7 @@ def make_whatsapp_url(
         p = "994" + p[1:]
     if len(p) < 9:
         return None
-    return f"https://wa.me/{p}?text={quote(text)}"
+    return f"https://wa.me/{p}?text={quote(text, safe='')}"
 
 
 def build_whatsapp_message(ev: dict) -> str:
@@ -1432,13 +1432,21 @@ def build_whatsapp_message(ev: dict) -> str:
     rooms_val = ev.get("rooms") or ev.get("Otaq_sayi") or ""
     rooms_txt = f"{rooms_val} otaqlı" if rooms_val else "mənzil"
 
-    location = ev.get("rayon") or ev.get("Rayon_Qesebe") or ""
-    if not location:
-        location = ev.get("address") or ev.get("Unvan") or ""
+    location_raw = ev.get("rayon") or ev.get("Rayon_Qesebe") or ""
+    if not location_raw:
+        location_raw = ev.get("address") or ev.get("Unvan") or ""
+
+    loc_suffix = ""
+    loc_lower = location_raw.lower()
+    if location_raw:
+        if "qəs" in loc_lower or "qes" in loc_lower:
+            loc_suffix = " qəsəbəsində"
+        else:
+            loc_suffix = " rayonunda"
 
     body = "Salam, "
-    if location:
-        body += f"{location} paylaşdığınız "
+    if location_raw:
+        body += f"{location_raw}{loc_suffix} paylaşdığınız "
     else:
         body += "paylaşdığınız "
 
