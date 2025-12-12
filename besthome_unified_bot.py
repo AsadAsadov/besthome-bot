@@ -500,7 +500,11 @@ def make_whatsapp_url(
 
 
 def send_listing_card(
-    chat_id: int, ev: dict, source: str = "main", with_fav_button: bool = True
+    chat_id: int,
+    ev: dict,
+    source: str = "main",
+    with_fav_button: bool = True,
+    allow_unfav: bool = False,
 ):
     date_val = (
         ev.get("date_read") or ev.get("date_added") or ev.get("created_at") or "-"
@@ -544,6 +548,14 @@ def send_listing_card(
             types.InlineKeyboardButton(
                 "⭐ Favoriyə əlavə et",
                 callback_data=f"fav|{source}|{ev['id']}",
+            )
+        )
+
+    if allow_unfav and ev.get("id"):
+        mk.add(
+            types.InlineKeyboardButton(
+                "🗑 Favorilərdən çıxart",
+                callback_data=f"favdel|{source}|{ev['id']}",
             )
         )
 
@@ -1166,7 +1178,13 @@ def show_favorites(message):
             if r:
                 ev = dict(r)
         if ev:
-            send_listing_card(chat_id, ev, source=src, with_fav_button=False)
+            send_listing_card(
+                chat_id,
+                ev,
+                source=src,
+                with_fav_button=False,
+                allow_unfav=True,
+            )
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("fav|"))
@@ -1190,6 +1208,28 @@ def cb_add_favorite(c):
     bot.answer_callback_query(c.id, "⭐ Favoriyə əlavə olundu.")
 
 
+@bot.callback_query_handler(func=lambda c: c.data.startswith("favdel|"))
+def cb_remove_favorite(c):
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id
+    _, src, sid = c.data.split("|")
+    lid = int(sid)
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM favorites WHERE chat_id=? AND listing_id=? AND source=?",
+        (chat_id, lid, src),
+    )
+    conn.commit()
+    conn.close()
+    try:
+        bot.delete_message(chat_id, c.message.message_id)
+    except Exception:
+        pass
+    bot.answer_callback_query(c.id, "❌ Favoridən silindi.")
+
+
 # =============== 🔎 AXTARIŞ SİSTEMİ ===============
 
 
@@ -1202,9 +1242,10 @@ def search_system_menu(message):
         types.InlineKeyboardButton("📋 Filtrlə axtar", callback_data="ss|structured")
     )
     mk.add(
-        types.InlineKeyboardButton("🔍 Açar sözlə axtar", callback_data="ss|keyword")
+        types.InlineKeyboardButton(
+            "🔍 Açar sözlə və nömrə ilə axtar", callback_data="ss|text"
+        )
     )
-    mk.add(types.InlineKeyboardButton("☎️ Nömrə ilə axtar", callback_data="ss|phone"))
     bot.send_message(
         message.chat.id,
         "🔎 Axtarış metodunu seçin:",
@@ -1249,6 +1290,23 @@ def cb_search_select(c):
         msg = bot.send_message(chat_id, "☎️ Axtarmaq istədiyiniz nömrəni yazın:")
         bot.register_next_step_handler(msg, phone_search_handler)
 
+    elif mode == "text":
+        mk = types.InlineKeyboardMarkup()
+        mk.add(
+            types.InlineKeyboardButton(
+                "🔍 Açar sözlə axtar", callback_data="ss|keyword"
+            )
+        )
+        mk.add(
+            types.InlineKeyboardButton("☎️ Nömrə ilə axtar", callback_data="ss|phone")
+        )
+        bot.edit_message_text(
+            "Axtarış növünü seç:",
+            chat_id=chat_id,
+            message_id=c.message.message_id,
+            reply_markup=mk,
+        )
+
     try:
         bot.answer_callback_query(c.id)
     except:
@@ -1269,6 +1327,7 @@ PROP_TYPES = {
     "f": "fərdi yaşayış evi",
     "q": "qeyri-yaşayış sahəsi",
     "b": "bağ evi",
+    "h": "həyət evi",
     "t": "torpaq",
 }
 
@@ -1341,6 +1400,33 @@ RAYON_GROUPS = {
         "sumqayit",
     ],
 }
+
+BAKU_DISTRICTS = [
+    ("bn", "Binəqədi rayonu", ["binəqədi", "bineqedi", "binaqedi"]),
+    ("qd", "Qaradağ rayonu", ["qaradağ", "qaradag"]),
+    ("xz", "Xəzər rayonu", ["xəzər", "xezər", "xezar", "xazar"]),
+    ("sb", "Səbail rayonu", ["səbail", "sabail"]),
+    ("sn", "Sabunçu rayonu", ["sabunçu", "sabuncu", "sabunchu"]),
+    ("sr", "Suraxanı rayonu", ["suraxanı", "suraxani", "surakhani"]),
+    ("nr", "Nərimanov rayonu", ["nərimanov", "nerimanov", "narimanov"]),
+    ("ns", "Nəsimi rayonu", ["nəsimi", "nesimi", "nasimi"]),
+    ("nz", "Nizami rayonu", ["nizami", "nizami rayonu"]),
+    ("pr", "Pirallahı rayonu", ["pirallahı", "pirallahi"]),
+    ("xt", "Xətai rayonu", ["xətai", "xetai", "khatai"]),
+    ("ys", "Yasamal rayonu", ["yasamal", "yasamal rayonu"]),
+]
+
+for code, name, aliases in BAKU_DISTRICTS:
+    RAYON_GROUPS[f"bak_{code}"] = aliases + [name.lower()]
+
+
+def detect_baku_rayon(text: str):
+    low = (text or "").lower()
+    for code, name, aliases in BAKU_DISTRICTS:
+        for kw in aliases + [name.lower()]:
+            if kw in low:
+                return kw
+    return None
 
 
 def decode_price_range(code: str):
@@ -1443,7 +1529,10 @@ def cb_s_op(c):
         types.InlineKeyboardButton("Bağ evi", callback_data=f"s_tp|{op}|b"),
     )
     mk.add(
+        types.InlineKeyboardButton("Həyət evi", callback_data=f"s_tp|{op}|h"),
         types.InlineKeyboardButton("Torpaq", callback_data=f"s_tp|{op}|t"),
+    )
+    mk.add(
         types.InlineKeyboardButton("Hamısı", callback_data=f"s_tp|{op}|all"),
     )
     bot.edit_message_text(
@@ -1485,6 +1574,41 @@ def cb_s_rg(c):
     if not ensure_allowed_cb(c):
         return
     _, op, tp, rg = c.data.split("|")
+    if rg == "bak":
+        mk = types.InlineKeyboardMarkup()
+        row = []
+        for code, name, _ in BAKU_DISTRICTS:
+            row.append(
+                types.InlineKeyboardButton(
+                    name, callback_data=f"s_bak|{op}|{tp}|{code}"
+                )
+            )
+            if len(row) == 2:
+                mk.add(*row)
+                row = []
+        if row:
+            mk.add(*row)
+        bot.edit_message_text(
+            "📍 Bakı rayonunu seç:",
+            chat_id=c.message.chat.id,
+            message_id=c.message.message_id,
+            reply_markup=mk,
+        )
+        return
+
+    send_price_selection(c.message.chat.id, c.message.message_id, op, tp, rg)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("s_bak|"))
+def cb_s_baku_district(c):
+    if not ensure_allowed_cb(c):
+        return
+    _, op, tp, code = c.data.split("|")
+    rg = f"bak_{code}"
+    send_price_selection(c.message.chat.id, c.message.message_id, op, tp, rg)
+
+
+def send_price_selection(chat_id, message_id, op, tp, rg):
     mk = types.InlineKeyboardMarkup()
     if op == "kir":
         mk.add(
@@ -1528,8 +1652,8 @@ def cb_s_rg(c):
         )
     bot.edit_message_text(
         "💰 Qiymət aralığını seç:",
-        chat_id=c.message.chat.id,
-        message_id=c.message.message_id,
+        chat_id=chat_id,
+        message_id=message_id,
         reply_markup=mk,
     )
 
@@ -1644,16 +1768,21 @@ def run_structured_search(
         "f": "Fərdi yaşayış evi",
         "q": "Qeyri-yaşayış sahəsi",
         "b": "Bağ evi",
+        "h": "Həyət evi",
         "t": "Torpaq",
         "all": "Bütün tiplər",
     }.get(prop_code, "Bütün tiplər")
 
-    title_rn = {
+    title_rn_map = {
         "all": "Bütün ərazilər",
         "bak": "Bakı rayonları",
         "abs": "Abşeron",
         "sum": "Sumqayıt",
-    }.get(rayon_group, "Bütün ərazilər")
+    }
+    for code, name, _ in BAKU_DISTRICTS:
+        title_rn_map[f"bak_{code}"] = name
+
+    title_rn = title_rn_map.get(rayon_group, "Bütün ərazilər")
 
     if offset == 0:
         header = f"🔎 {title_op} | {title_tp} | {title_rn}"
@@ -1704,6 +1833,8 @@ def keyword_search_handler(message):
     # 🔥 Sorğunu sözlərə ayırırıq
     words = [w for w in text.split() if w]
 
+    rayon_hint = detect_baku_rayon(text)
+
     results = []
 
     # --- FILTER FUNKSIYASI ---
@@ -1730,6 +1861,15 @@ def keyword_search_handler(message):
         cur = conn.cursor()
 
         sql_where, params = build_multi_like_sql(FIELDS_MAIN)
+        if rayon_hint:
+            extra = "(" + " OR ".join([
+                "LOWER(address) LIKE ?",
+                "LOWER(summary) LIKE ?",
+                "LOWER(COALESCE(rayon,'')) LIKE ?",
+                "LOWER(COALESCE(metro,'')) LIKE ?",
+            ]) + ")"
+            sql_where = f"{sql_where} AND {extra}"
+            params.extend([f"%{rayon_hint}%"] * 4)
         sql = f"SELECT * FROM listings WHERE {sql_where} ORDER BY date_read DESC LIMIT 5000"
 
         cur.execute(sql, params)
@@ -1744,6 +1884,14 @@ def keyword_search_handler(message):
     cur = conn.cursor()
 
     sql_where, params = build_multi_like_sql(FIELDS_LOCAL)
+    if rayon_hint:
+        extra = "(" + " OR ".join([
+            "LOWER(rayon) LIKE ?",
+            "LOWER(summary) LIKE ?",
+            "LOWER(COALESCE(metro,'')) LIKE ?",
+        ]) + ")"
+        sql_where = f"{sql_where} AND {extra}"
+        params.extend([f"%{rayon_hint}%"] * 3)
     sql = f"SELECT * FROM listings_approved WHERE {sql_where} ORDER BY date_added DESC LIMIT 5000"
 
     cur.execute(sql, params)
@@ -2659,6 +2807,21 @@ def show_admin_stats(chat_id):
     if not is_admin(chat_id):
         return
 
+    sale_main = rent_main = total_main = 0
+    if os.path.exists(MAIN_DB):
+        conn_m = get_main_conn()
+        cur_m = conn_m.cursor()
+        cur_m.execute("SELECT COUNT(*) FROM listings")
+        total_main = cur_m.fetchone()[0] or 0
+        cur_m.execute("SELECT COUNT(*) FROM listings WHERE LOWER(operation) LIKE ?", ("%sat%",))
+        sale_main = cur_m.fetchone()[0] or 0
+        cur_m.execute(
+            "SELECT COUNT(*) FROM listings WHERE LOWER(operation) LIKE ?",
+            ("%kir%",),
+        )
+        rent_main = cur_m.fetchone()[0] or 0
+        conn_m.close()
+
     # Local DB
     conn = get_local_conn()
     cur = conn.cursor()
@@ -2677,7 +2840,23 @@ def show_admin_stats(chat_id):
     cur.execute("SELECT COUNT(*) FROM listings_approved")
     total_local = cur.fetchone()[0] or 0
 
+    cur.execute(
+        "SELECT COUNT(*) FROM listings_approved WHERE LOWER(operation) LIKE ?",
+        ("%sat%",),
+    )
+    sale_local = cur.fetchone()[0] or 0
+
+    cur.execute(
+        "SELECT COUNT(*) FROM listings_approved WHERE LOWER(operation) LIKE ?",
+        ("%kir%",),
+    )
+    rent_local = cur.fetchone()[0] or 0
+
     conn.close()
+
+    total_sale = sale_main + sale_local
+    total_rent = rent_main + rent_local
+    total_all_listings = total_main + total_local
 
     # Agents DB
     try:
@@ -2693,6 +2872,9 @@ def show_admin_stats(chat_id):
         "📊 *Admin Statistikası*\n"
         f"👥 Ümumi istifadəçi: {total_users}\n"
         f"✅ Aktiv: {active_users}\n"
+        f"🏠 Satılır elanları: {total_sale}\n"
+        f"🏢 Kirayə elanları: {total_rent}\n"
+        f"📦 Cəmi elan (əsas + lokal): {total_all_listings}\n"
         f"📢 Yeni elanlar (cəmi): {total_new}\n"
         f"⏳ Gözləyən elanlar: {pending_new}\n"
         f"📂 Təsdiqlənmiş lokal elanlar: {total_local}\n"
