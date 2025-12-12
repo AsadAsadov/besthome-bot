@@ -223,6 +223,19 @@ def init_local_db():
     """
     )
 
+    # Ödənişlər
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            plan TEXT,
+            amount INTEGER,
+            approved_at TEXT DEFAULT (CURRENT_TIMESTAMP)
+        )
+    """
+    )
+
     # Limitlər
     cur.execute(
         """
@@ -625,6 +638,20 @@ def set_payment_note(chat_id: int, note: str):
     cur.execute(
         "UPDATE subscriptions SET last_payment_note=? WHERE chat_id=?",
         (note, chat_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def log_approved_payment(chat_id: int, plan: str, amount: int):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO payments (chat_id, plan, amount, approved_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (chat_id, plan, amount, datetime.utcnow().isoformat()),
     )
     conn.commit()
     conn.close()
@@ -1676,6 +1703,9 @@ def cb_pay_admin(c):
     if action == "ok":
         expires = datetime.utcnow() + timedelta(days=plan["days"])
         set_subscription(uid, plan["title"], expires, is_active=1, is_demo=0, note=f"plan:{plan_key}")
+        amount_val = parse_price_value(plan.get("price")) or 0
+        if amount_val > 0:
+            log_approved_payment(uid, plan["title"], amount_val)
         try:
             bot.send_message(
                 uid,
@@ -4458,6 +4488,11 @@ def open_admin_panel(message):
     )
     mk.add(
         types.InlineKeyboardButton(
+            "📊 Aylıq gəlir hesabatı", callback_data="adm|revenue"
+        )
+    )
+    mk.add(
+        types.InlineKeyboardButton(
             "📤 Vasitəçilərə bildiriş", callback_data="adm|agents_broadcast"
         )
     )
@@ -4504,6 +4539,9 @@ def cb_admin(c):
 
     elif cmd == "stats":
         show_admin_stats(c.message.chat.id)
+
+    elif cmd == "revenue":
+        show_revenue_report(c.message.chat.id)
 
     elif cmd == "agents_broadcast":
         msg = bot.send_message(
@@ -5296,6 +5334,74 @@ def show_admin_stats(chat_id):
     )
 
     bot.send_message(chat_id, "\n\n".join(sections), parse_mode="Markdown")
+
+
+def show_revenue_report(chat_id: int):
+    if not is_admin(chat_id):
+        return
+
+    def month_range(months_back: int):
+        now = datetime.utcnow()
+        year = now.year
+        month = now.month - months_back
+        while month <= 0:
+            month += 12
+            year -= 1
+        start = datetime(year, month, 1)
+        if month == 12:
+            end = datetime(year + 1, 1, 1)
+        else:
+            end = datetime(year, month + 1, 1)
+        return start, end
+
+    conn = get_local_conn()
+    cur = conn.cursor()
+
+    def month_stats(offset: int):
+        start, end = month_range(offset)
+        cur.execute(
+            """
+            SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS cnt
+            FROM payments
+            WHERE datetime(approved_at) >= datetime(?)
+              AND datetime(approved_at) < datetime(?)
+            """,
+            (start.isoformat(), end.isoformat()),
+        )
+        row = cur.fetchone() or (0, 0)
+        return start, row[0] or 0, row[1] or 0
+
+    cur.execute(
+        """
+        SELECT COUNT(*) FROM subscriptions
+        WHERE is_active=1
+          AND is_demo=0
+          AND expires_at IS NOT NULL
+          AND datetime(expires_at) >= datetime('now')
+        """
+    )
+    active_subs = cur.fetchone()[0] or 0
+
+    current_start, current_total, current_count = month_stats(0)
+
+    history_lines = []
+    for i in range(1, 4):
+        m_start, total, cnt = month_stats(i)
+        history_lines.append(
+            f"{m_start.strftime('%B %Y')}: {total} AZN ({cnt} ödəniş)"
+        )
+
+    conn.close()
+
+    report_lines = [
+        f"📅 {current_start.strftime('%B %Y')} (cari ay):\n"
+        f"• Toplam gəlir: {current_total} AZN\n"
+        f"• Ödəniş sayı: {current_count}\n"
+        f"• Aktiv abunə sayı: {active_subs}",
+        "📈 Son 3 ay:\n" + "\n".join(history_lines),
+    ]
+
+    bot.send_message(chat_id, "\n\n".join(report_lines))
 
 
 def admin_agents_broadcast(message):
