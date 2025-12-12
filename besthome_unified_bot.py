@@ -1931,7 +1931,6 @@ def search_system_menu(message):
     mk.add(
         types.InlineKeyboardButton("🔍 Açar sözlə axtar", callback_data="ss|keyword")
     )
-    mk.add(types.InlineKeyboardButton("🔥 Ağıllı axtarış", callback_data="ss|smart"))
     mk.add(types.InlineKeyboardButton("☎️ Nömrə ilə axtar", callback_data="ss|phone"))
     bot.send_message(
         message.chat.id,
