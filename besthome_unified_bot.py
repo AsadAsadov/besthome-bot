@@ -1997,13 +1997,10 @@ def send_listing_card(
             )
         )
 
-    wa_url = make_whatsapp_url(phone)
-    if wa_url and listing_pk:
-        mk.add(
-            types.InlineKeyboardButton(
-                "💬 WhatsApp-da yaz", callback_data=f"wa|{source}|{listing_pk}"
-            )
-        )
+    wa_message = build_whatsapp_message(ev)
+    wa_url = make_whatsapp_url(phone, wa_message)
+    if wa_url:
+        mk.add(types.InlineKeyboardButton("💬 WhatsApp-da yaz", url=wa_url))
 
     if extra_buttons:
         for btn in extra_buttons:
@@ -4434,7 +4431,7 @@ def render_price_step(chat_id, message=None):
         mk.add(types.InlineKeyboardButton("2000+", callback_data="fs|pr|k5"))
     else:
         mk.add(
-            types.InlineKeyboardButton("Limitsiz", callback_data="fs|pr|s0"),
+            types.InlineKeyboardButton("Hamısı", callback_data="fs|pr|s0"),
             types.InlineKeyboardButton("0-50,000", callback_data="fs|pr|s1"),
         )
         mk.add(
@@ -4471,8 +4468,8 @@ def render_floor_step(chat_id, message=None):
         types.InlineKeyboardButton("4-9", callback_data="fs|fl|f49"),
     )
     mk.add(types.InlineKeyboardButton("10+", callback_data="fs|fl|f10"))
-    mk.add(types.InlineKeyboardButton("Limitsiz", callback_data="fs|fl|fall"))
-    mk.add(types.InlineKeyboardButton("✏️ Manual interval", callback_data="fs|fm"))
+    mk.add(types.InlineKeyboardButton("Hamısı", callback_data="fs|fl|fall"))
+    mk.add(types.InlineKeyboardButton("✏️ Əl ilə daxil et", callback_data="fs|fm"))
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="fs|bk"))
     structured_send(chat_id, message, "🏢 Mərtəbə seçin:", mk)
 
@@ -4609,7 +4606,7 @@ def cb_structured(c):
         structured_push_history(chat_id)
         st["awaiting_floor_range"] = True
         st["step"] = "floor_manual"
-        bot.send_message(chat_id, "✏️ Mərtəbə intervalı yazın (məs: 1-3):")
+        bot.send_message(chat_id, "✏️ Mərtəbəni yazın (məs: 3 və ya 1-3):")
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -4626,16 +4623,23 @@ def handle_floor_range_input(message):
     if not st:
         return
 
-    if not _re.match(r"^\d+\s*-\s*\d+$", txt):
-        bot.send_message(chat_id, "❌ Düzgün format: 1-3, 4-9 və s.")
-        return
+    txt_clean = _re.sub(r"\s+", "", txt)
 
-    parts = _re.split(r"-", txt)
-    try:
-        mn = int(parts[0].strip())
-        mx = int(parts[1].strip())
-    except Exception:
-        bot.send_message(chat_id, "❌ Rəqəm yazın (məs: 1-5)")
+    single_match = _re.fullmatch(r"\d+", txt_clean)
+    range_match = _re.fullmatch(r"\d+-\d+", txt_clean)
+
+    if single_match:
+        mn = mx = int(txt_clean)
+    elif range_match:
+        parts = txt_clean.split("-")
+        try:
+            mn = int(parts[0])
+            mx = int(parts[1])
+        except Exception:
+            bot.send_message(chat_id, "❌ Yanlış format. Məsələn: 3 və ya 1-2")
+            return
+    else:
+        bot.send_message(chat_id, "❌ Yanlış format. Məsələn: 3 və ya 1-2")
         return
 
     st.setdefault("filters", {})["floor_range"] = (mn, mx)
