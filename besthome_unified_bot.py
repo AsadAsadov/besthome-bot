@@ -68,6 +68,7 @@ bot = telebot.TeleBot(BOT_TOKEN)
 user_state = {}  # Yeni elan proses state
 search_state = {}  # Açar sözlə axtarış paging state
 search_reminder_shown = set()  # Session-level reminder flag
+session_interactions = {}
 
 # Pagination
 PAGE_SIZE = 20
@@ -233,6 +234,19 @@ def init_local_db():
             views INTEGER DEFAULT 0,
             last_viewed_at TEXT,
             PRIMARY KEY (source, listing_id)
+        )
+    """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS listing_stats (
+            listing_id INTEGER PRIMARY KEY,
+            views INTEGER DEFAULT 0,
+            favorites INTEGER DEFAULT 0,
+            contacts INTEGER DEFAULT 0,
+            popularity_score INTEGER DEFAULT 0,
+            last_interaction TEXT
         )
     """
     )
@@ -930,7 +944,70 @@ def fetch_listing_by_source(source: str, listing_id: int):
     return None
 
 
-def record_listing_view(source: str, listing_id: Optional[int]):
+def fetch_listing_by_any(listing_id: int):
+    for src in ("main", "local", "agents"):
+        ev = fetch_listing_by_source(src, listing_id)
+        if ev:
+            return ev
+    return None
+
+
+def should_track_interaction(chat_id: Optional[int], listing_id: int, action: str) -> bool:
+    if chat_id is None:
+        return True
+    cache = session_interactions.setdefault(chat_id, set())
+    key = (action, listing_id)
+    if key in cache:
+        return False
+    cache.add(key)
+    return True
+
+
+def record_listing_stat(listing_id: Optional[int], action: str, chat_id: Optional[int] = None):
+    if not listing_id:
+        return
+    if not should_track_interaction(chat_id, listing_id, action):
+        return
+    field_map = {"view": "views", "favorite": "favorites", "contact": "contacts"}
+    field = field_map.get(action)
+    if not field:
+        return
+    now_iso = datetime.utcnow().isoformat()
+    conn = None
+    try:
+        conn = get_local_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO listing_stats (listing_id, last_interaction)
+            VALUES (?, ?)
+            ON CONFLICT(listing_id) DO UPDATE SET
+                last_interaction=excluded.last_interaction
+            """,
+            (listing_id, now_iso),
+        )
+        cur.execute(
+            f"UPDATE listing_stats SET {field}={field}+1 WHERE listing_id=?",
+            (listing_id,),
+        )
+        cur.execute(
+            """
+            UPDATE listing_stats
+            SET popularity_score = views * 1 + favorites * 3 + contacts * 5,
+                last_interaction = ?
+            WHERE listing_id = ?
+            """,
+            (now_iso, listing_id),
+        )
+        conn.commit()
+    except Exception as e:
+        print("⚠️ Listing stat error:", e)
+    finally:
+        if conn:
+            conn.close()
+
+
+def record_listing_view(source: str, listing_id: Optional[int], chat_id: Optional[int] = None):
     if not listing_id:
         return
     conn = None
@@ -953,41 +1030,44 @@ def record_listing_view(source: str, listing_id: Optional[int]):
     finally:
         if conn:
             conn.close()
+    record_listing_stat(listing_id, "view", chat_id)
 
 
 def query_top_viewed_listings(days: int = 7, offset: int = 0, limit: int = None):
-    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
     conn = get_local_conn()
     cur = conn.cursor()
     cur.execute(
-        """
-        SELECT source, listing_id, views, last_viewed_at
-        FROM listing_views
-        WHERE datetime(last_viewed_at) >= datetime(?)
-        ORDER BY views DESC, last_viewed_at DESC
-        """,
-        (cutoff,),
+        "SELECT COUNT(*) FROM listing_stats WHERE popularity_score > 0"
     )
+    total = cur.fetchone()[0] or 0
+    sql = (
+        "SELECT listing_id, views, favorites, contacts, popularity_score, last_interaction "
+        "FROM listing_stats WHERE popularity_score > 0 "
+        "ORDER BY popularity_score DESC, datetime(last_interaction) DESC"
+    )
+    params = []
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+    cur.execute(sql, params)
     rows = cur.fetchall()
     conn.close()
 
     status_map = get_status_map()
     enriched = []
     for r in rows:
-        ev = fetch_listing_by_source(r["source"], r["listing_id"])
+        ev = fetch_listing_by_any(r["listing_id"])
         if not ev:
             continue
         if not is_listing_active(ev, status_map):
             continue
         ev["__views"] = r["views"]
-        ev["__last_viewed_at"] = r["last_viewed_at"]
+        ev["__favorites"] = r["favorites"]
+        ev["__contacts"] = r["contacts"]
+        ev["__popularity"] = r["popularity_score"]
+        ev["__last_interaction"] = r["last_interaction"]
         enriched.append(ev)
 
-    total = len(enriched)
-    if limit is not None:
-        enriched = enriched[offset : offset + limit]
-    else:
-        enriched = enriched[offset:]
     return enriched, total
 
 
@@ -1035,11 +1115,11 @@ def send_main_menu(chat_id: int):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("📝 Yeni elan əlavə et")
     kb.row("🔎 Axtarış sistemi")
-    kb.row("🔥 Ən çox baxılan elanlar")
     kb.row("📂 Elan statusları")
     kb.row("⭐ Favorilərim", "📋 Elanlarım")
     kb.row("ℹ️ Haqqında")
     if is_admin(chat_id):
+        kb.row("🔥 Ən çox baxılan elanlar")
         kb.row("📊 Admin Panel")
     bot.send_message(chat_id, "🏠 Əsas menyu:", reply_markup=kb)
 
@@ -1070,6 +1150,8 @@ def send_listing_card(
     with_fav_button: bool = True,
     status_controls: bool = True,
     extra_buttons=None,
+    track_view: bool = False,
+    viewer_id: Optional[int] = None,
 ):
     date_val = (
         ev.get("date_read") or ev.get("date_added") or ev.get("created_at") or "-"
@@ -1100,8 +1182,8 @@ def send_listing_card(
         listing_pk = None
     status = get_listing_status(source, listing_pk) if listing_pk else "active"
 
-    if listing_pk:
-        record_listing_view(source, listing_pk)
+    if listing_pk and track_view:
+        record_listing_view(source, listing_pk, viewer_id)
 
     badges = []
     try:
@@ -1171,8 +1253,12 @@ def send_listing_card(
         )
 
     wa_url = make_whatsapp_url(phone)
-    if wa_url:
-        mk.add(types.InlineKeyboardButton("💬 WhatsApp-da yaz", url=wa_url))
+    if wa_url and listing_pk:
+        mk.add(
+            types.InlineKeyboardButton(
+                "💬 WhatsApp-da yaz", callback_data=f"wa|{source}|{listing_pk}"
+            )
+        )
 
     if extra_buttons:
         for btn in extra_buttons:
@@ -1180,6 +1266,18 @@ def send_listing_card(
 
     if link:
         mk.add(types.InlineKeyboardButton("🌐 Elana bax", url=link))
+
+    stats_parts = []
+    if ev.get("__views") is not None:
+        stats_parts.append(f"👁 Baxış sayı: {ev['__views']}")
+    if ev.get("__favorites") is not None:
+        stats_parts.append(f"⭐ Favorit sayı: {ev['__favorites']}")
+    if ev.get("__contacts") is not None:
+        stats_parts.append(f"📞 Əlaqə sayı: {ev['__contacts']}")
+    if ev.get("__popularity") is not None:
+        stats_parts.append(f"🔥 Populyarlıq skoru: {ev['__popularity']}")
+    if stats_parts:
+        text += "\n" + "\n".join(stats_parts)
 
     bot.send_message(chat_id, text, reply_markup=mk)
 
@@ -1803,10 +1901,41 @@ def cb_add_favorite(c):
     """,
         (chat_id, lid, src, datetime.utcnow().isoformat()),
     )
+    added = cur.rowcount
     conn.commit()
     conn.close()
     record_favorite_price(src, lid)
+    if added:
+        record_listing_stat(lid, "favorite", chat_id)
     bot.answer_callback_query(c.id, "⭐ Favoriyə əlavə olundu.")
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("wa|"))
+def cb_whatsapp_click(c):
+    if not ensure_allowed_cb(c):
+        return
+    parts = c.data.split("|")
+    if len(parts) != 3:
+        return
+    src, sid = parts[1], parts[2]
+    try:
+        lid = int(sid)
+    except Exception:
+        lid = None
+    ev = fetch_listing_by_source(src, lid) if lid else None
+    if not ev:
+        bot.answer_callback_query(c.id, "❌ Elan tapılmadı.")
+        return
+    phone = ev.get("phone") or ev.get("Elaqe_nomresi")
+    wa_url = make_whatsapp_url(phone)
+    record_listing_stat(lid, "contact", c.message.chat.id)
+    if wa_url:
+        try:
+            bot.answer_callback_query(c.id, url=wa_url)
+        except Exception:
+            pass
+    else:
+        bot.answer_callback_query(c.id, "📞 Nömrə tapılmadı.")
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("favdel|"))
@@ -1967,7 +2096,8 @@ def status_back_to_main(message):
 
 @bot.message_handler(func=lambda m: m.text == "🔥 Ən çox baxılan elanlar")
 def show_top_viewed(message):
-    if not ensure_allowed(message):
+    if not is_admin(message.chat.id):
+        bot.send_message(message.chat.id, "❌ Bu bölmə yalnız admin üçündür.")
         return
     chat_id = message.chat.id
     reset_search_state(chat_id)
@@ -3151,6 +3281,10 @@ def send_paginated_results(
     loading_ref=None,
     show_summary: bool = True,
 ):
+    if mode == "topviews" and not is_admin(chat_id):
+        if not replace_loading_message(loading_ref, "❌ Bu bölmə yalnız admin üçündür."):
+            bot.send_message(chat_id, "❌ Bu bölmə yalnız admin üçündür.")
+        return
     items, total = fetch_page_results(chat_id, mode, params, page)
     total_pages = compute_total_pages(total) if total else 1
     if page > total_pages:
@@ -3180,6 +3314,7 @@ def send_paginated_results(
             bot.send_message(chat_id, summary_text)
 
     for item in items:
+        track_view = mode in ("favorites", "statuslist")
         if mode == "favorites":
             ev = item["data"]
             src = item.get("source", ev.get("__source", "main"))
@@ -3194,6 +3329,8 @@ def send_paginated_results(
                 with_fav_button=False,
                 status_controls=False,
                 extra_buttons=[rm_btn],
+                track_view=track_view,
+                viewer_id=chat_id,
             )
         elif mode == "statuslist":
             ev = item["data"]
@@ -3210,6 +3347,8 @@ def send_paginated_results(
                 with_fav_button=True,
                 status_controls=False,
                 extra_buttons=[btn],
+                track_view=track_view,
+                viewer_id=chat_id,
             )
         else:
             ev = item
@@ -3218,6 +3357,8 @@ def send_paginated_results(
                 ev,
                 source=ev.get("__source", "main"),
                 with_fav_button=True,
+                track_view=False,
+                viewer_id=chat_id,
             )
 
     nav = build_pagination_keyboard(page, total_pages)
@@ -4020,6 +4161,9 @@ def open_admin_panel(message):
             "🚀 Yeniləmə göndər", callback_data="adm|notify_update"
         )
     )
+    mk.add(
+        types.InlineKeyboardButton("🔥 Ən çox baxılan elanlar", callback_data="adm|topviews")
+    )
 
     bot.send_message(message.chat.id, "🛠 Admin Panel:", reply_markup=mk)
 
@@ -4069,6 +4213,10 @@ def cb_admin(c):
 
     elif cmd == "notify_update":
         broadcast_bot_update(c.message.chat.id)
+
+    elif cmd == "topviews":
+        reset_search_state(c.message.chat.id)
+        send_paginated_results(c.message.chat.id, "topviews", params={"days": 7}, page=1)
 
     try:
         bot.answer_callback_query(c.id)
@@ -4609,13 +4757,12 @@ def show_admin_stats(chat_id):
 
     cur.execute(
         """
-        SELECT source, listing_id, views
-        FROM listing_views
-        WHERE datetime(last_viewed_at) >= datetime(?)
-        ORDER BY views DESC, last_viewed_at DESC
+        SELECT listing_id, views, favorites, contacts, popularity_score
+        FROM listing_stats
+        WHERE popularity_score > 0
+        ORDER BY popularity_score DESC, datetime(last_interaction) DESC
         LIMIT 10
-        """,
-        (week_cutoff,),
+        """
     )
     top_viewed = cur.fetchall()
     conn.close()
@@ -4654,18 +4801,22 @@ def show_admin_stats(chat_id):
 
     if top_viewed:
         status_map = get_status_map()
-        lines = ["🔥 Son 7 günün TOP baxılan elanları:"]
+        lines = ["🔥 TOP baxılan elanlar:"]
         idx = 1
         for row in top_viewed:
-            ev = fetch_listing_by_source(row["source"], row["listing_id"])
+            ev = fetch_listing_by_any(row["listing_id"])
             if not ev or not is_listing_active(ev, status_map):
                 continue
             title = ev.get("prop_type") or ev.get("Emlakin_novu") or "-"
             rooms = ev.get("rooms") or ev.get("Otaq_sayi") or "-"
             op = ev.get("operation") or ev.get("Emeliyyat") or "-"
             price = format_price(ev.get("price") or ev.get("Qiymet"))
+            stats_txt = (
+                f"👁 {row['views']} | ⭐ {row['favorites']} | "
+                f"📞 {row['contacts']} | 🔥 {row['popularity_score']}"
+            )
             lines.append(
-                f"{idx}) {title} | {rooms} — {op}, {price} ({row['views']} baxış)"
+                f"{idx}) {title} | {rooms} — {op}, {price} ({stats_txt})"
             )
             idx += 1
         if len(lines) > 1:
