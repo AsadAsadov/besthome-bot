@@ -71,6 +71,8 @@ search_reminder_shown = set()  # Session-level reminder flag
 
 # Pagination
 PAGE_SIZE = 20
+NEW_LISTING_WINDOW_HOURS = 24
+HOT_VIEWS_THRESHOLD = 50
 
 
 def get_main_conn():
@@ -1101,9 +1103,27 @@ def send_listing_card(
     if listing_pk:
         record_listing_view(source, listing_pk)
 
+    badges = []
+    try:
+        if datetime.utcnow() - safe_date(ev) <= timedelta(hours=NEW_LISTING_WINDOW_HOURS):
+            badges.append("🆕")
+    except Exception:
+        pass
+
+    try:
+        if ev.get("__views") is not None and ev.get("__views") >= HOT_VIEWS_THRESHOLD:
+            badges.append("🔥")
+    except Exception:
+        pass
+
+    if ev.get("__price_drop"):
+        badges.append("📉")
+
+    badge_txt = (" ".join(badges) + " ") if badges else ""
+
     text = (
         f"📅 {date_val}\n"
-        f"🏠 {title} | {rooms}\n"
+        f"🏠 {badge_txt}{title} | {rooms}\n"
         f"💸 {op} | 💰 {price} {cur}\n"
         f"📍 {location or '-'}\n"
         f"📞 {phone} ({cname})\n"
@@ -2585,6 +2605,7 @@ def check_favorite_price_drops():
                     f"📉 Yeni qiymət: {format_price(current_price)} {currency}"
                 )
                 bot.send_message(chat_id, msg)
+                ev["__price_drop"] = True
                 send_listing_card(
                     chat_id,
                     ev,
