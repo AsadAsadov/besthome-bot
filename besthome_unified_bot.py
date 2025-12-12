@@ -19,7 +19,8 @@ import zipfile
 import sqlite3
 import threading
 import math
-from datetime import datetime, date
+import re
+from datetime import datetime, date, timedelta
 from urllib.parse import quote
 
 import requests
@@ -305,6 +306,66 @@ def init_main_db_indices():
         print("⚠️ İndeks yaradarkən xəta:", e)
 
 
+def ensure_fts_tables():
+    """FTS5 cədvəllərini yalnız boş olduqda qur."""
+
+    def build_fts(conn, base_table: str, fts_name: str):
+        cur = conn.cursor()
+        cur.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS "
+            f"{fts_name} USING fts5(summary, address, metro, rayon, contact_name, operation, "
+            f"content='{base_table}', content_rowid='id')"
+        )
+        cur.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?", (fts_name,))
+        if cur.fetchone()[0] == 0:
+            return
+        cur.execute(f"SELECT COUNT(*) FROM {fts_name}")
+        existing = cur.fetchone()[0] or 0
+        if existing > 0:
+            return
+
+        cur.execute(f"SELECT name FROM pragma_table_info('{base_table}')")
+        cols = {row[0] for row in cur.fetchall()}
+
+        def col_expr(name: str):
+            return name if name in cols else "''"
+
+        select_sql = (
+            "SELECT id, "
+            + ", ".join(
+                [
+                    col_expr("summary"),
+                    col_expr("address"),
+                    col_expr("metro"),
+                    col_expr("rayon"),
+                    col_expr("contact_name"),
+                    col_expr("operation"),
+                ]
+            )
+            + f" FROM {base_table}"
+        )
+        cur.execute(
+            f"INSERT INTO {fts_name}(rowid, summary, address, metro, rayon, contact_name, operation) "
+            + select_sql
+        )
+        conn.commit()
+
+    try:
+        if os.path.exists(MAIN_DB):
+            conn = get_main_conn()
+            build_fts(conn, "listings", "listings_fts")
+            conn.close()
+    except Exception as e:
+        print("⚠️ FTS (main) yaradarkən xəta:", e)
+
+    try:
+        conn = get_local_conn()
+        build_fts(conn, "listings_approved", "local_listings_fts")
+        conn.close()
+    except Exception as e:
+        print("⚠️ FTS (local) yaradarkən xəta:", e)
+
+
 # =============== ÜMUMİ UTIL FUNKSİYALAR ===============
 
 
@@ -537,6 +598,11 @@ OPERATION_VARIANTS = {
     "rent": {"rent", "kirayə verilir", "kirayə", "kiraye", "icarə", "icare"},
 }
 
+OPERATION_DB_MAP = {
+    "sale": "Satılır",
+    "rent": "Kirayə verilir",
+}
+
 _operation_cache = {}
 
 
@@ -551,6 +617,10 @@ def normalize_operation_value(val: str):
 
 
 def detect_db_operation_value(op_norm: str, source: str):
+    if not op_norm:
+        return None
+    if op_norm in OPERATION_DB_MAP:
+        return OPERATION_DB_MAP[op_norm]
     if op_norm not in OPERATION_VARIANTS:
         return op_norm
     key = (source, op_norm)
@@ -577,7 +647,7 @@ def detect_db_operation_value(op_norm: str, source: str):
             _operation_cache[key] = candidate
             return candidate
 
-    fallback = "sale" if op_norm == "sale" else "rent"
+    fallback = OPERATION_DB_MAP.get(op_norm, op_norm)
     _operation_cache[key] = fallback
     return fallback
 
@@ -1571,6 +1641,7 @@ def search_system_menu(message):
     mk.add(
         types.InlineKeyboardButton("🔍 Açar sözlə axtar", callback_data="ss|keyword")
     )
+    mk.add(types.InlineKeyboardButton("🔥 Ağıllı axtarış", callback_data="ss|smart"))
     mk.add(types.InlineKeyboardButton("☎️ Nömrə ilə axtar", callback_data="ss|phone"))
     bot.send_message(
         message.chat.id,
@@ -1602,6 +1673,20 @@ def cb_search_select(c):
             return
         search_state[chat_id] = {"mode": "keyword", "operation": None}
         send_keyword_operation_prompt(chat_id)
+
+    elif mode == "smart":
+        if not check_limit(chat_id, "smart", 30):
+            bot.answer_callback_query(
+                c.id, "Günlük ağıllı axtarış limitiniz bitib.", show_alert=True
+            )
+            return
+        search_state[chat_id] = {"mode": "smart"}
+        msg = bot.send_message(
+            chat_id,
+            "🔥 Sorğunu yazın (məs: *3 otaq yasamal kirayə 800-1200*):",
+            parse_mode="Markdown",
+        )
+        bot.register_next_step_handler(msg, smart_search_handler)
 
     elif mode == "phone":
         if not check_limit(chat_id, "phone", 50):
@@ -2020,11 +2105,38 @@ def query_structured_results(filters: dict, offset: int = 0, limit: int = None):
     return filtered, total
 
 
+def is_fts_ready(conn, table_name: str) -> bool:
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,)
+        )
+        if not cur.fetchone():
+            return False
+        cur.execute(f"SELECT COUNT(*) FROM {table_name}")
+        return (cur.fetchone() or [0])[0] > 0
+    except Exception:
+        return False
+
+
+def build_fts_match(words: list) -> str:
+    tokens = []
+    for w in words:
+        t = str(w).strip()
+        if not t:
+            continue
+        t = t.replace("'", " ").replace("\"", " ")
+        tokens.append(f"{t}*")
+    return " ".join(tokens)
+
+
 def query_keyword_results(selected_op: str, words: list, offset: int = 0, limit: int = None):
     if not words:
         return [], 0
 
     words = [w.lower() for w in words if w]
+    op_main = detect_db_operation_value(selected_op, "main")
+    op_local = detect_db_operation_value(selected_op, "local")
 
     def build_multi_like_sql(fields):
         sql_parts = []
@@ -2037,25 +2149,33 @@ def query_keyword_results(selected_op: str, words: list, offset: int = 0, limit:
         sql = " AND ".join(sql_parts)
         return sql, params
 
-    FIELDS_MAIN = ["prop_type", "operation", "metro", "rooms", "address", "summary"]
-    FIELDS_LOCAL = ["prop_type", "operation", "metro", "rooms", "rayon", "summary"]
-
-    def build_operation_clause(source="main"):
-        op_value = detect_db_operation_value(selected_op, source)
-        return "operation = ?", [op_value]
+    FIELDS_MAIN = ["prop_type", "operation", "metro", "rooms", "address", "summary", "contact_name"]
+    FIELDS_LOCAL = ["prop_type", "operation", "metro", "rooms", "rayon", "summary", "contact_name"]
 
     results = []
 
     if os.path.exists(MAIN_DB):
         conn = get_main_conn()
         cur = conn.cursor()
-        sql_where, params = build_multi_like_sql(FIELDS_MAIN)
-        op_clause, op_params = build_operation_clause("main")
-        sql = (
-            f"SELECT * FROM listings WHERE {op_clause} AND {sql_where} "
-            "ORDER BY date_read DESC LIMIT 5000"
-        )
-        cur.execute(sql, op_params + params)
+        if is_fts_ready(conn, "listings_fts"):
+            match_q = build_fts_match(words)
+            cur.execute(
+                """
+                SELECT l.* FROM listings l
+                JOIN listings_fts f ON l.id = f.rowid
+                WHERE l.operation = ? AND f MATCH ?
+                ORDER BY l.date_read DESC LIMIT 5000
+                """,
+                (op_main, match_q),
+            )
+        else:
+            sql_where, params = build_multi_like_sql(FIELDS_MAIN)
+            sql = (
+                "SELECT * FROM listings WHERE operation = ? AND "
+                + sql_where
+                + " ORDER BY date_read DESC LIMIT 5000"
+            )
+            cur.execute(sql, [op_main] + params)
         for r in cur.fetchall():
             d = dict(r)
             d["__source"] = "main"
@@ -2064,13 +2184,25 @@ def query_keyword_results(selected_op: str, words: list, offset: int = 0, limit:
 
     conn = get_local_conn()
     cur = conn.cursor()
-    sql_where, params = build_multi_like_sql(FIELDS_LOCAL)
-    op_clause, op_params = build_operation_clause("local")
-    sql = (
-        f"SELECT * FROM listings_approved WHERE {op_clause} AND {sql_where} "
-        "ORDER BY date_added DESC LIMIT 5000"
-    )
-    cur.execute(sql, op_params + params)
+    if is_fts_ready(conn, "local_listings_fts"):
+        match_q = build_fts_match(words)
+        cur.execute(
+            """
+            SELECT l.* FROM listings_approved l
+            JOIN local_listings_fts f ON l.id = f.rowid
+            WHERE l.operation = ? AND f MATCH ?
+            ORDER BY l.date_added DESC LIMIT 5000
+            """,
+            (op_local, match_q),
+        )
+    else:
+        sql_where, params = build_multi_like_sql(FIELDS_LOCAL)
+        sql = (
+            "SELECT * FROM listings_approved WHERE operation = ? AND "
+            + sql_where
+            + " ORDER BY date_added DESC LIMIT 5000"
+        )
+        cur.execute(sql, [op_local] + params)
     for r in cur.fetchall():
         d = dict(r)
         d["__source"] = "local"
@@ -2084,6 +2216,224 @@ def query_keyword_results(selected_op: str, words: list, offset: int = 0, limit:
     if limit is not None:
         results = results[offset : offset + limit]
     return results, total
+
+
+def parse_smart_query(text: str) -> dict:
+    res = {
+        "operation": None,
+        "rooms": None,
+        "price_min": None,
+        "price_max": None,
+        "keywords": [],
+    }
+
+    if not text:
+        return res
+
+    lowered = text.lower()
+    tokens = lowered.split()
+    used_tokens = set()
+
+    # əməliyyat
+    for idx, tok in enumerate(tokens):
+        op = normalize_operation_value(tok)
+        if op and not res["operation"]:
+            res["operation"] = op
+            used_tokens.add(idx)
+
+    # otaq sayı
+    room_match = re.search(r"(\d+)\s*(otaq|otaqli|otaqlı)", lowered)
+    if room_match:
+        try:
+            res["rooms"] = int(room_match.group(1))
+        except Exception:
+            pass
+
+    # qiymət
+    range_match = re.search(r"(\d+[\.,]?\d*)\s*-\s*(\d+[\.,]?\d*)", lowered)
+    if range_match:
+        try:
+            res["price_min"] = int(float(range_match.group(1).replace(",", "").replace(".", "")))
+            res["price_max"] = int(float(range_match.group(2).replace(",", "").replace(".", "")))
+        except Exception:
+            pass
+    else:
+        numbers = [
+            int(float(n.replace(",", "").replace(".", "")))
+            for n in re.findall(r"\b\d+[\.,]?\d*\b", lowered)
+        ]
+        for n in numbers:
+            if res["rooms"] is None and n <= 10:
+                res["rooms"] = n
+                continue
+            if n > 10 and res["price_max"] is None:
+                res["price_max"] = n
+                break
+
+    # otaq tokenləri (nömrə + otaq) istifadədə kimi işarələ
+    for idx, tok in enumerate(tokens):
+        if re.match(r"\d+", tok) and idx + 1 < len(tokens):
+            nxt = tokens[idx + 1]
+            if nxt.startswith("otaq"):
+                used_tokens.update({idx, idx + 1})
+
+    # keywords
+    keywords = []
+    for idx, tok in enumerate(tokens):
+        if idx in used_tokens:
+            continue
+        if any(ch.isdigit() for ch in tok):
+            continue
+        if tok.startswith("otaq"):
+            continue
+        if normalize_operation_value(tok):
+            continue
+        keywords.append(tok)
+
+    res["keywords"] = keywords
+    return res
+
+
+def query_smart_results(criteria: dict, offset: int = 0, limit: int = None):
+    keywords = [w.lower() for w in criteria.get("keywords", []) if w]
+    op_norm = normalize_operation_value(criteria.get("operation"))
+    op_main = detect_db_operation_value(op_norm, "main") if op_norm else None
+    op_local = detect_db_operation_value(op_norm, "local") if op_norm else None
+    price_min = criteria.get("price_min")
+    price_max = criteria.get("price_max")
+    room_num = criteria.get("rooms")
+
+    def build_multi_like_sql(words_local, fields):
+        if not words_local:
+            return "", []
+        sql_parts = []
+        params = []
+        for w in words_local:
+            part = "(" + " OR ".join([f"LOWER({f}) LIKE ?" for f in fields]) + ")"
+            sql_parts.append(part)
+            like = f"%{w}%"
+            params.extend([like] * len(fields))
+        sql = " AND ".join(sql_parts)
+        return sql, params
+
+    def build_filters(op_value):
+        clauses = ["1=1"]
+        params = []
+        if op_value:
+            clauses.append("operation = ?")
+            params.append(op_value)
+        if price_min is not None:
+            clauses.append(
+                "CAST(REPLACE(REPLACE(price, ',', ''), ' ', '') AS INTEGER) >= ?"
+            )
+            params.append(price_min)
+        if price_max is not None:
+            clauses.append(
+                "CAST(REPLACE(REPLACE(price, ',', ''), ' ', '') AS INTEGER) <= ?"
+            )
+            params.append(price_max)
+        return " AND ".join(clauses), params
+
+    def passes_room(ev: dict) -> bool:
+        if not room_num:
+            return True
+        val = parse_number(ev.get("rooms") or ev.get("Otaq_sayi"))
+        if val is None:
+            return True
+        try:
+            return int(val) == int(room_num)
+        except Exception:
+            return True
+
+    results = []
+
+    # MAIN
+    if os.path.exists(MAIN_DB):
+        conn = get_main_conn()
+        cur = conn.cursor()
+        where_clause, base_params = build_filters(op_main)
+        if keywords and is_fts_ready(conn, "listings_fts"):
+            match_q = build_fts_match(keywords)
+            cur.execute(
+                f"""
+                SELECT l.* FROM listings l
+                JOIN listings_fts f ON l.id = f.rowid
+                WHERE {where_clause} AND f MATCH ?
+                ORDER BY l.date_read DESC LIMIT 5000
+                """,
+                base_params + [match_q],
+            )
+        elif keywords:
+            sql_where, kw_params = build_multi_like_sql(
+                keywords, ["summary", "address", "metro", "rayon", "contact_name", "operation"]
+            )
+            cur.execute(
+                f"SELECT * FROM listings WHERE {where_clause} AND {sql_where} "
+                "ORDER BY date_read DESC LIMIT 5000",
+                base_params + kw_params,
+            )
+        else:
+            cur.execute(
+                f"SELECT * FROM listings WHERE {where_clause} "
+                "ORDER BY date_read DESC LIMIT 5000",
+                base_params,
+            )
+        for r in cur.fetchall():
+            d = dict(r)
+            d["__source"] = "main"
+            results.append(d)
+        conn.close()
+
+    # LOCAL
+    conn = get_local_conn()
+    cur = conn.cursor()
+    where_clause, base_params = build_filters(op_local)
+    if keywords and is_fts_ready(conn, "local_listings_fts"):
+        match_q = build_fts_match(keywords)
+        cur.execute(
+            f"""
+            SELECT l.* FROM listings_approved l
+            JOIN local_listings_fts f ON l.id = f.rowid
+            WHERE {where_clause} AND f MATCH ?
+            ORDER BY l.date_added DESC LIMIT 5000
+            """,
+            base_params + [match_q],
+        )
+    elif keywords:
+        sql_where, kw_params = build_multi_like_sql(
+            keywords, ["summary", "rayon", "metro", "contact_name", "operation"]
+        )
+        cur.execute(
+            f"SELECT * FROM listings_approved WHERE {where_clause} AND {sql_where} "
+            "ORDER BY date_added DESC LIMIT 5000",
+            base_params + kw_params,
+        )
+    else:
+        cur.execute(
+            f"SELECT * FROM listings_approved WHERE {where_clause} "
+            "ORDER BY date_added DESC LIMIT 5000",
+            base_params,
+        )
+    for r in cur.fetchall():
+        d = dict(r)
+        d["__source"] = "local"
+        results.append(d)
+    conn.close()
+
+    status_map = get_status_map()
+    filtered = []
+    for ev in results:
+        if not is_listing_active(ev, status_map):
+            continue
+        if not passes_room(ev):
+            continue
+        filtered.append(ev)
+
+    filtered.sort(key=safe_date, reverse=True)
+    total = len(filtered)
+    if limit is not None:
+        filtered = filtered[offset : offset + limit]
+    return filtered, total
 
 
 def query_phone_results(raw: str, offset: int = 0, limit: int = None):
@@ -2198,6 +2548,10 @@ def fetch_page_results(chat_id: int, mode: str, params: dict, page: int):
         return query_keyword_results(
             params.get("operation"), params.get("words", []), offset=offset, limit=PAGE_SIZE
         )
+    if mode == "smart":
+        return query_smart_results(
+            params.get("criteria", {}), offset=offset, limit=PAGE_SIZE
+        )
     if mode == "phone":
         return query_phone_results(params.get("digits", ""), offset=offset, limit=PAGE_SIZE)
     if mode == "favorites":
@@ -2230,6 +2584,7 @@ def send_paginated_results(
     summary_map = {
         "filter": "🔍 Tapıldı",
         "keyword": "🔍 Tapıldı",
+        "smart": "🔥 Tapıldı",
         "phone": "☎️ Bu nömrə ilə",
         "favorites": "⭐ Favorilər",
         "statuslist": params.get("title", "📂 Siyahı"),
@@ -2724,6 +3079,45 @@ def keyword_search_handler(message):
     )
 
 
+def smart_search_handler(message):
+    if not ensure_allowed(message):
+        return
+    chat_id = message.chat.id
+    if not check_limit(chat_id, "smart", 30):
+        bot.send_message(chat_id, "Günlük ağıllı axtarış limitiniz bitib.")
+        return
+
+    text = (message.text or "").strip()
+    if not text:
+        bot.send_message(chat_id, "Boş sorğu göndərdiniz.")
+        return
+
+    criteria = parse_smart_query(text)
+    loading_ref = show_loading_message(chat_id)
+    log_search_event(
+        chat_id,
+        "smart",
+        operation=criteria.get("operation"),
+        query_text=text,
+    )
+
+    _page_items, total = query_smart_results(criteria, offset=0, limit=PAGE_SIZE)
+
+    if not total:
+        if not replace_loading_message(loading_ref, "❌ Uyğun elan tapılmadı. Yenidən axtarış edin."):
+            bot.send_message(chat_id, "❌ Uyğun elan tapılmadı. Yenidən axtarış edin.")
+        return
+
+    inc_limit(chat_id, "smart", 1)
+    send_paginated_results(
+        chat_id,
+        mode="smart",
+        params={"criteria": criteria},
+        page=1,
+        loading_ref=loading_ref,
+    )
+
+
 # ===== NÖMRƏ İLƏ AXTARIŞ =====
 
 
@@ -3018,7 +3412,7 @@ def open_admin_panel(message):
         )
     )
     mk.add(
-        types.InlineKeyboardButton("📊 Statistik hesabat", callback_data="adm|stats")
+        types.InlineKeyboardButton("📊 Statistikalar", callback_data="adm|stats")
     )
     mk.add(
         types.InlineKeyboardButton(
@@ -3568,9 +3962,10 @@ def show_admin_stats(chat_id):
     if not is_admin(chat_id):
         return
 
-    # Local DB
+    now = datetime.utcnow()
     conn = get_local_conn()
     cur = conn.cursor()
+
     cur.execute("SELECT COUNT(*) FROM users")
     total_users = cur.fetchone()[0] or 0
 
@@ -3586,6 +3981,45 @@ def show_admin_stats(chat_id):
     cur.execute("SELECT COUNT(*) FROM listings_approved")
     total_local = cur.fetchone()[0] or 0
 
+    today = date.today().isoformat()
+    cur.execute(
+        "SELECT COUNT(*) FROM search_logs WHERE DATE(created_at)=?",
+        (today,),
+    )
+    today_searches = cur.fetchone()[0] or 0
+
+    since_24h = (now - timedelta(hours=24)).isoformat()
+    cur.execute(
+        "SELECT COUNT(*) FROM search_logs WHERE datetime(created_at) >= datetime(?)",
+        (since_24h,),
+    )
+    last_24h_searches = cur.fetchone()[0] or 0
+
+    week_cutoff = (now - timedelta(days=7)).isoformat()
+    cur.execute(
+        """
+        SELECT COALESCE(NULLIF(TRIM(rayon), ''), '(rayon qeyd olunmayıb)') AS rn,
+               COUNT(*) AS cnt
+        FROM search_logs
+        WHERE datetime(created_at) >= datetime(?)
+        GROUP BY rn
+        ORDER BY cnt DESC
+        LIMIT 10
+        """,
+        (week_cutoff,),
+    )
+    top_rayons = cur.fetchall()
+
+    cur.execute(
+        """
+        SELECT ua.chat_id, ua.total_searches, u.full_name, u.username
+        FROM user_activity ua
+        LEFT JOIN users u ON u.chat_id = ua.chat_id
+        ORDER BY ua.total_searches DESC
+        LIMIT 10
+        """
+    )
+    top_users = cur.fetchall()
     conn.close()
 
     # Agents DB
@@ -3595,20 +4029,42 @@ def show_admin_stats(chat_id):
         cur_a.execute("SELECT COUNT(*) FROM arenda_data")
         total_agents = cur_a.fetchone()[0] or 0
         conn_a.close()
-    except:
+    except Exception:
         total_agents = 0
 
-    text = (
-        "📊 *Admin Statistikası*\n"
-        f"👥 Ümumi istifadəçi: {total_users}\n"
-        f"✅ Aktiv: {active_users}\n"
-        f"📢 Yeni elanlar (cəmi): {total_new}\n"
-        f"⏳ Gözləyən elanlar: {pending_new}\n"
-        f"📂 Təsdiqlənmiş lokal elanlar: {total_local}\n"
-        f"🏢 Vasitəçi elanları: {total_agents}\n"
+    sections = ["📊 *Admin Statistikası*"]
+    sections.append(
+        "🔎 Axtarış aktivliyi:\n"
+        f"• Bu gün: {today_searches}\n"
+        f"• Son 24 saat: {last_24h_searches}"
     )
 
-    bot.send_message(chat_id, text, parse_mode="Markdown")
+    if top_rayons:
+        lines = ["🏘 Son 7 günün TOP rayonları:"]
+        for idx, (rn, cnt) in enumerate(top_rayons, start=1):
+            lines.append(f"{idx}) {rn}: {cnt}")
+        sections.append("\n".join(lines))
+
+    if top_users:
+        lines = ["👥 TOP aktiv istifadəçilər:"]
+        for idx, row in enumerate(top_users, start=1):
+            chat_id_u, total_s, full_name, username = row
+            uname = f"@{username}" if username else "—"
+            title = full_name or uname or chat_id_u
+            lines.append(f"{idx}) {title} ({uname}) — {total_s}")
+        sections.append("\n".join(lines))
+
+    sections.append(
+        "📂 Baza xülasəsi:\n"
+        f"• Ümumi istifadəçi: {total_users}\n"
+        f"• Aktiv: {active_users}\n"
+        f"• Yeni elanlar: {total_new}\n"
+        f"• Gözləyən elanlar: {pending_new}\n"
+        f"• Lokal elanlar: {total_local}\n"
+        f"• Vasitəçi elanları: {total_agents}"
+    )
+
+    bot.send_message(chat_id, "\n\n".join(sections), parse_mode="Markdown")
 
 
 def admin_agents_broadcast(message):
@@ -3782,6 +4238,7 @@ if __name__ == "__main__":
     init_local_db()
     init_agents_db()
     init_main_db_indices()
+    ensure_fts_tables()
 
     app = Flask(__name__)
 
