@@ -4908,6 +4908,7 @@ def show_admin_promo_menu(chat_id: int):
         types.InlineKeyboardButton("🎁 7 gün", callback_data="prm|gen|7"),
     )
     mk.add(types.InlineKeyboardButton("📋 Promo siyahısı", callback_data="prm|list|1"))
+    mk.add(types.InlineKeyboardButton("📊 Promo statistikası", callback_data="prm|stats|1"))
     bot.send_message(chat_id, "🎟 Promo kod idarəsi:", reply_markup=mk)
 
 
@@ -4988,6 +4989,86 @@ def show_admin_promo_list(chat_id: int, page: int = 1):
     bot.send_message(chat_id, txt, reply_markup=mk)
 
 
+def show_admin_promo_stats(chat_id: int, page: int = 1):
+    if not is_admin(chat_id):
+        return
+
+    page = max(1, int(page or 1))
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM promo_codes")
+    total = cur.fetchone()[0] or 0
+    total_pages = max(1, math.ceil(total / PAGE_SIZE)) if total else 1
+    if page > total_pages:
+        page = total_pages
+
+    offset = (page - 1) * PAGE_SIZE
+    cur.execute(
+        """
+        SELECT
+            pc.code,
+            pc.days,
+            COUNT(pu.chat_id) AS total_users,
+            SUM(
+                CASE
+                    WHEN pu.chat_id IS NOT NULL
+                         AND datetime(COALESCE(s.expires_at, pu.expires_at)) > datetime('now')
+                    THEN 1 ELSE 0 END
+            ) AS active_users,
+            SUM(
+                CASE
+                    WHEN pu.chat_id IS NOT NULL
+                         AND datetime(COALESCE(s.expires_at, pu.expires_at)) <= datetime('now')
+                    THEN 1 ELSE 0 END
+            ) AS expired_users
+        FROM promo_codes pc
+        LEFT JOIN promo_usages pu ON pu.code = pc.code
+        LEFT JOIN subscriptions s ON s.chat_id = pu.chat_id
+        GROUP BY pc.code, pc.days
+        ORDER BY datetime(pc.created_at) DESC, pc.code DESC
+        LIMIT ? OFFSET ?
+        """,
+        (PAGE_SIZE, offset),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        mk = types.InlineKeyboardMarkup()
+        mk.add(types.InlineKeyboardButton("↩️ Geri", callback_data="adm|promos"))
+        bot.send_message(chat_id, "❌ Promo kod yoxdur.", reply_markup=mk)
+        return
+
+    lines = []
+    for r in rows:
+        total_users = r["total_users"] or 0
+        active_users = r["active_users"] or 0
+        expired_users = r["expired_users"] or 0
+        lines.append(f"🎁 {r['code']} — {r['days']} gün")
+        lines.append(f"👥 İstifadə edənlər: {total_users}")
+        lines.append(f"🟢 Aktiv: {active_users}")
+        lines.append(f"🔴 Bitmiş: {expired_users}")
+        lines.append("")
+
+    txt = "\n".join(lines).strip() + f"\n\nSəhifə: {page}/{total_pages}"
+
+    mk = types.InlineKeyboardMarkup()
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(
+            types.InlineKeyboardButton("⬅️ Əvvəlki", callback_data=f"prm|stats|{page-1}")
+        )
+    if page < total_pages:
+        nav_buttons.append(
+            types.InlineKeyboardButton("➡️ Növbəti", callback_data=f"prm|stats|{page+1}")
+        )
+    if nav_buttons:
+        mk.add(*nav_buttons)
+    mk.add(types.InlineKeyboardButton("↩️ Geri", callback_data="adm|promos"))
+
+    bot.send_message(chat_id, txt, reply_markup=mk)
+
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith("prm|"))
 def cb_admin_promo(c):
     if not is_admin(c.message.chat.id):
@@ -5019,6 +5100,14 @@ def cb_admin_promo(c):
             except Exception:
                 page = 1
         show_admin_promo_list(c.message.chat.id, page=page)
+    elif action == "stats":
+        page = 1
+        if len(parts) > 2:
+            try:
+                page = int(parts[2])
+            except Exception:
+                page = 1
+        show_admin_promo_stats(c.message.chat.id, page=page)
     elif action in {"act", "deact"} and len(parts) > 2:
         code = parts[2]
         page = 1
