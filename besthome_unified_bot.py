@@ -73,14 +73,13 @@ def get_main_conn():
 
 
 def get_local_conn():
-    conn = sqlite3.connect(LOCAL_DB)
+    conn = sqlite3.connect(LOCAL_DB, check_same_thread=False)  # 🔥 ÇOX VACİB
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def get_agents_conn():
-    path = os.path.join(os.path.dirname(__file__), "agents.db")
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(AGENTS_DB, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
