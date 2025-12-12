@@ -208,6 +208,24 @@ def init_local_db():
     """
     )
 
+    # Saxlanılan axtarışlar
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS saved_searches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            operation TEXT,
+            rooms INTEGER,
+            price_min INTEGER,
+            price_max INTEGER,
+            rayon TEXT,
+            prop_type TEXT,
+            created_at TEXT,
+            last_notified_at TEXT
+        )
+    """
+    )
+
     # Axtarış logları
     cur.execute(
         """
@@ -244,6 +262,18 @@ def init_local_db():
     if "updated_at" not in cols:
         cur.execute(
             "ALTER TABLE listing_status ADD COLUMN updated_at TEXT"
+        )
+
+    # saved_searches cədvəli üçün sütun yoxlaması
+    cur.execute("PRAGMA table_info(saved_searches)")
+    saved_cols = {row[1] for row in cur.fetchall()}
+    if "last_notified_at" not in saved_cols:
+        cur.execute(
+            "ALTER TABLE saved_searches ADD COLUMN last_notified_at TEXT"
+        )
+    if "created_at" not in saved_cols:
+        cur.execute(
+            "ALTER TABLE saved_searches ADD COLUMN created_at TEXT"
         )
 
     conn.commit()
@@ -553,6 +583,116 @@ def set_pagination_state(chat_id: int, mode: str, params: dict, page: int, total
         "page": page,
         "total_pages": total_pages,
     }
+
+
+def offer_save_search(chat_id: int, params: dict):
+    if not params:
+        return
+
+    st = search_state.setdefault(chat_id, {})
+    st["pending_save"] = params
+
+    mk = types.InlineKeyboardMarkup()
+    mk.add(
+        types.InlineKeyboardButton("✅ Bəli", callback_data="save_search|yes"),
+        types.InlineKeyboardButton("❌ Xeyr", callback_data="save_search|no"),
+    )
+    bot.send_message(
+        chat_id,
+        "🔔 Bu axtarışa uyğun yeni elan çıxsa, xəbər edim?",
+        reply_markup=mk,
+    )
+
+
+def build_saved_search_from_structured(filters: dict):
+    op_code = filters.get("op")
+    op_norm = None
+    if op_code == "sat":
+        op_norm = "sale"
+    elif op_code == "kir":
+        op_norm = "rent"
+    elif op_code:
+        op_norm = normalize_operation_value(op_code)
+
+    price_code = filters.get("price", "s0")
+    price_min, price_max = decode_price_range(price_code)
+
+    room_code = filters.get("rooms")
+    rooms_val = None
+    if room_code and room_code.startswith("r"):
+        try:
+            rooms_val = int(room_code.replace("r", ""))
+        except Exception:
+            rooms_val = None
+
+    prop_code = filters.get("prop")
+    prop_type = None
+    if prop_code:
+        prop_type = PROP_TYPES.get(prop_code)
+
+    rayon = filters.get("rayon")
+    if rayon == "all":
+        rayon = None
+
+    return {
+        "operation": op_norm,
+        "rooms": rooms_val,
+        "price_min": price_min,
+        "price_max": price_max,
+        "rayon": rayon,
+        "prop_type": prop_type,
+    }
+
+
+def build_saved_search_from_keyword(operation: str):
+    op_norm = normalize_operation_value(operation) if operation else None
+    return {
+        "operation": op_norm,
+        "rooms": None,
+        "price_min": None,
+        "price_max": None,
+        "rayon": None,
+        "prop_type": None,
+    }
+
+
+def build_saved_search_from_smart(criteria: dict):
+    op_norm = normalize_operation_value(criteria.get("operation"))
+    return {
+        "operation": op_norm,
+        "rooms": criteria.get("rooms"),
+        "price_min": criteria.get("price_min"),
+        "price_max": criteria.get("price_max"),
+        "rayon": criteria.get("rayon"),
+        "prop_type": criteria.get("prop_type"),
+    }
+
+
+def save_search(chat_id: int, params: dict):
+    if not params:
+        return False
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO saved_searches (chat_id, operation, rooms, price_min, price_max, rayon, prop_type, created_at, last_notified_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            chat_id,
+            params.get("operation"),
+            params.get("rooms"),
+            params.get("price_min"),
+            params.get("price_max"),
+            params.get("rayon"),
+            params.get("prop_type"),
+            datetime.utcnow().isoformat(),
+            None,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return True
 
 
 def get_status_map():
@@ -1703,6 +1843,30 @@ def cb_search_select(c):
         pass
 
 
+@bot.callback_query_handler(func=lambda c: c.data.startswith("save_search|"))
+def cb_save_search(c):
+    if not ensure_allowed_cb(c):
+        return
+    action = c.data.split("|", 1)[1]
+    chat_id = c.message.chat.id
+    st = search_state.get(chat_id, {})
+    params = st.get("pending_save")
+
+    if action == "yes" and params:
+        if save_search(chat_id, params):
+            bot.send_message(
+                chat_id,
+                "✅ Axtarış yadda saxlanıldı. Yeni elan olduqda xəbər veriləcək.",
+            )
+        st.pop("pending_save", None)
+    else:
+        st.pop("pending_save", None)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
 def send_keyword_operation_prompt(chat_id: int):
     mk = types.InlineKeyboardMarkup()
     mk.add(
@@ -2049,6 +2213,146 @@ def is_listing_active(ev: dict, status_map: dict) -> bool:
         return True
     status = status_map.get((src, lid), "active")
     return status not in {"sold", "rented", "blacklisted"}
+
+
+def _listing_price_value(ev: dict):
+    return parse_number(ev.get("price") or ev.get("Qiymet"))
+
+
+def matches_saved_search(ev: dict, saved: dict, status_map: dict) -> bool:
+    if not is_listing_active(ev, status_map):
+        return False
+
+    op_filter = normalize_operation_value(saved.get("operation"))
+    ev_op = normalize_operation_value(ev.get("operation") or ev.get("Emeliyyat"))
+    if op_filter and op_filter != ev_op:
+        return False
+
+    rooms_filter = saved.get("rooms")
+    if rooms_filter:
+        ev_room = parse_number(ev.get("rooms") or ev.get("Otaq_sayi"))
+        if ev_room is None or ev_room != rooms_filter:
+            return False
+
+    price_val = _listing_price_value(ev)
+    if saved.get("price_min") is not None:
+        if price_val is None or price_val < saved.get("price_min"):
+            return False
+    if saved.get("price_max") is not None:
+        if price_val is None or price_val > saved.get("price_max"):
+            return False
+
+    rayon_filter = saved.get("rayon")
+    if rayon_filter:
+        text_block = " ".join(
+            [
+                str(ev.get("rayon") or ""),
+                str(ev.get("Rayon_Qesebe") or ""),
+                str(ev.get("address") or ""),
+                str(ev.get("Unvan") or ""),
+                str(ev.get("summary") or ""),
+            ]
+        ).lower()
+        if rayon_filter.lower() not in text_block:
+            return False
+
+    prop_filter = saved.get("prop_type")
+    if prop_filter:
+        prop_text = str(ev.get("prop_type") or ev.get("Emlakin_novu") or "").lower()
+        if prop_filter.lower() not in prop_text:
+            return False
+
+    return True
+
+
+def load_recent_listings(since_dt: datetime):
+    results = []
+    since_dt = since_dt or datetime.min
+
+    if os.path.exists(MAIN_DB):
+        conn = get_main_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM listings ORDER BY date_read DESC, id DESC LIMIT 800")
+        for r in cur.fetchall():
+            d = dict(r)
+            d["__source"] = "main"
+            if safe_date(d) > since_dt:
+                results.append(d)
+        conn.close()
+
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM listings_approved ORDER BY date_added DESC, id DESC LIMIT 300"
+    )
+    for r in cur.fetchall():
+        d = dict(r)
+        d["__source"] = "local"
+        if safe_date(d) > since_dt:
+            results.append(d)
+    conn.close()
+
+    return results
+
+
+def process_saved_search_notifications():
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM saved_searches")
+    searches = [dict(r) for r in cur.fetchall()]
+    conn.close()
+
+    if not searches:
+        return
+
+    status_map = get_status_map()
+    now_iso = datetime.utcnow().isoformat()
+
+    for s in searches:
+        since_raw = s.get("last_notified_at") or s.get("created_at")
+        try:
+            since_dt = datetime.fromisoformat(str(since_raw)) if since_raw else datetime.min
+        except Exception:
+            since_dt = datetime.min
+
+        candidates = load_recent_listings(since_dt)
+        matches = [ev for ev in candidates if matches_saved_search(ev, s, status_map)]
+
+        if not matches:
+            continue
+
+        try:
+            bot.send_message(
+                s["chat_id"],
+                "🔔 Axtardığınız kriteriyalara uyğun YENİ ELAN tapıldı",
+            )
+            for ev in matches[:3]:
+                send_listing_card(
+                    s["chat_id"],
+                    ev,
+                    source=ev.get("__source", "main"),
+                    with_fav_button=True,
+                )
+        except Exception as e:
+            print("⚠️ Notification send error:", e)
+
+        conn = get_local_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE saved_searches SET last_notified_at=? WHERE id=?",
+            (now_iso, s.get("id")),
+        )
+        conn.commit()
+        conn.close()
+
+
+def saved_search_worker():
+    while True:
+        try:
+            process_saved_search_notifications()
+        except Exception as e:
+            print("⚠️ Saved search worker error:", e)
+        time.sleep(3600)
 
 
 def query_structured_results(filters: dict, offset: int = 0, limit: int = None):
@@ -3026,6 +3330,7 @@ def perform_structured_search(chat_id, offset=0, edit_msg=None):
         page=1,
         show_summary=False,
     )
+    offer_save_search(chat_id, build_saved_search_from_structured(filters))
 
 
 # ===== AÇAR SÖZLƏ AXTARIŞ (paging ilə) =====
@@ -3077,6 +3382,7 @@ def keyword_search_handler(message):
         page=1,
         loading_ref=loading_ref,
     )
+    offer_save_search(chat_id, build_saved_search_from_keyword(selected_op))
 
 
 def smart_search_handler(message):
@@ -3116,6 +3422,7 @@ def smart_search_handler(message):
         page=1,
         loading_ref=loading_ref,
     )
+    offer_save_search(chat_id, build_saved_search_from_smart(criteria))
 
 
 # ===== NÖMRƏ İLƏ AXTARIŞ =====
@@ -4239,6 +4546,8 @@ if __name__ == "__main__":
     init_agents_db()
     init_main_db_indices()
     ensure_fts_tables()
+
+    threading.Thread(target=saved_search_worker, daemon=True).start()
 
     app = Flask(__name__)
 
