@@ -21,6 +21,7 @@ import threading
 import math
 import re
 from datetime import datetime, date, timedelta
+from typing import Optional
 from urllib.parse import quote
 
 import requests
@@ -164,6 +165,18 @@ def init_local_db():
             source TEXT,
             added_at TEXT,
             UNIQUE(chat_id, listing_id, source)
+        )
+    """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS favorite_price_history (
+            source TEXT,
+            listing_id INTEGER,
+            last_price INTEGER,
+            updated_at TEXT,
+            PRIMARY KEY (source, listing_id)
         )
     """
     )
@@ -414,6 +427,21 @@ def format_price(v) -> str:
         return f"{val:,}".replace(",", " ")
     except:
         return s
+
+
+def parse_price_value(raw) -> Optional[int]:
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    digits = re.sub(r"[^0-9]", "", s)
+    if not digits:
+        return None
+    try:
+        return int(digits)
+    except Exception:
+        return None
 
 
 def safe_date(row: dict):
@@ -878,6 +906,37 @@ def fetch_listing_by_source(source: str, listing_id: int):
             d["__source"] = "agents"
             return d
     return None
+
+
+def get_listing_price(ev: dict) -> Optional[int]:
+    return parse_price_value(ev.get("price") or ev.get("Qiymet"))
+
+
+def upsert_favorite_price(source: str, listing_id: int, price_val: Optional[int]):
+    if price_val is None:
+        return
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO favorite_price_history (source, listing_id, last_price, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(source, listing_id) DO UPDATE SET
+            last_price=excluded.last_price,
+            updated_at=excluded.updated_at
+        """,
+        (source, listing_id, price_val, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def record_favorite_price(source: str, listing_id: int):
+    ev = fetch_listing_by_source(source, listing_id)
+    if not ev:
+        return
+    price_val = get_listing_price(ev)
+    upsert_favorite_price(source, listing_id, price_val)
 
 
 def send_logo_if_exists(chat_id: int):
@@ -1609,6 +1668,7 @@ def cb_add_favorite(c):
     )
     conn.commit()
     conn.close()
+    record_favorite_price(src, lid)
     bot.answer_callback_query(c.id, "⭐ Favoriyə əlavə olundu.")
 
 
@@ -2352,6 +2412,74 @@ def saved_search_worker():
             process_saved_search_notifications()
         except Exception as e:
             print("⚠️ Saved search worker error:", e)
+        time.sleep(3600)
+
+
+def check_favorite_price_drops():
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT f.chat_id, f.listing_id, f.source, p.last_price
+        FROM favorites f
+        LEFT JOIN favorite_price_history p
+            ON p.source = f.source AND p.listing_id = f.listing_id
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        return
+
+    for row in rows:
+        src = row["source"]
+        lid = row["listing_id"]
+        chat_id = row["chat_id"]
+        last_price = row["last_price"]
+
+        ev = fetch_listing_by_source(src, lid)
+        if not ev:
+            continue
+
+        current_price = get_listing_price(ev)
+        if current_price is None:
+            continue
+
+        currency = ev.get("currency") or "AZN"
+
+        if last_price is None:
+            upsert_favorite_price(src, lid, current_price)
+            continue
+
+        if current_price < last_price:
+            try:
+                msg = (
+                    "🔔 Favorit etdiyiniz elanın qiyməti düşdü!\n\n"
+                    f"📉 Köhnə qiymət: {format_price(last_price)} {currency}\n"
+                    f"📉 Yeni qiymət: {format_price(current_price)} {currency}"
+                )
+                bot.send_message(chat_id, msg)
+                send_listing_card(
+                    chat_id,
+                    ev,
+                    source=src,
+                    with_fav_button=True,
+                    status_controls=False,
+                )
+            except Exception as e:
+                print("⚠️ Favorite price notification error:", e)
+
+        if last_price != current_price:
+            upsert_favorite_price(src, lid, current_price)
+
+
+def favorite_price_worker():
+    while True:
+        try:
+            check_favorite_price_drops()
+        except Exception as e:
+            print("⚠️ Favorite price worker error:", e)
         time.sleep(3600)
 
 
@@ -4546,8 +4674,10 @@ if __name__ == "__main__":
     init_agents_db()
     init_main_db_indices()
     ensure_fts_tables()
+    check_favorite_price_drops()
 
     threading.Thread(target=saved_search_worker, daemon=True).start()
+    threading.Thread(target=favorite_price_worker, daemon=True).start()
 
     app = Flask(__name__)
 
