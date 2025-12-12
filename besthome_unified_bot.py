@@ -169,6 +169,20 @@ def init_local_db():
     """
     )
 
+    # Vasitəçi aktivliyi (axtarış, baxış, WhatsApp, favorit)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_activity (
+            chat_id INTEGER PRIMARY KEY,
+            last_activity TEXT,
+            searches INTEGER DEFAULT 0,
+            views INTEGER DEFAULT 0,
+            whatsapp INTEGER DEFAULT 0,
+            favorites INTEGER DEFAULT 0
+        )
+    """
+    )
+
     # Favorilər
     cur.execute(
         """
@@ -1120,6 +1134,64 @@ def log_search_event(chat_id: int, search_type: str, operation=None, rayon=None,
         if conn:
             conn.close()
 
+    record_agent_activity(chat_id, metric="searches")
+
+
+AGENT_METRIC_FIELDS = {
+    "searches": "searches",
+    "views": "views",
+    "whatsapp": "whatsapp",
+    "favorites": "favorites",
+}
+
+
+def is_agent_user(chat_id: Optional[int]) -> bool:
+    if not chat_id:
+        return False
+    try:
+        conn = get_local_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM agents WHERE chat_id=?", (chat_id,))
+        row = cur.fetchone()
+        conn.close()
+        return bool(row)
+    except Exception:
+        return False
+
+
+def record_agent_activity(chat_id: Optional[int], metric: Optional[str] = None):
+    if not chat_id or not is_agent_user(chat_id):
+        return
+
+    now_iso = datetime.utcnow().isoformat()
+    field = AGENT_METRIC_FIELDS.get(metric or "")
+
+    conn = None
+    try:
+        conn = get_local_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO agent_activity (chat_id, last_activity)
+            VALUES (?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET last_activity=excluded.last_activity
+            """,
+            (chat_id, now_iso),
+        )
+
+        if field:
+            cur.execute(
+                f"UPDATE agent_activity SET {field}={field}+1, last_activity=? WHERE chat_id=?",
+                (now_iso, chat_id),
+            )
+
+        conn.commit()
+    except Exception as e:
+        print("⚠️ Agent activity log error:", e)
+    finally:
+        if conn:
+            conn.close()
+
 def fetch_listing_by_source(source: str, listing_id: int):
     if source == "main" and os.path.exists(MAIN_DB):
         conn = get_main_conn()
@@ -1419,6 +1491,9 @@ def send_listing_card(
     except (TypeError, ValueError):
         listing_pk = None
     status = get_listing_status(source, listing_pk) if listing_pk else "active"
+
+    if viewer_id:
+        record_agent_activity(viewer_id, metric="views")
 
     if listing_pk and track_view:
         record_listing_view(source, listing_pk, viewer_id)
@@ -2280,6 +2355,7 @@ def cb_add_favorite(c):
     record_favorite_price(src, lid)
     if added:
         record_listing_stat(lid, "favorite", chat_id)
+        record_agent_activity(chat_id, metric="favorites")
     bot.answer_callback_query(c.id, "⭐ Favoriyə əlavə olundu.")
 
 
@@ -2303,6 +2379,7 @@ def cb_whatsapp_click(c):
     wa_message = build_whatsapp_message(ev)
     wa_url = make_whatsapp_url(phone, wa_message)
     record_listing_stat(lid, "contact", c.message.chat.id)
+    record_agent_activity(c.message.chat.id, metric="whatsapp")
     if wa_url:
         try:
             bot.answer_callback_query(c.id, url=wa_url)
@@ -4526,6 +4603,11 @@ def open_admin_panel(message):
         )
     )
     mk.add(
+        types.InlineKeyboardButton(
+            "🧠 Aktiv / passiv maklerlər", callback_data="adm|agent_activity"
+        )
+    )
+    mk.add(
         types.InlineKeyboardButton("🧾 Ödəniş tarixçəsi", callback_data="adm|payhist")
     )
     mk.add(types.InlineKeyboardButton("🔍 Bazada axtar", callback_data="adm|search"))
@@ -4580,6 +4662,9 @@ def cb_admin(c):
             c.message.chat.id, "✍️ Vasitəçilərə göndəriləcək mətni yaz:"
         )
         bot.register_next_step_handler(msg, admin_agents_broadcast)
+
+    elif cmd == "agent_activity":
+        show_agent_activity_overview(c.message.chat.id)
 
     elif cmd == "search":
         msg = bot.send_message(
@@ -5455,6 +5540,66 @@ def pub_agent_search_by_keyword(message):
     bot.send_message(message.chat.id, f"✅ Tapıldı: {len(rows)} elan.")
     for r in rows:
         send_agent_card(message.chat.id, dict(r))
+
+
+# =============== VASITƏÇİ ANALİTİKASI ===============
+
+
+def show_agent_activity_overview(chat_id: int):
+    if not is_admin(chat_id):
+        return
+
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT a.chat_id, a.name, a.phone,
+               aa.last_activity, aa.searches, aa.views, aa.whatsapp, aa.favorites
+        FROM agents a
+        LEFT JOIN agent_activity aa ON aa.chat_id = a.chat_id
+        ORDER BY (aa.last_activity IS NULL), datetime(aa.last_activity) DESC
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        bot.send_message(chat_id, "❌ Heç bir vasitəçi qeydiyyatı tapılmadı.")
+        return
+
+    cutoff = datetime.utcnow() - timedelta(days=7)
+    active, passive = [], []
+
+    for r in rows:
+        last_raw = r["last_activity"]
+        last_dt = None
+        if last_raw:
+            try:
+                last_dt = datetime.fromisoformat(str(last_raw))
+            except Exception:
+                last_dt = None
+
+        metrics = (
+            f"🔍 {r['searches'] or 0} | 👁 {r['views'] or 0} | "
+            f"💬 {r['whatsapp'] or 0} | ⭐ {r['favorites'] or 0}"
+        )
+        last_txt = last_dt.strftime("%d.%m.%Y") if last_dt else "-"
+        name = r["name"] or "(ad yoxdur)"
+        phone = r["phone"] or "-"
+        item_txt = f"• {name} ({r['chat_id']}, {phone}) — {metrics} — Son: {last_txt}"
+
+        if last_dt and last_dt >= cutoff:
+            active.append(item_txt)
+        else:
+            passive.append(item_txt)
+
+    resp = "🧠 Aktiv / passiv maklerlər\n\n"
+    resp += "🔥 Aktiv (son 7 gün):\n"
+    resp += "\n".join(active) if active else "• Aktiv vasitəçi yoxdur"
+    resp += "\n\n⏸ Passiv (7+ gün):\n"
+    resp += "\n".join(passive) if passive else "• Passiv vasitəçi yoxdur"
+
+    bot.send_message(chat_id, resp)
 
 
 # =============== ADMIN STATİSTİKA, AXTARIŞ, BROADCAST ===============
