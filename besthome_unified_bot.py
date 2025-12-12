@@ -226,6 +226,16 @@ def init_local_db():
     """
     )
 
+    # Promo sahələri (mövcud deyilsə əlavə et)
+    try:
+        cur.execute("ALTER TABLE users ADD COLUMN promo_active INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cur.execute("ALTER TABLE users ADD COLUMN promo_expires_at TEXT")
+    except sqlite3.OperationalError:
+        pass
+
     # Abunəliklər
     cur.execute(
         """
@@ -897,15 +907,8 @@ def set_promo_status(code: str, active: bool):
 
 
 def has_active_promo(chat_id: int) -> bool:
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT COUNT(*) FROM promo_usages WHERE chat_id=? AND datetime(expires_at) > datetime('now')",
-        (chat_id,),
-    )
-    res = cur.fetchone()[0] or 0
-    conn.close()
-    return res > 0
+    status = get_user_promo_status(chat_id)
+    return bool(status.get("active"))
 
 
 def has_used_promo(chat_id: int, code: str) -> bool:
@@ -934,23 +937,135 @@ def record_promo_usage(code: str, chat_id: int, expires_at: datetime):
     conn.close()
 
 
-def apply_promo_code(chat_id: int, code_raw: str) -> str:
+def format_promo_date(dt: Optional[datetime], include_year: bool = False) -> str:
+    if not dt:
+        return "—"
+    fmt = "%d %b %Y" if include_year else "%d %b"
+    return dt.strftime(fmt)
+
+
+def set_user_promo_status(chat_id: int, active: bool, expires_at: Optional[datetime] = None):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    exp_val = expires_at.isoformat() if expires_at else None
+    try:
+        cur.execute(
+            "UPDATE users SET promo_active=?, promo_expires_at=? WHERE chat_id=?",
+            (1 if active else 0, exp_val, chat_id),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        conn.close()
+
+
+def get_user_promo_status(chat_id: int) -> dict:
+    status = {"active": False, "expires_at": None}
+    conn = get_local_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT promo_active, promo_expires_at FROM users WHERE chat_id=?",
+            (chat_id,),
+        )
+        row = cur.fetchone()
+    except sqlite3.OperationalError:
+        conn.close()
+        return status
+
+    if not row:
+        conn.close()
+        return status
+
+    promo_active = row[0] or 0
+    expires_raw = row[1]
+    expires_at = None
+    if expires_raw:
+        try:
+            expires_at = datetime.fromisoformat(str(expires_raw))
+        except Exception:
+            expires_at = None
+
+    now = datetime.utcnow()
+    if promo_active and expires_at and expires_at > now:
+        status.update({"active": True, "expires_at": expires_at})
+    else:
+        if promo_active:
+            try:
+                cur.execute(
+                    "UPDATE users SET promo_active=0 WHERE chat_id=?", (chat_id,)
+                )
+                conn.commit()
+            except Exception:
+                pass
+
+    if not status["active"]:
+        try:
+            cur.execute(
+                """
+                SELECT expires_at FROM promo_usages
+                WHERE chat_id=? AND datetime(expires_at) > datetime('now')
+                ORDER BY expires_at DESC
+                LIMIT 1
+                """,
+                (chat_id,),
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                try:
+                    fallback_exp = datetime.fromisoformat(str(row[0]))
+                    status.update({"active": True, "expires_at": fallback_exp})
+                    cur.execute(
+                        "UPDATE users SET promo_active=1, promo_expires_at=? WHERE chat_id=?",
+                        (fallback_exp.isoformat(), chat_id),
+                    )
+                    conn.commit()
+                except Exception:
+                    pass
+        except sqlite3.OperationalError:
+            pass
+
+    conn.close()
+    return status
+
+
+def build_promo_button(chat_id: int, include_year: bool = False) -> types.InlineKeyboardButton:
+    status = get_user_promo_status(chat_id)
+    if status.get("active"):
+        exp_text = format_promo_date(status.get("expires_at"), include_year)
+        text = f"🎁 Aktiv promo mövcuddur (bitmə: {exp_text})"
+        return types.InlineKeyboardButton(text, callback_data="promo_active_info")
+    return types.InlineKeyboardButton("🎁 Promo kod daxil et", callback_data="promo_enter")
+
+
+def send_promo_quick_action(chat_id: int):
+    mk = types.InlineKeyboardMarkup()
+    mk.add(build_promo_button(chat_id))
+    bot.send_message(chat_id, "🎁 Promo menyusu:", reply_markup=mk)
+
+
+def apply_promo_code(chat_id: int, code_raw: str):
     code = (code_raw or "").strip().upper()
     if not code:
-        return "❌ Promo kod tapılmadı"
+        return False, "❌ Promo kod tapılmadı", None
 
     promo = get_promo(code)
     if not promo:
-        return "❌ Promo kod tapılmadı"
+        return False, "❌ Promo kod tapılmadı", None
     if not promo.get("is_active"):
-        return "❌ Bu promo kod deaktiv edilib"
+        return False, "❌ Bu promo kod deaktiv edilib", None
     if has_active_promo(chat_id):
-        return (
+        status = get_user_promo_status(chat_id)
+        exp_text = format_promo_date(status.get("expires_at"), include_year=True)
+        block_msg = (
             "❌ Aktiv promo kodunuz var.\n"
-            "Yeni promo daxil etmək üçün mövcud promo bitməlidir."
+            "Yeni promo daxil etmək üçün mövcud promo bitməlidir.\n"
+            f"📅 Cari promo bitmə tarixi: {exp_text}"
         )
+        return False, block_msg, status.get("expires_at")
     if has_used_promo(chat_id, code):
-        return "❌ Bu promo kodu artıq istifadə etmisiniz"
+        return False, "❌ Bu promo kodu artıq istifadə etmisiniz", None
 
     ensure_subscription_record(chat_id)
     sub = get_subscription(chat_id) or {}
@@ -968,11 +1083,14 @@ def apply_promo_code(chat_id: int, code_raw: str) -> str:
     set_subscription(chat_id, plan_name, new_exp, is_active=1, is_demo=0, note=f"promo:{code}")
     record_promo_usage(code, chat_id, new_exp)
 
-    return (
-        "✅ Promo kod aktivləşdirildi\n"
-        f"⏳ Hesabınıza +{promo['days']} gün əlavə edildi\n"
-        f"📅 Yeni bitmə tarixi: {new_exp.strftime('%d.%m.%Y')}"
+    set_user_promo_status(chat_id, True, new_exp)
+
+    success_msg = (
+        "🎉 Promo uğurla aktiv edildi!\n"
+        f"📅 Bitmə tarixi: {format_promo_date(new_exp, include_year=True)}"
     )
+
+    return True, success_msg, new_exp
 
 
 def activate_demo_if_needed(chat_id: int, force: bool = False):
@@ -999,7 +1117,7 @@ def send_payment_menu(chat_id: int):
                 f"{info['title']} — {info['price']}", callback_data=f"payplan|{key}"
             )
         )
-    mk.add(types.InlineKeyboardButton("🎟 Promo kod", callback_data="promoenter"))
+    mk.add(build_promo_button(chat_id))
     mk.add(types.InlineKeyboardButton("ℹ️ Haqqında", callback_data="payinfo"))
     bot.send_message(
         chat_id,
@@ -1709,6 +1827,7 @@ def send_main_menu(chat_id: int):
         kb.row("🔥 Ən çox baxılan elanlar")
         kb.row("📊 Admin Panel")
     bot.send_message(chat_id, "🏠 Əsas menyu:", reply_markup=kb)
+    send_promo_quick_action(chat_id)
 
 
 # =============== ELAN KARTI (WhatsApp ilə) ===============
@@ -2042,11 +2161,42 @@ def cb_payinfo(c):
         pass
 
 
-@bot.callback_query_handler(func=lambda c: c.data == "promoenter")
+def send_active_promo_info(chat_id: int):
+    status = get_user_promo_status(chat_id)
+    exp_text = format_promo_date(status.get("expires_at"), include_year=True)
+    bot.send_message(
+        chat_id,
+        "⚠️ Aktiv promo müddətiniz bitməyib.\n\n"
+        f"📅 Bitmə tarixi: {exp_text}\n"
+        "⏳ Yeni promo yalnız bu tarixdən sonra aktiv edilə bilər.",
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data in ("promoenter", "promo_enter"))
 def cb_promo_enter(c):
     chat_id = c.message.chat.id
-    msg = bot.send_message(chat_id, "🎟 Promo kodu daxil edin:")
+    status = get_user_promo_status(chat_id)
+    if status.get("active"):
+        send_active_promo_info(chat_id)
+        try:
+            bot.answer_callback_query(c.id)
+        except Exception:
+            pass
+        return
+
+    user_state[chat_id] = {"step": "WAITING_PROMO_CODE"}
+    msg = bot.send_message(chat_id, "🎁 Promo kodu daxil edin:")
     bot.register_next_step_handler(msg, promo_code_entry_step)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "promo_active_info")
+def cb_promo_active_info(c):
+    chat_id = c.message.chat.id
+    send_active_promo_info(chat_id)
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -2055,8 +2205,11 @@ def cb_promo_enter(c):
 
 def promo_code_entry_step(message):
     chat_id = message.chat.id
-    response = apply_promo_code(chat_id, message.text)
+    success, response, _ = apply_promo_code(chat_id, message.text)
     bot.send_message(chat_id, response)
+    reset_user_state(chat_id)
+    if success:
+        main_menu(chat_id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("payplan|"))
@@ -6697,6 +6850,7 @@ def main_menu(chat_id):
         mk.add("📊 Admin Panel")
 
     bot.send_message(chat_id, "📋 Əsas menyudan seçim et:", reply_markup=mk)
+    send_promo_quick_action(chat_id)
 
 
 if __name__ == "__main__":
