@@ -203,6 +203,18 @@ def init_local_db():
     """
     )
 
+    # Status cədvəli sütun yoxlaması (avtomatik migrasiya)
+    cur.execute("PRAGMA table_info(listing_status)")
+    cols = {row[1] for row in cur.fetchall()}
+    if "status" not in cols:
+        cur.execute(
+            "ALTER TABLE listing_status ADD COLUMN status TEXT DEFAULT 'active'"
+        )
+    if "updated_at" not in cols:
+        cur.execute(
+            "ALTER TABLE listing_status ADD COLUMN updated_at TEXT"
+        )
+
     conn.commit()
     conn.close()
     print("✅ local_data.db hazırdır.")
@@ -510,8 +522,7 @@ def send_main_menu(chat_id: int):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("📝 Yeni elan əlavə et")
     kb.row("🔎 Axtarış sistemi")
-    kb.row("✅ Satılan elanlar", "✅ Kirayə verilənlər")
-    kb.row("⛔ Qara siyahı")
+    kb.row("📂 Elan statusları")
     kb.row("⭐ Favorilərim", "📋 Elanlarım")
     kb.row("ℹ️ Haqqında")
     if is_admin(chat_id):
@@ -1348,19 +1359,41 @@ def show_status_bucket(chat_id, status_code: str, title: str, undo_label: str):
         )
 
 
-@bot.message_handler(func=lambda m: m.text == "✅ Satılan elanlar")
+def status_menu_keyboard():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row("🏠 Satılan elanlar", "🏢 Kirayə verilən elanlar")
+    kb.row("⛔ Qara siyahı")
+    kb.row("⬅️ Geri")
+    return kb
+
+
+@bot.message_handler(func=lambda m: m.text == "📂 Elan statusları")
+def open_status_menu(message):
+    if not ensure_allowed(message):
+        return
+    bot.send_message(
+        message.chat.id,
+        "📂 Elan statuslarını seçin:",
+        reply_markup=status_menu_keyboard(),
+    )
+
+
+@bot.message_handler(func=lambda m: m.text == "🏠 Satılan elanlar")
 def show_sold_list(message):
     if not ensure_allowed(message):
         return
-    show_status_bucket(message.chat.id, "sold", "✅ Satılan elanlar:", "↩️ Geri qaytar")
+    show_status_bucket(message.chat.id, "sold", "✅ Satılan elanlar:", "🔄 Geri qaytar")
 
 
-@bot.message_handler(func=lambda m: m.text == "✅ Kirayə verilənlər")
+@bot.message_handler(func=lambda m: m.text == "🏢 Kirayə verilən elanlar")
 def show_rented_list(message):
     if not ensure_allowed(message):
         return
     show_status_bucket(
-        message.chat.id, "rented", "✅ Kirayə verilən elanlar:", "↩️ Geri qaytar"
+        message.chat.id,
+        "rented",
+        "✅ Kirayə verilən elanlar:",
+        "🔄 Geri qaytar",
     )
 
 
@@ -1372,8 +1405,15 @@ def show_blacklist(message):
         message.chat.id,
         "blacklisted",
         "⛔ Qara siyahıdakı elanlar:",
-        "✅ Qara siyahıdan çıxart",
+        "🔄 Geri qaytar",
     )
+
+
+@bot.message_handler(func=lambda m: m.text == "⬅️ Geri")
+def status_back_to_main(message):
+    if not ensure_allowed(message):
+        return
+    send_main_menu(message.chat.id)
 
 # =============== 🔎 AXTARIŞ SİSTEMİ ===============
 
@@ -1418,12 +1458,8 @@ def cb_search_select(c):
                 c.id, "Günlük açar sözlə axtarış limitiniz bitib.", show_alert=True
             )
             return
-        msg = bot.send_message(
-            chat_id,
-            "🔍 Açar söz və ya bir neçə söz yazın (məs: *yasamal 3 otaqlı 600 azn*):",
-            parse_mode="Markdown",
-        )
-        bot.register_next_step_handler(msg, keyword_search_handler)
+        search_state[chat_id] = {"mode": "kw", "operation": None}
+        send_keyword_operation_prompt(chat_id)
 
     elif mode == "phone":
         if not check_limit(chat_id, "phone", 50):
@@ -1433,6 +1469,63 @@ def cb_search_select(c):
             return
         msg = bot.send_message(chat_id, "☎️ Axtarmaq istədiyiniz nömrəni yazın:")
         bot.register_next_step_handler(msg, phone_search_handler)
+
+    try:
+        bot.answer_callback_query(c.id)
+    except:
+        pass
+
+
+def send_keyword_operation_prompt(chat_id: int):
+    mk = types.InlineKeyboardMarkup()
+    mk.add(
+        types.InlineKeyboardButton("🏠 Satılır", callback_data="kwop|sale"),
+        types.InlineKeyboardButton("🏢 Kirayə verilir", callback_data="kwop|rent"),
+    )
+    bot.send_message(
+        chat_id,
+        "Əməliyyat növünü seçin və sonra açar sözü yazın:",
+        reply_markup=mk,
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("kwop|"))
+def cb_keyword_operation(c):
+    if not ensure_allowed_cb(c):
+        return
+    action = c.data.split("|")[1]
+    chat_id = c.message.chat.id
+
+    if action == "back":
+        search_state[chat_id] = {"mode": "kw", "operation": None}
+        send_keyword_operation_prompt(chat_id)
+        try:
+            bot.answer_callback_query(c.id)
+        except:
+            pass
+        return
+
+    if action not in ("sale", "rent"):
+        try:
+            bot.answer_callback_query(c.id, "Naməlum seçim")
+        except:
+            pass
+        return
+
+    st = search_state.get(chat_id, {})
+    st.update({"mode": "kw", "operation": action})
+    search_state[chat_id] = st
+
+    mk = types.InlineKeyboardMarkup()
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kwop|back"))
+
+    msg = bot.send_message(
+        chat_id,
+        "🔍 Açar söz və ya bir neçə söz yazın (məs: *yasamal 3 otaqlı 600 azn*):",
+        parse_mode="Markdown",
+        reply_markup=mk,
+    )
+    bot.register_next_step_handler(msg, keyword_search_handler)
 
     try:
         bot.answer_callback_query(c.id)
@@ -2166,6 +2259,12 @@ def keyword_search_handler(message):
         bot.send_message(chat_id, "Boş sorğu göndərdiniz.")
         return
 
+    st = search_state.get(chat_id, {})
+    selected_op = st.get("operation")
+    if selected_op not in ("sale", "rent"):
+        send_keyword_operation_prompt(chat_id)
+        return
+
     # 🔥 Sorğunu sözlərə ayırırıq
     words = [w for w in text.split() if w]
 
@@ -2189,15 +2288,27 @@ def keyword_search_handler(message):
     FIELDS_MAIN = ["prop_type", "operation", "metro", "rooms", "address", "summary"]
     FIELDS_LOCAL = ["prop_type", "operation", "metro", "rooms", "rayon", "summary"]
 
+    def build_operation_clause():
+        variants = {
+            "sale": ["sale", "satilir", "satılır", "satış"],
+            "rent": ["rent", "kiraye", "kirayə", "icarə", "icare"],
+        }.get(selected_op, [selected_op])
+        placeholders = " OR ".join(["LOWER(operation)=?"] * len(variants))
+        return f"({placeholders})", [v.lower() for v in variants]
+
     # MAIN DB
     if os.path.exists(MAIN_DB):
         conn = get_main_conn()
         cur = conn.cursor()
 
         sql_where, params = build_multi_like_sql(FIELDS_MAIN)
-        sql = f"SELECT * FROM listings WHERE {sql_where} ORDER BY date_read DESC LIMIT 5000"
+        op_clause, op_params = build_operation_clause()
+        sql = (
+            f"SELECT * FROM listings WHERE {op_clause} AND {sql_where} "
+            "ORDER BY date_read DESC LIMIT 5000"
+        )
 
-        cur.execute(sql, params)
+        cur.execute(sql, op_params + params)
         for r in cur.fetchall():
             d = dict(r)
             d["__source"] = "main"
@@ -2209,9 +2320,13 @@ def keyword_search_handler(message):
     cur = conn.cursor()
 
     sql_where, params = build_multi_like_sql(FIELDS_LOCAL)
-    sql = f"SELECT * FROM listings_approved WHERE {sql_where} ORDER BY date_added DESC LIMIT 5000"
+    op_clause, op_params = build_operation_clause()
+    sql = (
+        f"SELECT * FROM listings_approved WHERE {op_clause} AND {sql_where} "
+        "ORDER BY date_added DESC LIMIT 5000"
+    )
 
-    cur.execute(sql, params)
+    cur.execute(sql, op_params + params)
     for r in cur.fetchall():
         d = dict(r)
         d["__source"] = "local"
@@ -2228,7 +2343,9 @@ def keyword_search_handler(message):
     inc_limit(chat_id, "keyword", 1)
 
     results.sort(key=safe_date, reverse=True)
-    search_state[chat_id] = {"mode": "kw", "results": results}
+    st["results"] = results
+    st["mode"] = "kw"
+    search_state[chat_id] = st
 
     _send_keyword_page(chat_id, 0)
 
@@ -2776,7 +2893,16 @@ def show_all_users(chat_id, status="active"):
         )
 
         mk = types.InlineKeyboardMarkup()
-        if blocked:
+        if approved == 0:
+            mk.add(
+                types.InlineKeyboardButton(
+                    "✅ Qəbul et", callback_data=f"user_approve|{chat_id_u}"
+                ),
+                types.InlineKeyboardButton(
+                    "❌ Dayandır", callback_data=f"user_block|{chat_id_u}"
+                ),
+            )
+        elif blocked:
             mk.add(
                 types.InlineKeyboardButton(
                     "✅ Aktiv et",
@@ -2822,6 +2948,37 @@ def cb_user_block_action(c):
         )
     except:
         pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("user_approve|"))
+def cb_user_approve_action(c):
+    if not is_admin(c.message.chat.id):
+        return
+    uid = int(c.data.split("|")[1])
+
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET approved=1, blocked=0 WHERE chat_id=?",
+        (uid,),
+    )
+    conn.commit()
+    conn.close()
+
+    try:
+        bot.answer_callback_query(c.id, "✅ İstifadəçi təsdiqləndi.")
+    except:
+        pass
+
+    try:
+        bot.send_message(
+            uid,
+            "🎉 Hesabınız admin tərəfindən təsdiqləndi. Artıq botdan istifadə edə bilərsiniz.",
+        )
+    except:
+        pass
+
+    show_all_users(c.message.chat.id, "pending")
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_unblock|"))
@@ -2960,10 +3117,12 @@ def cb_user_approve(c):
     try:
         bot.send_message(
             uid,
-            "🎉 Admin tərəfindən təsdiqləndiniz. Artıq botdan istifadə edə bilərsiniz.",
+            "🎉 Hesabınız admin tərəfindən təsdiqləndi. Artıq botdan istifadə edə bilərsiniz.",
         )
     except:
         pass
+
+    show_pending_users(c.message.chat.id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ublock|"))
@@ -3046,14 +3205,6 @@ def cb_refresh_bot(c):
 
 
 # =============== PUBLIC MENYUDAN DÜYMƏLƏR ===============
-
-
-@bot.message_handler(func=lambda m: m.text == "🏠 Əmlak Sahibləri")
-def owners_button(message):
-    if not ensure_allowed(message):
-        return
-    # Əmlak sahibləri üçün sadəcə mövcud axtarış sistemini açırıq
-    search_system_menu(message)
 
 
 @bot.message_handler(func=lambda m: m.text == "🧑‍💼 Vasitəçilər")
@@ -3324,36 +3475,16 @@ def run_bot():
 
 def main_menu(chat_id):
     mk = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    mk.add("🏠 Əmlak Sahibləri")
     mk.add("📝 Yeni elan əlavə et")
     mk.add("🔎 Axtarış sistemi")
-    mk.add("✅ Satılan elanlar", "✅ Kirayə verilənlər")
-    mk.add("⛔ Qara siyahı")
+    mk.add("📂 Elan statusları")
     mk.add("⭐ Favorilərim", "📋 Elanlarım")
     mk.add("ℹ️ Haqqında")
-
-    # 🌐 Buraya MiniApp düyməsini əlavə edirik
-    miniapp_btn = types.KeyboardButton(
-        text="🌐 MiniApp aç",
-        web_app=types.WebAppInfo(url="https://besthome-bot-144q.onrender.com"),
-    )
-    mk.add(miniapp_btn)
 
     if is_admin(chat_id):
         mk.add("📊 Admin Panel")
 
     bot.send_message(chat_id, "📋 Əsas menyudan seçim et:", reply_markup=mk)
-
-
-@bot.message_handler(func=lambda m: m.text == "🌐 MiniApp aç")
-def open_miniapp(message):
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    btn = types.KeyboardButton(
-        text="🌐 MiniApp aç",
-        web_app=types.WebAppInfo(url="https://besthome-bot-144q.onrender.com"),
-    )
-    kb.add(btn)
-    bot.send_message(message.chat.id, "🌐 MiniApp:", reply_markup=kb)
 
 
 if __name__ == "__main__":
