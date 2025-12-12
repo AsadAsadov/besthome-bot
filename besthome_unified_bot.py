@@ -67,6 +67,7 @@ search_state = {}  # Axtarış paging və filter state
 bot = telebot.TeleBot(BOT_TOKEN)
 user_state = {}  # Yeni elan proses state
 search_state = {}  # Açar sözlə axtarış paging state
+search_reminder_shown = set()  # Session-level reminder flag
 
 # Pagination
 PAGE_SIZE = 20
@@ -631,7 +632,13 @@ def offer_save_search(chat_id: int, params: dict):
         return
 
     st = search_state.setdefault(chat_id, {})
+
+    if chat_id in search_reminder_shown:
+        st.pop("pending_save", None)
+        return
+
     st["pending_save"] = params
+    search_reminder_shown.add(chat_id)
 
     mk = types.InlineKeyboardMarkup()
     mk.add(
@@ -640,7 +647,7 @@ def offer_save_search(chat_id: int, params: dict):
     )
     bot.send_message(
         chat_id,
-        "🔔 Bu axtarışa uyğun yeni elan çıxsa, xəbər edim?",
+        "💡 Bu axtarışı tez-tez edirsiniz?\nBildiriş aktiv edim?",
         reply_markup=mk,
     )
 
@@ -1163,6 +1170,12 @@ def start_cmd(message):
     username = message.from_user.username or ""
     full_name = message.from_user.full_name or ""
     first_seen = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    search_reminder_shown.discard(chat_id)
+
+    onboarding_text = (
+        "👋 Xoş gəlmisiniz!\n"
+        "Axtarışa başlamaq üçün **Axtarış sistemi** düyməsinə toxunun."
+    )
 
     conn = get_local_conn()
     cur = conn.cursor()
@@ -1171,9 +1184,11 @@ def start_cmd(message):
         (chat_id,),
     )
     row = cur.fetchone()
+    is_first_time = False
 
     # 🧩 Əgər user bazada yoxdursa, əlavə et
     if not row:
+        is_first_time = True
         cur.execute(
             "INSERT INTO users (chat_id, username, full_name, first_seen, approved, is_admin, last_version) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (chat_id, username, full_name, first_seen, 0, 0, CURRENT_VERSION),
@@ -1188,6 +1203,8 @@ def start_cmd(message):
         conn.commit()
         conn.close()
         main_menu(chat_id)
+        if is_first_time:
+            bot.send_message(chat_id, onboarding_text, parse_mode="Markdown")
         bot.send_message(chat_id, "✅ Admin kimi daxil oldun.")
         return
 
@@ -1197,6 +1214,8 @@ def start_cmd(message):
     conn.close()
 
     if not approved:
+        if is_first_time:
+            bot.send_message(chat_id, onboarding_text, parse_mode="Markdown")
         bot.send_message(
             chat_id, "❌ Admin icazə verməyib. Zəhmət olmasa təsdiq gözləyin."
         )
@@ -1204,7 +1223,10 @@ def start_cmd(message):
 
     # 🧩 Təsdiqlənmiş istifadəçi üçün menyunu aç
     main_menu(chat_id)
-    bot.send_message(chat_id, "👋 Xoş gəlmisiniz! Menyudan seçim edin:")
+    if is_first_time:
+        bot.send_message(chat_id, onboarding_text, parse_mode="Markdown")
+    else:
+        bot.send_message(chat_id, "👋 Xoş gəlmisiniz! Menyudan seçim edin:")
 
 
 # =============== ℹ️ Haqqında ===============
