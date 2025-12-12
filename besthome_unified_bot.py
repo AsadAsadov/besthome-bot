@@ -20,6 +20,7 @@ import sqlite3
 import threading
 import math
 import re
+import random
 from datetime import datetime, date, timedelta
 from typing import Optional
 from urllib.parse import quote
@@ -247,7 +248,31 @@ def init_local_db():
             amount INTEGER,
             approved_at TEXT DEFAULT (CURRENT_TIMESTAMP)
         )
-    """
+        """
+    )
+
+    # Promo kodlar
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS promo_codes (
+            code TEXT PRIMARY KEY,
+            days INTEGER,
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS promo_usages (
+            code TEXT,
+            chat_id INTEGER,
+            used_at TEXT,
+            expires_at TEXT,
+            PRIMARY KEY (code, chat_id)
+        )
+        """
     )
 
     # Limitlər
@@ -671,6 +696,139 @@ def log_approved_payment(chat_id: int, plan: str, amount: int):
     conn.close()
 
 
+def get_promo(code: str) -> Optional[dict]:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT code, days, is_active, created_at FROM promo_codes WHERE code=?",
+        (code,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "code": row[0],
+        "days": row[1],
+        "is_active": row[2],
+        "created_at": row[3],
+    }
+
+
+def generate_promo_code(days: int) -> Optional[str]:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    code = None
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    for _ in range(5):
+        candidate = f"BH{days}-" + "".join(random.choices(alphabet, k=6))
+        try:
+            cur.execute(
+                """
+                INSERT INTO promo_codes (code, days, is_active, created_at)
+                VALUES (?, ?, 1, ?)
+                """,
+                (candidate, days, datetime.utcnow().isoformat()),
+            )
+            conn.commit()
+            code = candidate
+            break
+        except sqlite3.IntegrityError:
+            continue
+    conn.close()
+    return code
+
+
+def set_promo_status(code: str, active: bool):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE promo_codes SET is_active=? WHERE code=?",
+        (1 if active else 0, code),
+    )
+    conn.commit()
+    conn.close()
+
+
+def has_active_promo(chat_id: int) -> bool:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COUNT(*) FROM promo_usages WHERE chat_id=? AND datetime(expires_at) > datetime('now')",
+        (chat_id,),
+    )
+    res = cur.fetchone()[0] or 0
+    conn.close()
+    return res > 0
+
+
+def has_used_promo(chat_id: int, code: str) -> bool:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COUNT(*) FROM promo_usages WHERE chat_id=? AND code=?",
+        (chat_id, code),
+    )
+    res = cur.fetchone()[0] or 0
+    conn.close()
+    return res > 0
+
+
+def record_promo_usage(code: str, chat_id: int, expires_at: datetime):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT OR REPLACE INTO promo_usages (code, chat_id, used_at, expires_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (code, chat_id, datetime.utcnow().isoformat(), expires_at.isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def apply_promo_code(chat_id: int, code_raw: str) -> str:
+    code = (code_raw or "").strip().upper()
+    if not code:
+        return "❌ Promo kod tapılmadı"
+
+    promo = get_promo(code)
+    if not promo:
+        return "❌ Promo kod tapılmadı"
+    if not promo.get("is_active"):
+        return "❌ Bu promo kod deaktiv edilib"
+    if has_active_promo(chat_id):
+        return (
+            "❌ Aktiv promo kodunuz var.\n"
+            "Yeni promo daxil etmək üçün mövcud promo bitməlidir."
+        )
+    if has_used_promo(chat_id, code):
+        return "❌ Bu promo kodu artıq istifadə etmisiniz"
+
+    ensure_subscription_record(chat_id)
+    sub = get_subscription(chat_id) or {}
+    now = datetime.utcnow()
+    exp_dt = None
+    if sub.get("expires_at"):
+        try:
+            exp_dt = datetime.fromisoformat(str(sub["expires_at"]))
+        except Exception:
+            exp_dt = None
+
+    base = exp_dt if exp_dt and exp_dt > now else now
+    new_exp = base + timedelta(days=promo["days"])
+    plan_name = sub.get("plan") or f"promo {promo['days']}g"
+    set_subscription(chat_id, plan_name, new_exp, is_active=1, is_demo=0, note=f"promo:{code}")
+    record_promo_usage(code, chat_id, new_exp)
+
+    return (
+        "✅ Promo kod aktivləşdirildi\n"
+        f"⏳ Hesabınıza +{promo['days']} gün əlavə edildi\n"
+        f"📅 Yeni bitmə tarixi: {new_exp.strftime('%d.%m.%Y')}"
+    )
+
+
 def activate_demo_if_needed(chat_id: int, force: bool = False):
     sub = get_subscription(chat_id)
     if not sub:
@@ -695,6 +853,7 @@ def send_payment_menu(chat_id: int):
                 f"{info['title']} — {info['price']}", callback_data=f"payplan|{key}"
             )
         )
+    mk.add(types.InlineKeyboardButton("🎟 Promo kod", callback_data="promoenter"))
     mk.add(types.InlineKeyboardButton("ℹ️ Haqqında", callback_data="payinfo"))
     bot.send_message(
         chat_id,
@@ -1731,6 +1890,23 @@ def cb_payinfo(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "promoenter")
+def cb_promo_enter(c):
+    chat_id = c.message.chat.id
+    msg = bot.send_message(chat_id, "🎟 Promo kodu daxil edin:")
+    bot.register_next_step_handler(msg, promo_code_entry_step)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+def promo_code_entry_step(message):
+    chat_id = message.chat.id
+    response = apply_promo_code(chat_id, message.text)
+    bot.send_message(chat_id, response)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("payplan|"))
@@ -4624,6 +4800,7 @@ def open_admin_panel(message):
             "🔍 İstifadəçi ID ilə axtar", callback_data="adm|user_search_id"
         )
     )
+    mk.add(types.InlineKeyboardButton("🎟 Promo kodlar", callback_data="adm|promos"))
     mk.add(
         types.InlineKeyboardButton(
             "♻️ Limitləri sıfırla", callback_data="adm|reset_limits"
@@ -4708,9 +4885,154 @@ def cb_admin(c):
     elif cmd == "payhist":
         show_payment_history_list(c.message.chat.id, page=1)
 
+    elif cmd == "promos":
+        show_admin_promo_menu(c.message.chat.id)
+
     try:
         bot.answer_callback_query(c.id)
     except:
+        pass
+
+
+def show_admin_promo_menu(chat_id: int):
+    if not is_admin(chat_id):
+        return
+
+    mk = types.InlineKeyboardMarkup()
+    mk.add(
+        types.InlineKeyboardButton("🎁 1 gün", callback_data="prm|gen|1"),
+        types.InlineKeyboardButton("🎁 3 gün", callback_data="prm|gen|3"),
+    )
+    mk.add(
+        types.InlineKeyboardButton("🎁 5 gün", callback_data="prm|gen|5"),
+        types.InlineKeyboardButton("🎁 7 gün", callback_data="prm|gen|7"),
+    )
+    mk.add(types.InlineKeyboardButton("📋 Promo siyahısı", callback_data="prm|list|1"))
+    bot.send_message(chat_id, "🎟 Promo kod idarəsi:", reply_markup=mk)
+
+
+def show_admin_promo_list(chat_id: int, page: int = 1):
+    if not is_admin(chat_id):
+        return
+
+    page = max(1, int(page or 1))
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM promo_codes")
+    total = cur.fetchone()[0] or 0
+    total_pages = max(1, math.ceil(total / PAGE_SIZE)) if total else 1
+    if page > total_pages:
+        page = total_pages
+
+    offset = (page - 1) * PAGE_SIZE
+    cur.execute(
+        """
+        SELECT code, days, is_active, created_at
+        FROM promo_codes
+        ORDER BY datetime(created_at) DESC, code DESC
+        LIMIT ? OFFSET ?
+        """,
+        (PAGE_SIZE, offset),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        mk = types.InlineKeyboardMarkup()
+        mk.add(types.InlineKeyboardButton("↩️ Geri", callback_data="adm|promos"))
+        bot.send_message(chat_id, "❌ Promo kod yoxdur.", reply_markup=mk)
+        return
+
+    lines = ["📋 Promo kod siyahısı:"]
+    for r in rows:
+        status = "✅ Aktiv" if r["is_active"] else "⛔ Deaktiv"
+        created_txt = "-"
+        if r["created_at"]:
+            try:
+                created_txt = (
+                    datetime.fromisoformat(str(r["created_at"]).replace(" ", "T"))
+                    .strftime("%d.%m.%Y")
+                )
+            except Exception:
+                created_txt = str(r["created_at"])
+        lines.append(
+            f"{r['code']} — {r['days']} gün | {status} | {created_txt}"
+        )
+
+    txt = "\n".join(lines) + f"\n\nSəhifə: {page}/{total_pages}"
+
+    mk = types.InlineKeyboardMarkup()
+    for r in rows:
+        toggle_action = "deact" if r["is_active"] else "act"
+        toggle_label = "⛔" if r["is_active"] else "✅"
+        mk.add(
+            types.InlineKeyboardButton(
+                f"{toggle_label} {r['code']}",
+                callback_data=f"prm|{toggle_action}|{r['code']}|{page}",
+            )
+        )
+
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(
+            types.InlineKeyboardButton("⬅️ Əvvəlki", callback_data=f"prm|list|{page-1}")
+        )
+    if page < total_pages:
+        nav_buttons.append(
+            types.InlineKeyboardButton("➡️ Növbəti", callback_data=f"prm|list|{page+1}")
+        )
+    if nav_buttons:
+        mk.add(*nav_buttons)
+
+    mk.add(types.InlineKeyboardButton("↩️ Geri", callback_data="adm|promos"))
+    bot.send_message(chat_id, txt, reply_markup=mk)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("prm|"))
+def cb_admin_promo(c):
+    if not is_admin(c.message.chat.id):
+        return
+
+    parts = c.data.split("|")
+    if len(parts) < 2:
+        return
+
+    action = parts[1]
+
+    if action == "gen" and len(parts) > 2:
+        try:
+            days = int(parts[2])
+        except Exception:
+            days = 0
+        code = generate_promo_code(days) if days > 0 else None
+        if code:
+            bot.send_message(
+                c.message.chat.id, f"✅ {days} günlük promo kod yaradıldı:\n{code}"
+            )
+        else:
+            bot.send_message(c.message.chat.id, "❌ Promo kod yaradıla bilmədi.")
+    elif action == "list":
+        page = 1
+        if len(parts) > 2:
+            try:
+                page = int(parts[2])
+            except Exception:
+                page = 1
+        show_admin_promo_list(c.message.chat.id, page=page)
+    elif action in {"act", "deact"} and len(parts) > 2:
+        code = parts[2]
+        page = 1
+        if len(parts) > 3:
+            try:
+                page = int(parts[3])
+            except Exception:
+                page = 1
+        set_promo_status(code, action == "act")
+        show_admin_promo_list(c.message.chat.id, page=page)
+
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
         pass
 
 
