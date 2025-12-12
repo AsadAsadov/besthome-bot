@@ -1213,13 +1213,27 @@ def start_cmd(message):
 @bot.message_handler(func=lambda m: m.text == "ℹ️ Haqqında")
 def about(message):
     text = (
-        "🏠 *Best Home Əmlak Botu*\n"
-        "• Vasitəçi bazası: Admin nəzarət edə bilər ancaq"
-        "• 🔎 Filtrlə, açar sözlə, nömrə ilə axtarış\n"
-        "• ⭐ Favorilər, 📋 Elanlarım, 🛠 Admin Panel\n"
-        "• 👥 Yalnız admin təsdiqli istifadəçilər üçün giriş\n"
-        "• 💬 WhatsApp-a bir toxunuşla keçid\n"
-        "📞 Admin: @esedovesed"
+        "🏠 BestHome Əmlak Botu\n\n"
+        "BestHome — Azərbaycanda satılan və kirayə verilən daşınmaz əmlak elanlarını rahat və sürətli tapmaq üçün hazırlanmış ağıllı Telegram botudur.\n\n"
+        "🔎 Axtarış imkanları\n"
+        "• Filtrlə axtarış (satılır / kirayə verilir, otaq, qiymət və s.)\n"
+        "• Açar sözlə axtarış (mətn yazmaq kifayətdir)\n"
+        "• Telefon nömrəsi ilə axtarış\n"
+        "• Ağıllı axtarış — yazdığınız mətni avtomatik analiz edir\n\n"
+        "📄 Elanlarla işləmə\n"
+        "• Elanlara baxış və səhifələmə\n"
+        "• Elanları ⭐ favorilərə əlavə etmə\n"
+        "• Favorilərdən çıxarma\n"
+        "• Satılıb / Kirayə verilib kimi işarələmə\n"
+        "• Qara siyahı ilə idarəetmə\n\n"
+        "🔔 Bildirişlər\n"
+        "• Yeni uyğun elan olduqda xəbərdarlıq\n"
+        "• Favori elanların qiyməti düşdükdə bildiriş\n\n"
+        "👥 Təhlükəsizlik\n"
+        "• Bot yalnız admin tərəfindən təsdiqlənmiş istifadəçilər üçün aktivdir\n"
+        "• Elanlar və istifadəçilər admin nəzarətindədir\n\n"
+        "📞 Əlaqə\n"
+        "Admin: @esedovesed"
     )
     bot.send_message(message.chat.id, text, parse_mode="Markdown")
 
