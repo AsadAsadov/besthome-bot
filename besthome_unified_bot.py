@@ -5031,6 +5031,55 @@ def show_admin_promo_stats(chat_id: int, page: int = 1):
         (PAGE_SIZE, offset),
     )
     rows = cur.fetchall()
+
+    # Promo gəlir və ödəniş edən istifadəçi statistikasını yığ
+    cur.execute(
+        """
+        SELECT pu.code, pu.chat_id, pu.expires_at, COALESCE(s.is_demo, 0) AS is_demo
+        FROM promo_usages pu
+        LEFT JOIN subscriptions s ON s.chat_id = pu.chat_id
+        """
+    )
+    usage_rows = cur.fetchall()
+
+    cur.execute("SELECT chat_id, amount, approved_at FROM payments")
+    payment_rows = cur.fetchall()
+
+    payments_by_user = {}
+    for p in payment_rows:
+        payments_by_user.setdefault(p["chat_id"], []).append(p)
+
+    revenue_map = {}
+    for u in usage_rows:
+        if u["is_demo"]:
+            continue  # Demo istifadəçiləri istisna et
+        exp_raw = u["expires_at"]
+        try:
+            exp_dt = datetime.fromisoformat(exp_raw) if exp_raw else None
+        except Exception:
+            try:
+                exp_dt = datetime.strptime(exp_raw, "%Y-%m-%d %H:%M:%S") if exp_raw else None
+            except Exception:
+                exp_dt = None
+
+        for pay in payments_by_user.get(u["chat_id"], []):
+            appr_raw = pay["approved_at"]
+            try:
+                appr_dt = datetime.fromisoformat(appr_raw) if appr_raw else None
+            except Exception:
+                try:
+                    appr_dt = datetime.strptime(appr_raw, "%Y-%m-%d %H:%M:%S") if appr_raw else None
+                except Exception:
+                    appr_dt = None
+
+            if not appr_dt or not exp_dt or appr_dt <= exp_dt:
+                continue
+
+            code = u["code"]
+            if code not in revenue_map:
+                revenue_map[code] = {"revenue": 0, "paid_users": set()}
+            revenue_map[code]["revenue"] += pay["amount"] or 0
+            revenue_map[code]["paid_users"].add(u["chat_id"])
     conn.close()
 
     if not rows:
@@ -5044,10 +5093,20 @@ def show_admin_promo_stats(chat_id: int, page: int = 1):
         total_users = r["total_users"] or 0
         active_users = r["active_users"] or 0
         expired_users = r["expired_users"] or 0
+        promo_data = revenue_map.get(r["code"], {"revenue": 0, "paid_users": set()})
+        revenue = promo_data.get("revenue", 0)
+        paid_users = len(promo_data.get("paid_users", set()))
+        conversion_pct = (paid_users / total_users * 100) if total_users else 0
+        conversion_base = total_users if total_users else 0
         lines.append(f"🎁 {r['code']} — {r['days']} gün")
         lines.append(f"👥 İstifadə edənlər: {total_users}")
         lines.append(f"🟢 Aktiv: {active_users}")
         lines.append(f"🔴 Bitmiş: {expired_users}")
+        lines.append(f"💳 Ödəniş edənlər: {paid_users}")
+        lines.append(f"💰 Gəlir: {revenue} AZN")
+        lines.append(
+            f"📈 Konversiya: {paid_users}/{conversion_base} ({conversion_pct:.1f}%)"
+        )
         lines.append("")
 
     txt = "\n".join(lines).strip() + f"\n\nSəhifə: {page}/{total_pages}"
