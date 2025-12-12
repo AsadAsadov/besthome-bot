@@ -40,6 +40,8 @@ SUBSCRIPTION_PLANS = {
     "30": {"title": "30 gün", "price": "15 AZN", "days": 30},
 }
 
+REFERRAL_REWARD_DAYS = 3
+
 # ==============================
 # 🔐 BOT KONFİQURASİYASI
 # ==============================
@@ -247,6 +249,17 @@ def init_local_db():
             plan TEXT,
             amount INTEGER,
             approved_at TEXT DEFAULT (CURRENT_TIMESTAMP)
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS referrals (
+            referrer_chat_id INTEGER,
+            referred_chat_id INTEGER PRIMARY KEY,
+            created_at TEXT,
+            reward_given INTEGER DEFAULT 0
         )
         """
     )
@@ -694,6 +707,139 @@ def log_approved_payment(chat_id: int, plan: str, amount: int):
     )
     conn.commit()
     conn.close()
+
+
+def parse_subscription_expiry(sub) -> Optional[datetime]:
+    if sub and sub.get("expires_at"):
+        try:
+            return datetime.fromisoformat(str(sub["expires_at"]))
+        except Exception:
+            return None
+    return None
+
+
+def parse_referrer_from_text(text: str) -> Optional[int]:
+    if not text:
+        return None
+    parts = text.strip().split()
+    if len(parts) < 2:
+        return None
+    for token in parts[1:]:
+        if token.startswith("ref_"):
+            try:
+                ref_id = int(token.split("ref_", 1)[1])
+                return ref_id if ref_id > 0 else None
+            except Exception:
+                return None
+    return None
+
+
+def save_referral(referrer_chat_id: Optional[int], referred_chat_id: int):
+    if not referrer_chat_id or referrer_chat_id == referred_chat_id:
+        return
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COUNT(*) FROM referrals WHERE referred_chat_id=?",
+        (referred_chat_id,),
+    )
+    exists = cur.fetchone()[0] or 0
+    if exists:
+        conn.close()
+        return
+    try:
+        cur.execute(
+            """
+            INSERT INTO referrals (referrer_chat_id, referred_chat_id, created_at, reward_given)
+            VALUES (?, ?, ?, 0)
+            """,
+            (referrer_chat_id, referred_chat_id, datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        pass
+    conn.close()
+
+
+def get_referral(referred_chat_id: int) -> Optional[dict]:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT referrer_chat_id, referred_chat_id, created_at, reward_given FROM referrals WHERE referred_chat_id=?",
+        (referred_chat_id,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "referrer_chat_id": row[0],
+        "referred_chat_id": row[1],
+        "created_at": row[2],
+        "reward_given": row[3],
+    }
+
+
+def mark_referral_rewarded(referred_chat_id: int):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE referrals SET reward_given=1 WHERE referred_chat_id=?",
+        (referred_chat_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def referred_user_finished_demo(sub_before_payment: Optional[dict]) -> bool:
+    if not sub_before_payment:
+        return False
+    if not (
+        sub_before_payment.get("is_demo")
+        or (sub_before_payment.get("plan") and sub_before_payment.get("plan") == "demo")
+    ):
+        return False
+    exp_dt = parse_subscription_expiry(sub_before_payment)
+    return bool(exp_dt and exp_dt <= datetime.utcnow())
+
+
+def grant_referral_reward(referrer_chat_id: int):
+    ensure_subscription_record(referrer_chat_id)
+    sub = get_subscription(referrer_chat_id) or {}
+    exp_dt = parse_subscription_expiry(sub)
+    base = exp_dt if sub.get("is_active") and exp_dt and exp_dt > datetime.utcnow() else datetime.utcnow()
+    new_exp = base + timedelta(days=REFERRAL_REWARD_DAYS)
+    plan_name = sub.get("plan") or "referral bonus"
+    set_subscription(
+        referrer_chat_id,
+        plan_name,
+        new_exp,
+        is_active=1,
+        is_demo=0,
+        note="referral_bonus",
+    )
+    try:
+        bot.send_message(
+            referrer_chat_id,
+            f"🎉 Dəvət etdiyiniz istifadəçi ödəniş etdi!\nHesabınıza +{REFERRAL_REWARD_DAYS} gün əlavə olundu.",
+        )
+    except Exception:
+        pass
+
+
+def process_referral_on_payment(referred_chat_id: int, sub_before_payment: Optional[dict], amount_paid: int):
+    if amount_paid <= 0:
+        return
+    referral = get_referral(referred_chat_id)
+    if not referral or referral.get("reward_given"):
+        return
+    if not referred_user_finished_demo(sub_before_payment):
+        return
+    referrer_id = referral.get("referrer_chat_id")
+    if not referrer_id or referrer_id == referred_chat_id:
+        return
+    grant_referral_reward(referrer_id)
+    mark_referral_rewarded(referred_chat_id)
 
 
 def get_promo(code: str) -> Optional[dict]:
@@ -1769,6 +1915,7 @@ def start_cmd(message):
     full_name = message.from_user.full_name or ""
     first_seen = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     search_reminder_shown.discard(chat_id)
+    referrer_chat_id = parse_referrer_from_text(message.text or "")
 
     onboarding_text = (
         "👋 Xoş gəlmisiniz!\n"
@@ -1792,6 +1939,9 @@ def start_cmd(message):
             (chat_id, username, full_name, first_seen, 0, 0, CURRENT_VERSION),
         )
         conn.commit()
+
+        if referrer_chat_id:
+            save_referral(referrer_chat_id, chat_id)
 
     ensure_subscription_record(chat_id)
     if is_first_time:
@@ -1993,6 +2143,7 @@ def cb_pay_admin(c):
         amount_val = parse_price_value(plan.get("price")) or 0
         if amount_val > 0:
             log_approved_payment(uid, plan["title"], amount_val)
+        process_referral_on_payment(uid, sub, amount_val)
         try:
             bot.send_message(
                 uid,
@@ -4782,6 +4933,9 @@ def open_admin_panel(message):
         )
     )
     mk.add(
+        types.InlineKeyboardButton("🤝 Referral statistikası", callback_data="adm|referrals")
+    )
+    mk.add(
         types.InlineKeyboardButton(
             "📤 Vasitəçilərə bildiriş", callback_data="adm|agents_broadcast"
         )
@@ -4841,6 +4995,9 @@ def cb_admin(c):
 
     elif cmd == "revenue":
         show_revenue_report(c.message.chat.id)
+
+    elif cmd == "referrals":
+        show_referral_stats(c.message.chat.id)
 
     elif cmd == "agents_broadcast":
         msg = bot.send_message(
@@ -5478,15 +5635,6 @@ def cb_pay_user_detail(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
-
-def parse_subscription_expiry(sub) -> Optional[datetime]:
-    if sub and sub.get("expires_at"):
-        try:
-            return datetime.fromisoformat(str(sub["expires_at"]))
-        except Exception:
-            return None
-    return None
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("subctl|"))
@@ -6224,6 +6372,47 @@ def show_admin_stats(chat_id):
     )
 
     bot.send_message(chat_id, "\n\n".join(sections), parse_mode="Markdown")
+
+
+def show_referral_stats(chat_id: int):
+    if not is_admin(chat_id):
+        return
+
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM referrals")
+    total_referred = cur.fetchone()[0] or 0
+
+    cur.execute("SELECT COUNT(*) FROM referrals WHERE reward_given=1")
+    total_rewarded = cur.fetchone()[0] or 0
+
+    cur.execute(
+        """
+        SELECT referrer_chat_id, COUNT(*) AS total_refs, SUM(reward_given) AS rewarded
+        FROM referrals
+        GROUP BY referrer_chat_id
+        ORDER BY total_refs DESC, referrer_chat_id DESC
+        LIMIT 10
+        """
+    )
+    top_rows = cur.fetchall()
+    conn.close()
+
+    lines = ["🤝 Referral statistikası"]
+    lines.append(f"👥 Ümumi dəvət olunan: {total_referred}")
+    lines.append(f"🎁 Bonus verilənlər: {total_rewarded}")
+
+    if top_rows:
+        lines.append("\n🏆 Ən çox dəvət edənlər:")
+        for idx, row in enumerate(top_rows, start=1):
+            rewarded = row["rewarded"] or 0
+            lines.append(
+                f"{idx}) {row['referrer_chat_id']} — {row['total_refs']} dəvət, bonus: {rewarded}"
+            )
+    else:
+        lines.append("Hələ referral qeydiyyatı yoxdur.")
+
+    bot.send_message(chat_id, "\n".join(lines))
 
 
 def show_revenue_report(chat_id: int):
