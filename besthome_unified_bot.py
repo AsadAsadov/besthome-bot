@@ -30,6 +30,16 @@ import telebot
 from telebot import types
 
 # ==============================
+# 💳 ABUNƏLİK KONFİQURASİYASI
+# ==============================
+SUBSCRIPTION_PLANS = {
+    "1": {"title": "1 gün", "price": "2 AZN", "days": 1},
+    "7": {"title": "7 gün", "price": "5 AZN", "days": 7},
+    "15": {"title": "15 gün", "price": "10 AZN", "days": 15},
+    "30": {"title": "30 gün", "price": "15 AZN", "days": 30},
+}
+
+# ==============================
 # 🔐 BOT KONFİQURASİYASI
 # ==============================
 BOT_TOKEN = "7938311608:AAHmzsTqnVJ7cVtStp2lmzGe2-1oj9LN1JM"
@@ -195,6 +205,20 @@ def init_local_db():
             date_joined TEXT,
             approved INTEGER DEFAULT 0,
             blocked INTEGER DEFAULT 0
+        )
+    """
+    )
+
+    # Abunəliklər
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS subscriptions (
+            chat_id INTEGER PRIMARY KEY,
+            plan TEXT,
+            expires_at TEXT,
+            is_active INTEGER DEFAULT 0,
+            is_demo INTEGER DEFAULT 0,
+            last_payment_note TEXT
         )
     """
     )
@@ -523,6 +547,161 @@ def register_user(message):
     conn.close()
 
 
+# ==============================
+# 💳 ABUNƏLİK FUNKSİYALARI
+# ==============================
+
+subscription_warn_cache = set()
+
+
+def ensure_subscription_record(chat_id: int):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO subscriptions (chat_id, plan, expires_at, is_active, is_demo, last_payment_note)
+        VALUES (?, NULL, NULL, 0, 0, NULL)
+        """,
+        (chat_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_subscription(chat_id: int) -> Optional[dict]:
+    ensure_subscription_record(chat_id)
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT chat_id, plan, expires_at, is_active, is_demo, last_payment_note FROM subscriptions WHERE chat_id=?",
+        (chat_id,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "chat_id": row[0],
+        "plan": row[1],
+        "expires_at": row[2],
+        "is_active": row[3],
+        "is_demo": row[4],
+        "last_payment_note": row[5],
+    }
+
+
+def set_subscription(
+    chat_id: int,
+    plan: str,
+    expires_at: Optional[datetime],
+    is_active: int = 1,
+    is_demo: int = 0,
+    note: Optional[str] = None,
+):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE subscriptions
+        SET plan=?, expires_at=?, is_active=?, is_demo=?, last_payment_note=COALESCE(?, last_payment_note)
+        WHERE chat_id=?
+        """,
+        (
+            plan,
+            expires_at.isoformat() if expires_at else None,
+            is_active,
+            is_demo,
+            note,
+            chat_id,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_payment_note(chat_id: int, note: str):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE subscriptions SET last_payment_note=? WHERE chat_id=?",
+        (note, chat_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def activate_demo_if_needed(chat_id: int, force: bool = False):
+    sub = get_subscription(chat_id)
+    if not sub:
+        return
+    if sub.get("is_demo") or sub.get("plan") == "demo":
+        return
+    if sub.get("plan") or not force:
+        return
+    expires = datetime.utcnow() + timedelta(days=3)
+    set_subscription(chat_id, "demo", expires, is_active=1, is_demo=1, note="demo")
+
+
+def subscription_payment_code(chat_id: int) -> str:
+    return f"BH-{chat_id}"
+
+
+def send_payment_menu(chat_id: int):
+    mk = types.InlineKeyboardMarkup()
+    for key, info in SUBSCRIPTION_PLANS.items():
+        mk.add(
+            types.InlineKeyboardButton(
+                f"{info['title']} — {info['price']}", callback_data=f"payplan|{key}"
+            )
+        )
+    mk.add(types.InlineKeyboardButton("ℹ️ Haqqında", callback_data="payinfo"))
+    bot.send_message(
+        chat_id,
+        "💳 Abunəlik planını seç və ödəniş et:\n\n" "✅ Demo bitibsə, yeniləmək üçün plan seçin.",
+        reply_markup=mk,
+    )
+
+
+def check_subscription(chat_id: int, silent: bool = False) -> bool:
+    if is_admin(chat_id):
+        return True
+
+    sub = get_subscription(chat_id)
+    now = datetime.utcnow()
+    expired = False
+    if sub and sub.get("expires_at"):
+        try:
+            exp_dt = datetime.fromisoformat(str(sub["expires_at"]))
+            if exp_dt < now:
+                expired = True
+        except Exception:
+            expired = True
+
+    if sub and expired and sub.get("is_active"):
+        conn = get_local_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE subscriptions SET is_active=0 WHERE chat_id=?",
+            (chat_id,),
+        )
+        conn.commit()
+        conn.close()
+
+    if not sub or expired or not sub.get("is_active"):
+        if not silent:
+            try:
+                bot.send_message(
+                    chat_id,
+                    "⛔ Abunəniz aktiv deyil. Botdan istifadə üçün ödəniş edin.",
+                )
+            except Exception:
+                pass
+            send_payment_menu(chat_id)
+        return False
+
+    return True
+
+
 def is_user_allowed(chat_id: int) -> bool:
     if is_admin(chat_id):
         return True
@@ -549,6 +728,8 @@ def ensure_allowed(message) -> bool:
         )
 
         return False
+    if not check_subscription(chat_id):
+        return False
     return True
 
 
@@ -565,6 +746,8 @@ def ensure_allowed_cb(c) -> bool:
             )
         except:
             pass
+        return False
+    if not check_subscription(chat_id):
         return False
     return True
 
@@ -1313,6 +1496,21 @@ def start_cmd(message):
         )
         conn.commit()
 
+    ensure_subscription_record(chat_id)
+    if is_first_time:
+        activate_demo_if_needed(chat_id, force=True)
+        sub_info = get_subscription(chat_id)
+        if sub_info and sub_info.get("plan") == "demo":
+            try:
+                exp_dt = datetime.fromisoformat(str(sub_info.get("expires_at")))
+                bot.send_message(
+                    chat_id,
+                    "🎁 Sizin üçün 3 günlük DEMO aktiv edildi!\n"
+                    f"📅 Bitmə tarixi: {exp_dt.strftime('%d.%m.%Y')}",
+                )
+            except Exception:
+                pass
+
     # 🧩 Admin üçün avtomatik təsdiq
     if chat_id == ADMIN_ID:
         cur.execute(
@@ -1341,6 +1539,11 @@ def start_cmd(message):
 
     # 🧩 Təsdiqlənmiş istifadəçi üçün menyunu aç
     main_menu(chat_id)
+    if not check_subscription(chat_id):
+        bot.send_message(
+            chat_id,
+            "ℹ️ Aktiv abunəlik tələb olunur. Ödəniş menyusunu açdım.",
+        )
     if is_first_time:
         bot.send_message(chat_id, onboarding_text, parse_mode="Markdown")
     else:
@@ -1376,6 +1579,118 @@ def about(message):
         "Admin: @esedovesed"
     )
     bot.send_message(message.chat.id, text, parse_mode="Markdown")
+
+
+@bot.message_handler(func=lambda m: m.text == "💳 Ödəniş")
+def payment_menu_entry(message):
+    send_payment_menu(message.chat.id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "payinfo")
+def cb_payinfo(c):
+    about(c.message)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("payplan|"))
+def cb_payplan(c):
+    chat_id = c.message.chat.id
+    plan_key = c.data.split("|")[1]
+    plan = SUBSCRIPTION_PLANS.get(plan_key)
+    if not plan:
+        return
+    ensure_subscription_record(chat_id)
+    set_payment_note(chat_id, f"plan:{plan_key}")
+
+    mk = types.InlineKeyboardMarkup()
+    mk.add(types.InlineKeyboardButton("✅ Ödəniş etdim", callback_data=f"paydone|{plan_key}"))
+
+    pay_text = (
+        "💳 Ödəniş üçün:\n"
+        "Telegram: @esedovesed\n"
+        "WhatsApp: 0708468585\n\n"
+        "🆔 Ödəniş kodunuz:\n"
+        f"{subscription_payment_code(chat_id)}"
+    )
+    bot.send_message(chat_id, pay_text, reply_markup=mk)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("paydone|"))
+def cb_paydone(c):
+    chat_id = c.message.chat.id
+    plan_key = c.data.split("|")[1]
+    plan = SUBSCRIPTION_PLANS.get(plan_key)
+    if not plan:
+        return
+    sub = get_subscription(chat_id) or {}
+    demo_status = "Bəli" if sub.get("is_demo") else "Xeyr"
+
+    admin_text = (
+        "🆕 Ödəniş sorğusu\n"
+        f"👤 chat_id: {chat_id}\n"
+        f"🆔 Kod: {subscription_payment_code(chat_id)}\n"
+        f"📦 Plan: {plan['title']} ({plan['price']})\n"
+        f"🎁 Demo: {demo_status}"
+    )
+    mk = types.InlineKeyboardMarkup()
+    mk.add(
+        types.InlineKeyboardButton(
+            "✅ Təsdiqlə", callback_data=f"payadm|ok|{chat_id}|{plan_key}"
+        ),
+        types.InlineKeyboardButton(
+            "❌ Ləğv et", callback_data=f"payadm|rej|{chat_id}|{plan_key}"
+        ),
+    )
+    bot.send_message(ADMIN_ID, admin_text, reply_markup=mk)
+    bot.send_message(chat_id, "✅ Ödəniş sorğunuz adminə göndərildi. Nəticə barədə məlumat veriləcək.")
+    try:
+        bot.answer_callback_query(c.id, "Admin təsdiqi gözlənilir")
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("payadm|"))
+def cb_pay_admin(c):
+    if not is_admin(c.message.chat.id):
+        return
+    parts = c.data.split("|")
+    if len(parts) < 4:
+        return
+    action, uid_raw, plan_key = parts[1], parts[2], parts[3]
+    try:
+        uid = int(uid_raw)
+    except Exception:
+        return
+    ensure_subscription_record(uid)
+    plan = SUBSCRIPTION_PLANS.get(plan_key)
+    if not plan:
+        return
+
+    if action == "ok":
+        expires = datetime.utcnow() + timedelta(days=plan["days"])
+        set_subscription(uid, plan["title"], expires, is_active=1, is_demo=0, note=f"plan:{plan_key}")
+        try:
+            bot.send_message(
+                uid,
+                "✅ Hesabınız aktivləşdirildi\n"
+                f"📅 Bitmə tarixi: {expires.strftime('%d.%m.%Y')}",
+            )
+        except Exception:
+            pass
+        bot.answer_callback_query(c.id, "✅ Aktiv edildi")
+    elif action == "rej":
+        try:
+            bot.send_message(uid, "❌ Ödəniş təsdiqlənmədi. Zəhmət olmasa adminlə əlaqə saxlayın.")
+        except Exception:
+            pass
+        bot.answer_callback_query(c.id, "İmtina edildi")
 
 
 # =============== 📝 YENİ ELAN ƏLAVƏ ET ===============
@@ -4149,6 +4464,11 @@ def open_admin_panel(message):
     mk.add(types.InlineKeyboardButton("🔍 Bazada axtar", callback_data="adm|search"))
     mk.add(
         types.InlineKeyboardButton(
+            "🔍 İstifadəçi ID ilə axtar", callback_data="adm|user_search_id"
+        )
+    )
+    mk.add(
+        types.InlineKeyboardButton(
             "♻️ Limitləri sıfırla", callback_data="adm|reset_limits"
         )
     )
@@ -4197,6 +4517,10 @@ def cb_admin(c):
         )
         bot.register_next_step_handler(msg, admin_search_handler)
 
+    elif cmd == "user_search_id":
+        msg = bot.send_message(c.message.chat.id, "🔍 İstifadəçi chat_id daxil et:")
+        bot.register_next_step_handler(msg, admin_search_by_id_step)
+
     elif cmd == "reset_limits":
         conn = get_local_conn()
         cur = conn.cursor()
@@ -4222,6 +4546,145 @@ def cb_admin(c):
         bot.answer_callback_query(c.id)
     except:
         pass
+
+
+def admin_search_by_id_step(message):
+    if not is_admin(message.chat.id):
+        return
+    try:
+        target_id = int((message.text or "").strip())
+    except Exception:
+        bot.send_message(message.chat.id, "⚠️ Düzgün chat_id yazın.")
+        return
+    admin_show_subscription_info(message.chat.id, target_id)
+
+
+def admin_show_subscription_info(admin_chat_id: int, target_id: int):
+    ensure_subscription_record(target_id)
+    sub = get_subscription(target_id)
+    exp_txt = "-"
+    exp_dt = None
+    if sub and sub.get("expires_at"):
+        try:
+            exp_dt = datetime.fromisoformat(str(sub["expires_at"]))
+            exp_txt = exp_dt.strftime("%d.%m.%Y")
+        except Exception:
+            exp_txt = str(sub.get("expires_at"))
+    plan_txt = sub.get("plan") if sub else "-"
+    is_active = bool(sub.get("is_active")) if sub else False
+    demo_txt = "Bəli" if sub and sub.get("is_demo") else "Xeyr"
+
+    info_txt = (
+        f"🆔 İstifadəçi: {target_id}\n"
+        f"📦 Plan: {plan_txt or '-'}\n"
+        f"📅 Bitmə tarixi: {exp_txt}\n"
+        f"✅ Aktiv: {'Bəli' if is_active else 'Xeyr'}\n"
+        f"🎁 Demo: {demo_txt}\n"
+        f"🆔 Ödəniş kodu: {subscription_payment_code(target_id)}"
+    )
+
+    mk = types.InlineKeyboardMarkup()
+    mk.add(
+        types.InlineKeyboardButton(
+            "➕ 3 gün uzat", callback_data=f"subctl|add|{target_id}|3"
+        ),
+        types.InlineKeyboardButton(
+            "➕ 7 gün uzat", callback_data=f"subctl|add|{target_id}|7"
+        ),
+    )
+    mk.add(
+        types.InlineKeyboardButton(
+            "➕ 15 gün uzat", callback_data=f"subctl|add|{target_id}|15"
+        ),
+        types.InlineKeyboardButton(
+            "➕ 30 gün uzat", callback_data=f"subctl|add|{target_id}|30"
+        ),
+    )
+    mk.add(
+        types.InlineKeyboardButton(
+            "⛔ Dayandır", callback_data=f"subctl|stop|{target_id}"
+        ),
+        types.InlineKeyboardButton(
+            "▶️ Aktiv et", callback_data=f"subctl|act|{target_id}"
+        ),
+    )
+
+    bot.send_message(admin_chat_id, info_txt, reply_markup=mk)
+
+
+def parse_subscription_expiry(sub) -> Optional[datetime]:
+    if sub and sub.get("expires_at"):
+        try:
+            return datetime.fromisoformat(str(sub["expires_at"]))
+        except Exception:
+            return None
+    return None
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("subctl|"))
+def cb_subscription_control(c):
+    if not is_admin(c.message.chat.id):
+        return
+    parts = c.data.split("|")
+    if len(parts) < 3:
+        return
+    action, uid_raw = parts[1], parts[2]
+    try:
+        uid = int(uid_raw)
+    except Exception:
+        return
+
+    ensure_subscription_record(uid)
+    sub = get_subscription(uid) or {}
+    exp_dt = parse_subscription_expiry(sub)
+
+    if action == "add" and len(parts) > 3:
+        try:
+            days = int(parts[3])
+        except Exception:
+            days = 0
+        if days > 0:
+            base = exp_dt if sub.get("is_active") and exp_dt and exp_dt > datetime.utcnow() else datetime.utcnow()
+            new_exp = base + timedelta(days=days)
+            plan_name = sub.get("plan") or f"manual {days}g"
+            set_subscription(uid, plan_name, new_exp, is_active=1, is_demo=0, note=f"extend:{days}")
+            try:
+                bot.send_message(uid, f"⏳ Hesabınız {days} gün uzadıldı")
+            except Exception:
+                pass
+    elif action == "stop":
+        set_subscription(
+            uid,
+            sub.get("plan") or "manual",
+            exp_dt,
+            is_active=0,
+            is_demo=sub.get("is_demo") or 0,
+            note="stopped",
+        )
+        try:
+            bot.send_message(uid, "⛔ Hesabınız deaktiv edildi")
+        except Exception:
+            pass
+    elif action == "act":
+        new_exp = exp_dt or (datetime.utcnow() + timedelta(days=1))
+        set_subscription(
+            uid,
+            sub.get("plan") or "manual",
+            new_exp,
+            is_active=1,
+            is_demo=0,
+            note="activated",
+        )
+        try:
+            bot.send_message(uid, "▶️ Hesabınız aktivləşdirildi")
+        except Exception:
+            pass
+
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+    admin_show_subscription_info(c.message.chat.id, uid)
 
 
 # =============== 👥 İSTİFADƏÇİLƏR PANELİ ===============
@@ -4974,6 +5437,56 @@ def admin_search_handler(message):
 # =============== RUN (Render / Lokal) ===============
 
 
+def subscription_notifier():
+    while True:
+        try:
+            conn = get_local_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT chat_id, expires_at, is_active FROM subscriptions"
+            )
+            rows = cur.fetchall()
+            conn.close()
+            now = datetime.utcnow()
+            for chat_id, expires_at, is_active in rows:
+                if not expires_at:
+                    continue
+                try:
+                    exp_dt = datetime.fromisoformat(str(expires_at))
+                except Exception:
+                    continue
+
+                if is_active and exp_dt <= now:
+                    conn2 = get_local_conn()
+                    cur2 = conn2.cursor()
+                    cur2.execute(
+                        "UPDATE subscriptions SET is_active=0 WHERE chat_id=?",
+                        (chat_id,),
+                    )
+                    conn2.commit()
+                    conn2.close()
+                    try:
+                        bot.send_message(chat_id, "⛔ Hesabınızın müddəti bitdi")
+                    except Exception:
+                        pass
+                    continue
+
+                if is_active and timedelta(0) < (exp_dt - now) <= timedelta(days=1):
+                    key = (chat_id, exp_dt.date())
+                    if key not in subscription_warn_cache:
+                        try:
+                            bot.send_message(
+                                chat_id,
+                                "⚠️ Hesabınızın bitməsinə 1 gün qalıb",
+                            )
+                        except Exception:
+                            pass
+                        subscription_warn_cache.add(key)
+        except Exception as e:
+            print("Subscription notifier error:", e)
+        time.sleep(3600)
+
+
 def run_bot():
     while True:
         try:
@@ -4993,7 +5506,7 @@ def main_menu(chat_id):
     mk.add("🔎 Axtarış sistemi")
     mk.add("📂 Elan statusları")
     mk.add("⭐ Favorilərim", "📋 Elanlarım")
-    mk.add("ℹ️ Haqqında")
+    mk.add("💳 Ödəniş", "ℹ️ Haqqında")
 
     if is_admin(chat_id):
         mk.add("📊 Admin Panel")
@@ -5011,6 +5524,7 @@ if __name__ == "__main__":
 
     threading.Thread(target=saved_search_worker, daemon=True).start()
     threading.Thread(target=favorite_price_worker, daemon=True).start()
+    threading.Thread(target=subscription_notifier, daemon=True).start()
 
     app = Flask(__name__)
 
