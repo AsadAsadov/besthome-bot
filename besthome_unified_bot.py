@@ -203,6 +203,32 @@ def init_local_db():
     """
     )
 
+    # Axtarış logları
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS search_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            search_type TEXT,
+            operation TEXT,
+            rayon TEXT,
+            query_text TEXT,
+            created_at TEXT DEFAULT (CURRENT_TIMESTAMP)
+        )
+    """
+    )
+
+    # İstifadəçi aktivliyi
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_activity (
+            chat_id INTEGER PRIMARY KEY,
+            last_seen TEXT,
+            total_searches INTEGER DEFAULT 0
+        )
+    """
+    )
+
     # Status cədvəli sütun yoxlaması (avtomatik migrasiya)
     cur.execute("PRAGMA table_info(listing_status)")
     cols = {row[1] for row in cur.fetchall()}
@@ -474,6 +500,110 @@ def update_listing_status(source: str, listing_id: int, status: str):
     conn.commit()
     conn.close()
 
+
+OPERATION_VARIANTS = {
+    "sale": {"sale", "satılır", "satilir", "satış"},
+    "rent": {"rent", "kirayə verilir", "kirayə", "kiraye", "icarə", "icare"},
+}
+
+_operation_cache = {}
+
+
+def normalize_operation_value(val: str):
+    if not val:
+        return None
+    v = str(val).strip().lower()
+    for norm, variants in OPERATION_VARIANTS.items():
+        if v == norm or v in variants:
+            return norm
+    return None
+
+
+def detect_db_operation_value(op_norm: str, source: str):
+    if op_norm not in OPERATION_VARIANTS:
+        return op_norm
+    key = (source, op_norm)
+    if key in _operation_cache:
+        return _operation_cache[key]
+
+    values = set()
+    try:
+        if source == "main" and os.path.exists(MAIN_DB):
+            conn = get_main_conn()
+            cur = conn.cursor()
+            cur.execute("SELECT DISTINCT operation FROM listings LIMIT 200")
+        else:
+            conn = get_local_conn()
+            cur = conn.cursor()
+            cur.execute("SELECT DISTINCT operation FROM listings_approved LIMIT 200")
+        values = {str(r[0]).strip().lower() for r in cur.fetchall() if r[0]}
+        conn.close()
+    except Exception:
+        values = set()
+
+    for candidate in OPERATION_VARIANTS[op_norm]:
+        if candidate.lower() in values:
+            _operation_cache[key] = candidate
+            return candidate
+
+    fallback = "sale" if op_norm == "sale" else "rent"
+    _operation_cache[key] = fallback
+    return fallback
+
+
+def show_loading_message(chat_id: int, edit_target=None):
+    text = "🔎 Elanlar axtarılır... zəhmət olmasa gözləyin."
+    if edit_target:
+        try:
+            bot.edit_message_text(text, chat_id=edit_target[0], message_id=edit_target[1])
+            return edit_target
+        except Exception:
+            pass
+    try:
+        msg = bot.send_message(chat_id, text)
+        return (msg.chat.id, msg.message_id)
+    except Exception:
+        return None
+
+
+def replace_loading_message(ref, text):
+    if not ref:
+        return False
+    try:
+        bot.edit_message_text(text, chat_id=ref[0], message_id=ref[1])
+        return True
+    except Exception:
+        return False
+
+
+def log_search_event(chat_id: int, search_type: str, operation=None, rayon=None, query_text=None):
+    conn = None
+    try:
+        conn = get_local_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO search_logs (chat_id, search_type, operation, rayon, query_text)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (chat_id, search_type, operation, rayon, query_text),
+        )
+        cur.execute(
+            """
+            INSERT INTO user_activity (chat_id, last_seen, total_searches)
+            VALUES (?, ?, 1)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                last_seen=excluded.last_seen,
+                total_searches=user_activity.total_searches + 1
+            """,
+            (chat_id, datetime.utcnow().isoformat(),),
+        )
+        conn.commit()
+    except Exception as e:
+        print("⚠️ Search log error:", e)
+    finally:
+        if conn:
+            conn.close()
 
 def fetch_listing_by_source(source: str, listing_id: int):
     if source == "main" and os.path.exists(MAIN_DB):
@@ -1513,7 +1643,7 @@ def cb_keyword_operation(c):
         return
 
     st = search_state.get(chat_id, {})
-    st.update({"mode": "kw", "operation": action})
+    st.update({"mode": "kw", "operation": normalize_operation_value(action) or action})
     search_state[chat_id] = st
 
     mk = types.InlineKeyboardMarkup()
@@ -2139,7 +2269,10 @@ def cb_structured(c):
             off = int(parts[2])
         except Exception:
             off = 0
+        loading_ref = show_loading_message(chat_id, (c.message.chat.id, c.message.message_id))
         _send_structured_page(chat_id, off)
+        if not replace_loading_message(loading_ref, "✅ Daha çox elan göstərildi."):
+            bot.send_message(chat_id, "✅ Daha çox elan göstərildi.")
 
     try:
         bot.answer_callback_query(c.id)
@@ -2181,36 +2314,38 @@ def perform_structured_search(chat_id, offset=0, edit_msg=None):
         return
 
     filters = st.get("filters", {})
+    loading_ref = show_loading_message(chat_id, edit_msg)
+
+    op_code = filters.get("op")
+    op_norm = None
+    if op_code == "sat":
+        op_norm = "sale"
+    elif op_code == "kir":
+        op_norm = "rent"
+    elif op_code:
+        op_norm = normalize_operation_value(op_code)
+
+    log_search_event(
+        chat_id,
+        "structured",
+        operation=op_norm or op_code,
+        rayon=filters.get("rayon"),
+        query_text=str(filters),
+    )
+
     results = query_structured_results(filters)
     st["results"] = results
     st["step"] = "results"
     inc_limit(chat_id, "structured", 1)
 
     if not results:
-        if edit_msg:
-            try:
-                bot.edit_message_text(
-                    "😕 Uyğun elan tapılmadı.",
-                    chat_id=edit_msg[0],
-                    message_id=edit_msg[1],
-                )
-                return
-            except Exception:
-                pass
-        bot.send_message(chat_id, "😕 Uyğun elan tapılmadı.")
+        if not replace_loading_message(loading_ref, "❌ Uyğun elan tapılmadı. Yenidən axtarış edin."):
+            bot.send_message(chat_id, "❌ Uyğun elan tapılmadı. Yenidən axtarış edin.")
         return
 
-    if edit_msg:
-        try:
-            bot.edit_message_text(
-                f"🔍 Tapıldı: {len(results)} elan. İlk nəticələr göstərilir.",
-                chat_id=edit_msg[0],
-                message_id=edit_msg[1],
-            )
-        except Exception:
-            pass
-    else:
-        bot.send_message(chat_id, f"🔍 Tapıldı: {len(results)} elan.")
+    summary = f"🔍 Tapıldı: {len(results)} elan. İlk nəticələr göstərilir."
+    if not replace_loading_message(loading_ref, summary):
+        bot.send_message(chat_id, summary)
 
     _send_structured_page(chat_id, offset)
 
@@ -2265,6 +2400,14 @@ def keyword_search_handler(message):
         send_keyword_operation_prompt(chat_id)
         return
 
+    loading_ref = show_loading_message(chat_id)
+    log_search_event(
+        chat_id,
+        "keyword",
+        operation=normalize_operation_value(selected_op) or selected_op,
+        query_text=text,
+    )
+
     # 🔥 Sorğunu sözlərə ayırırıq
     words = [w for w in text.split() if w]
 
@@ -2288,13 +2431,9 @@ def keyword_search_handler(message):
     FIELDS_MAIN = ["prop_type", "operation", "metro", "rooms", "address", "summary"]
     FIELDS_LOCAL = ["prop_type", "operation", "metro", "rooms", "rayon", "summary"]
 
-    def build_operation_clause():
-        variants = {
-            "sale": ["sale", "satilir", "satılır", "satış"],
-            "rent": ["rent", "kiraye", "kirayə", "icarə", "icare"],
-        }.get(selected_op, [selected_op])
-        placeholders = " OR ".join(["LOWER(operation)=?"] * len(variants))
-        return f"({placeholders})", [v.lower() for v in variants]
+    def build_operation_clause(source="main"):
+        op_value = detect_db_operation_value(selected_op, source)
+        return "operation = ?", [op_value]
 
     # MAIN DB
     if os.path.exists(MAIN_DB):
@@ -2302,7 +2441,7 @@ def keyword_search_handler(message):
         cur = conn.cursor()
 
         sql_where, params = build_multi_like_sql(FIELDS_MAIN)
-        op_clause, op_params = build_operation_clause()
+        op_clause, op_params = build_operation_clause("main")
         sql = (
             f"SELECT * FROM listings WHERE {op_clause} AND {sql_where} "
             "ORDER BY date_read DESC LIMIT 5000"
@@ -2320,7 +2459,7 @@ def keyword_search_handler(message):
     cur = conn.cursor()
 
     sql_where, params = build_multi_like_sql(FIELDS_LOCAL)
-    op_clause, op_params = build_operation_clause()
+    op_clause, op_params = build_operation_clause("local")
     sql = (
         f"SELECT * FROM listings_approved WHERE {op_clause} AND {sql_where} "
         "ORDER BY date_added DESC LIMIT 5000"
@@ -2337,7 +2476,8 @@ def keyword_search_handler(message):
     results = [r for r in results if is_listing_active(r, status_map)]
 
     if not results:
-        bot.send_message(chat_id, "😕 Uyğun elan tapılmadı.")
+        if not replace_loading_message(loading_ref, "❌ Uyğun elan tapılmadı. Yenidən axtarış edin."):
+            bot.send_message(chat_id, "❌ Uyğun elan tapılmadı. Yenidən axtarış edin.")
         return
 
     inc_limit(chat_id, "keyword", 1)
@@ -2347,10 +2487,10 @@ def keyword_search_handler(message):
     st["mode"] = "kw"
     search_state[chat_id] = st
 
-    _send_keyword_page(chat_id, 0)
+    _send_keyword_page(chat_id, 0, status_ref=loading_ref)
 
 
-def _send_keyword_page(chat_id, offset):
+def _send_keyword_page(chat_id, offset, status_ref=None):
     state = search_state.get(chat_id)
     if not state or state.get("mode") != "kw":
         bot.send_message(chat_id, "Sessiya tapılmadı. Yenidən axtarın.")
@@ -2359,9 +2499,9 @@ def _send_keyword_page(chat_id, offset):
     page_size = 20
 
     if offset == 0:
-        bot.send_message(
-            chat_id, f"🔍 Tapıldı: {len(results)} elan. İlk {page_size} göstərilir:"
-        )
+        summary = f"🔍 Tapıldı: {len(results)} elan. İlk {page_size} göstərilir:"
+        if not replace_loading_message(status_ref, summary):
+            bot.send_message(chat_id, summary)
 
     slice_results = results[offset : offset + page_size]
     for ev in slice_results:
@@ -2392,11 +2532,14 @@ def cb_kw_more(c):
     chat_id = c.message.chat.id
     _, off = c.data.split("|")
     offset = int(off)
+    loading_ref = show_loading_message(chat_id, (c.message.chat.id, c.message.message_id))
     try:
         bot.answer_callback_query(c.id)
     except:
         pass
-    _send_keyword_page(chat_id, offset)
+    _send_keyword_page(chat_id, offset, status_ref=loading_ref)
+    if not replace_loading_message(loading_ref, "✅ Daha çox elan göstərildi."):
+        bot.send_message(chat_id, "✅ Daha çox elan göstərildi.")
 
 
 # ===== NÖMRƏ İLƏ AXTARIŞ =====
@@ -2414,6 +2557,9 @@ def phone_search_handler(message):
     if len(raw) < 7:
         bot.send_message(chat_id, "⚠️ Zəhmət olmasa düzgün nömrə yazın (min. 7 rəqəm).")
         return
+
+    loading_ref = show_loading_message(chat_id)
+    log_search_event(chat_id, "phone", query_text=raw)
 
     like = f"%{raw}%"
     results = []
@@ -2454,13 +2600,16 @@ def phone_search_handler(message):
     conn.close()
 
     if not results:
-        bot.send_message(chat_id, "❌ Bu nömrə ilə heç bir elan tapılmadı.")
+        if not replace_loading_message(loading_ref, "❌ Uyğun elan tapılmadı. Yenidən axtarış edin."):
+            bot.send_message(chat_id, "❌ Bu nömrə ilə heç bir elan tapılmadı.")
         return
 
     inc_limit(chat_id, "phone", 1)
     results.sort(key=safe_date, reverse=True)
 
-    bot.send_message(chat_id, f"☎️ Bu nömrə ilə {len(results)} elan tapıldı:")
+    summary = f"☎️ Bu nömrə ilə {len(results)} elan tapıldı:"
+    if not replace_loading_message(loading_ref, summary):
+        bot.send_message(chat_id, summary)
     for ev in results[:50]:
         send_listing_card(
             chat_id,
