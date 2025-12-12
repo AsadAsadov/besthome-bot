@@ -1816,6 +1816,12 @@ def send_logo_if_exists(chat_id: int):
         pass
 
 
+def send_refresh_button(chat_id: int):
+    mk = types.InlineKeyboardMarkup()
+    mk.add(types.InlineKeyboardButton("🔄 Botu yenilə", callback_data="bot_refresh"))
+    bot.send_message(chat_id, "🔄 Botu yenilə", reply_markup=mk)
+
+
 def send_main_menu(chat_id: int):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("📝 Yeni elan əlavə et")
@@ -1828,6 +1834,7 @@ def send_main_menu(chat_id: int):
         kb.row("📊 Admin Panel")
     bot.send_message(chat_id, "🏠 Əsas menyu:", reply_markup=kb)
     send_promo_quick_action(chat_id)
+    send_refresh_button(chat_id)
 
 
 # =============== ELAN KARTI (WhatsApp ilə) ===============
@@ -6248,6 +6255,25 @@ def broadcast_bot_update(admin_chat_id):
     )
 
 
+def handle_bot_refresh(message):
+    chat_id = message.chat.id
+    user_state.pop(chat_id, None)
+    search_state.pop(chat_id, None)
+    session_interactions.pop(chat_id, None)
+    search_reminder_shown.discard(chat_id)
+    start_cmd(message)
+    bot.send_message(chat_id, "🔄 Bot yeniləndi.\nƏsas menyudan seçim edə bilərsən.")
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "bot_refresh")
+def cb_bot_refresh(c):
+    try:
+        bot.answer_callback_query(c.id, "✅ Yeniləndi.")
+    except:
+        pass
+    handle_bot_refresh(c.message)
+
+
 @bot.callback_query_handler(func=lambda c: c.data == "refresh_bot")
 def cb_refresh_bot(c):
     """İstifadəçi 'Botu yenilə' düyməsinə basanda /start işə düşür."""
@@ -6255,7 +6281,7 @@ def cb_refresh_bot(c):
         bot.answer_callback_query(c.id, "✅ Yeniləndi.")
     except:
         pass
-    start_cmd(c.message)
+    handle_bot_refresh(c.message)
 
 
 # =============== PUBLIC MENYUDAN DÜYMƏLƏR ===============
@@ -6855,6 +6881,7 @@ def main_menu(chat_id):
 
     bot.send_message(chat_id, "📋 Əsas menyudan seçim et:", reply_markup=mk)
     send_promo_quick_action(chat_id)
+    send_refresh_button(chat_id)
 
 
 if __name__ == "__main__":
