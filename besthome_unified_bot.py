@@ -4525,6 +4525,9 @@ def open_admin_panel(message):
             "📤 Vasitəçilərə bildiriş", callback_data="adm|agents_broadcast"
         )
     )
+    mk.add(
+        types.InlineKeyboardButton("🧾 Ödəniş tarixçəsi", callback_data="adm|payhist")
+    )
     mk.add(types.InlineKeyboardButton("🔍 Bazada axtar", callback_data="adm|search"))
     mk.add(
         types.InlineKeyboardButton(
@@ -4609,6 +4612,9 @@ def cb_admin(c):
         reset_search_state(c.message.chat.id)
         send_paginated_results(c.message.chat.id, "topviews", params={"days": 7}, page=1)
 
+    elif cmd == "payhist":
+        show_payment_history_list(c.message.chat.id, page=1)
+
     try:
         bot.answer_callback_query(c.id)
     except:
@@ -4677,6 +4683,238 @@ def admin_show_subscription_info(admin_chat_id: int, target_id: int):
     )
 
     bot.send_message(admin_chat_id, info_txt, reply_markup=mk)
+
+
+def show_payment_history_list(chat_id: int, page: int = 1):
+    if not is_admin(chat_id):
+        return
+
+    page = max(1, int(page or 1))
+    conn = get_local_conn()
+    cur = conn.cursor()
+
+    cur.execute("SELECT COUNT(DISTINCT chat_id) FROM payments")
+    total_users = cur.fetchone()[0] or 0
+    if total_users == 0:
+        conn.close()
+        bot.send_message(chat_id, "❌ Ödəniş qeydi yoxdur.")
+        return
+
+    total_pages = max(1, math.ceil(total_users / PAGE_SIZE))
+    if page > total_pages:
+        page = total_pages
+
+    offset = (page - 1) * PAGE_SIZE
+    cur.execute(
+        """
+        SELECT chat_id,
+               COALESCE(SUM(amount), 0) AS total_paid,
+               MAX(approved_at) AS last_payment_date
+        FROM payments
+        GROUP BY chat_id
+        ORDER BY datetime(last_payment_date) DESC, chat_id DESC
+        LIMIT ? OFFSET ?
+        """,
+        (PAGE_SIZE, offset),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    lines = ["🧾 Ödəniş tarixçəsi (admin):"]
+    for r in rows:
+        last_dt = "-"
+        if r["last_payment_date"]:
+            try:
+                last_dt = datetime.fromisoformat(str(r["last_payment_date"]).replace(" ", "T")).strftime(
+                    "%d.%m.%Y"
+                )
+            except Exception:
+                last_dt = str(r["last_payment_date"])
+        lines.append(
+            f"🆔 {r['chat_id']} — {r['total_paid']} AZN (son: {last_dt})"
+        )
+
+    txt = "\n".join(lines) + f"\n\nSəhifə: {page}/{total_pages}"
+
+    mk = types.InlineKeyboardMarkup()
+    for r in rows:
+        mk.add(
+            types.InlineKeyboardButton(
+                f"{r['chat_id']} | {r['total_paid']} AZN",
+                callback_data=f"paydetail|{r['chat_id']}|1|{page}",
+            )
+        )
+
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(
+            types.InlineKeyboardButton("⬅️ Əvvəlki", callback_data=f"payhist|{page-1}")
+        )
+    if page < total_pages:
+        nav_buttons.append(
+            types.InlineKeyboardButton("➡️ Növbəti", callback_data=f"payhist|{page+1}")
+        )
+    if nav_buttons:
+        mk.row(*nav_buttons)
+
+    bot.send_message(chat_id, txt, reply_markup=mk)
+
+
+def show_user_payment_details(admin_chat_id: int, target_id: int, page: int = 1, list_page: int = 1):
+    if not is_admin(admin_chat_id):
+        return
+
+    page = max(1, int(page or 1))
+    list_page = max(1, int(list_page or 1))
+    conn = get_local_conn()
+    cur = conn.cursor()
+
+    cur.execute(
+        "SELECT COUNT(*) FROM payments WHERE chat_id=?",
+        (target_id,),
+    )
+    total_payments = cur.fetchone()[0] or 0
+    if total_payments == 0:
+        conn.close()
+        mk = types.InlineKeyboardMarkup()
+        mk.add(
+            types.InlineKeyboardButton(
+                "⬅️ Siyahıya qayıt", callback_data=f"payhist|{list_page}"
+            )
+        )
+        bot.send_message(admin_chat_id, "❌ Bu istifadəçinin ödənişləri yoxdur.", reply_markup=mk)
+        return
+
+    total_pages = max(1, math.ceil(total_payments / PAGE_SIZE))
+    if page > total_pages:
+        page = total_pages
+    offset = (page - 1) * PAGE_SIZE
+
+    cur.execute(
+        """
+        SELECT plan, amount, approved_at
+        FROM payments
+        WHERE chat_id=?
+        ORDER BY datetime(approved_at) DESC
+        LIMIT ? OFFSET ?
+        """,
+        (target_id, PAGE_SIZE, offset),
+    )
+    payments = cur.fetchall()
+
+    cur.execute(
+        """
+        SELECT COALESCE(SUM(amount), 0) AS total_paid,
+               MAX(approved_at) AS last_dt
+        FROM payments
+        WHERE chat_id=?
+        """,
+        (target_id,),
+    )
+    summary = cur.fetchone()
+    conn.close()
+
+    last_payment = "-"
+    if summary["last_dt"]:
+        try:
+            last_payment = datetime.fromisoformat(str(summary["last_dt"]).replace(" ", "T")).strftime(
+                "%d.%m.%Y %H:%M"
+            )
+        except Exception:
+            last_payment = str(summary["last_dt"])
+
+    header = (
+        f"🧾 Ödənişlər — {target_id}\n"
+        f"💰 Toplam: {summary['total_paid']} AZN\n"
+        f"📅 Son ödəniş: {last_payment}\n"
+        f"Səhifə: {page}/{total_pages}\n"
+    )
+
+    lines = []
+    for idx, p in enumerate(payments, start=offset + 1):
+        pay_date = "-"
+        if p["approved_at"]:
+            try:
+                pay_date = datetime.fromisoformat(str(p["approved_at"]).replace(" ", "T")).strftime(
+                    "%d.%m.%Y %H:%M"
+                )
+            except Exception:
+                pay_date = str(p["approved_at"])
+        lines.append(f"{idx}) {pay_date} — {p['plan']} — {p['amount']} AZN")
+
+    mk = types.InlineKeyboardMarkup()
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(
+            types.InlineKeyboardButton(
+                "⬅️ Əvvəlki", callback_data=f"paydetail|{target_id}|{page-1}|{list_page}"
+            )
+        )
+    if page < total_pages:
+        nav_buttons.append(
+            types.InlineKeyboardButton(
+                "➡️ Növbəti", callback_data=f"paydetail|{target_id}|{page+1}|{list_page}"
+            )
+        )
+    if nav_buttons:
+        mk.row(*nav_buttons)
+
+    mk.add(
+        types.InlineKeyboardButton(
+            "⬅️ İstifadəçi siyahısı", callback_data=f"payhist|{list_page}"
+        )
+    )
+
+    bot.send_message(
+        admin_chat_id,
+        header + "\n".join(lines),
+        reply_markup=mk,
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("payhist|"))
+def cb_pay_history_list(c):
+    if not is_admin(c.message.chat.id):
+        return
+    parts = c.data.split("|")
+    page = 1
+    if len(parts) > 1:
+        try:
+            page = int(parts[1])
+        except Exception:
+            page = 1
+    show_payment_history_list(c.message.chat.id, page=page)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("paydetail|"))
+def cb_pay_user_detail(c):
+    if not is_admin(c.message.chat.id):
+        return
+    parts = c.data.split("|")
+    if len(parts) < 3:
+        return
+    try:
+        target_id = int(parts[1])
+    except Exception:
+        return
+    try:
+        page = int(parts[2]) if len(parts) > 2 else 1
+    except Exception:
+        page = 1
+    try:
+        list_page = int(parts[3]) if len(parts) > 3 else 1
+    except Exception:
+        list_page = 1
+
+    show_user_payment_details(c.message.chat.id, target_id, page=page, list_page=list_page)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
 
 
 def parse_subscription_expiry(sub) -> Optional[datetime]:
