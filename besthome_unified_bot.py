@@ -18,6 +18,7 @@ import time
 import zipfile
 import sqlite3
 import threading
+import math
 from datetime import datetime, date
 from urllib.parse import quote
 
@@ -64,6 +65,9 @@ search_state = {}  # Axtarış paging və filter state
 bot = telebot.TeleBot(BOT_TOKEN)
 user_state = {}  # Yeni elan proses state
 search_state = {}  # Açar sözlə axtarış paging state
+
+# Pagination
+PAGE_SIZE = 20
 
 
 def get_main_conn():
@@ -461,6 +465,33 @@ def reset_search_state(chat_id: int):
         except:
             pass
     search_state.pop(chat_id, None)
+
+
+def compute_total_pages(total_count: int) -> int:
+    return max(1, math.ceil(total_count / PAGE_SIZE))
+
+
+def build_pagination_keyboard(page: int, total_pages: int):
+    mk = types.InlineKeyboardMarkup()
+    mk.add(
+        types.InlineKeyboardButton("⏮ İlk", callback_data="pg:first"),
+        types.InlineKeyboardButton("◀️ Geri", callback_data="pg:prev"),
+        types.InlineKeyboardButton(
+            f"📄 {page} / {total_pages}", callback_data="pg:noop"
+        ),
+        types.InlineKeyboardButton("▶️ İrəli", callback_data="pg:next"),
+        types.InlineKeyboardButton("⏭ Son", callback_data="pg:last"),
+    )
+    return mk
+
+
+def set_pagination_state(chat_id: int, mode: str, params: dict, page: int, total_pages: int):
+    search_state[chat_id] = {
+        "mode": mode,
+        "params": params or {},
+        "page": page,
+        "total_pages": total_pages,
+    }
 
 
 def get_status_map():
@@ -1346,46 +1377,8 @@ def show_favorites(message):
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT listing_id, source FROM favorites
-        WHERE chat_id=?
-        ORDER BY added_at DESC
-    """,
-        (chat_id,),
-    )
-    favs = cur.fetchall()
-    conn.close()
-
-    if not favs:
-        bot.send_message(chat_id, "⭐ Favorilər siyahınız boşdur.")
-        return
-
-    bot.send_message(chat_id, "⭐ Favori elanlarınız:")
-    for f in favs:
-        lid = f["listing_id"]
-        src = f["source"]
-        ev = None
-        if src == "main" and os.path.exists(MAIN_DB):
-            conn = get_main_conn()
-            c2 = conn.cursor()
-            c2.execute("SELECT * FROM listings WHERE id=?", (lid,))
-            r = c2.fetchone()
-            conn.close()
-            if r:
-                ev = dict(r)
-        elif src == "local":
-            conn = get_local_conn()
-            c2 = conn.cursor()
-            c2.execute("SELECT * FROM listings_approved WHERE id=?", (lid,))
-            r = c2.fetchone()
-            conn.close()
-            if r:
-                ev = dict(r)
-        if ev:
-            send_listing_card(chat_id, ev, source=src, with_fav_button=False)
+    reset_search_state(chat_id)
+    send_paginated_results(chat_id, "favorites", params={}, page=1)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("fav|"))
@@ -1407,6 +1400,46 @@ def cb_add_favorite(c):
     conn.commit()
     conn.close()
     bot.answer_callback_query(c.id, "⭐ Favoriyə əlavə olundu.")
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("favdel|"))
+def cb_remove_favorite(c):
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id
+    try:
+        _, src, sid = c.data.split("|")
+    except ValueError:
+        return
+    try:
+        lid = int(sid)
+    except Exception:
+        lid = sid
+
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM favorites WHERE chat_id=? AND listing_id=? AND source=?",
+        (chat_id, lid, src),
+    )
+    conn.commit()
+    conn.close()
+
+    try:
+        bot.answer_callback_query(c.id, "⭐ Elan favoritlərdən çıxarıldı.")
+    except Exception:
+        pass
+
+    st = search_state.get(chat_id, {})
+    if st.get("mode") == "favorites":
+        page = st.get("page", 1)
+        send_paginated_results(
+            chat_id,
+            mode="favorites",
+            params={},
+            page=page,
+            show_summary=False,
+        )
 
 
 
@@ -1458,35 +1491,14 @@ def cb_listing_status(c):
 
 
 def show_status_bucket(chat_id, status_code: str, title: str, undo_label: str):
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT source, listing_id FROM listing_status WHERE status=? ORDER BY updated_at DESC",
-        (status_code,),
+    reset_search_state(chat_id)
+    params = {"status": status_code, "undo_label": undo_label, "title": title}
+    send_paginated_results(
+        chat_id,
+        mode="statuslist",
+        params=params,
+        page=1,
     )
-    rows = cur.fetchall()
-    conn.close()
-
-    if not rows:
-        bot.send_message(chat_id, "Siyahı boşdur.")
-        return
-
-    bot.send_message(chat_id, title)
-    for r in rows:
-        ev = fetch_listing_by_source(r["source"], r["listing_id"])
-        if not ev:
-            continue
-        btn = types.InlineKeyboardButton(
-            undo_label, callback_data=f"st|undo|{r['source']}|{r['listing_id']}"
-        )
-        send_listing_card(
-            chat_id,
-            ev,
-            source=ev.get("__source", r["source"]),
-            with_fav_button=True,
-            status_controls=False,
-            extra_buttons=[btn],
-        )
 
 
 def status_menu_keyboard():
@@ -1588,7 +1600,7 @@ def cb_search_select(c):
                 c.id, "Günlük açar sözlə axtarış limitiniz bitib.", show_alert=True
             )
             return
-        search_state[chat_id] = {"mode": "kw", "operation": None}
+        search_state[chat_id] = {"mode": "keyword", "operation": None}
         send_keyword_operation_prompt(chat_id)
 
     elif mode == "phone":
@@ -1627,7 +1639,7 @@ def cb_keyword_operation(c):
     chat_id = c.message.chat.id
 
     if action == "back":
-        search_state[chat_id] = {"mode": "kw", "operation": None}
+        search_state[chat_id] = {"mode": "keyword", "operation": None}
         send_keyword_operation_prompt(chat_id)
         try:
             bot.answer_callback_query(c.id)
@@ -1643,7 +1655,7 @@ def cb_keyword_operation(c):
         return
 
     st = search_state.get(chat_id, {})
-    st.update({"mode": "kw", "operation": normalize_operation_value(action) or action})
+    st.update({"mode": "keyword", "operation": normalize_operation_value(action) or action})
     search_state[chat_id] = st
 
     mk = types.InlineKeyboardMarkup()
@@ -1954,7 +1966,7 @@ def is_listing_active(ev: dict, status_map: dict) -> bool:
     return status not in {"sold", "rented", "blacklisted"}
 
 
-def query_structured_results(filters: dict):
+def query_structured_results(filters: dict, offset: int = 0, limit: int = None):
     op_code = filters.get("op", "all")
     prop_code = filters.get("prop", "all")
     price_code = filters.get("price", "s0")
@@ -2002,7 +2014,323 @@ def query_structured_results(filters: dict):
         filtered.append(ev)
 
     filtered.sort(key=safe_date, reverse=True)
-    return filtered
+    total = len(filtered)
+    if limit is not None:
+        filtered = filtered[offset : offset + limit]
+    return filtered, total
+
+
+def query_keyword_results(selected_op: str, words: list, offset: int = 0, limit: int = None):
+    if not words:
+        return [], 0
+
+    words = [w.lower() for w in words if w]
+
+    def build_multi_like_sql(fields):
+        sql_parts = []
+        params = []
+        for w in words:
+            part = "(" + " OR ".join([f"LOWER({f}) LIKE ?" for f in fields]) + ")"
+            sql_parts.append(part)
+            like = f"%{w}%"
+            params.extend([like] * len(fields))
+        sql = " AND ".join(sql_parts)
+        return sql, params
+
+    FIELDS_MAIN = ["prop_type", "operation", "metro", "rooms", "address", "summary"]
+    FIELDS_LOCAL = ["prop_type", "operation", "metro", "rooms", "rayon", "summary"]
+
+    def build_operation_clause(source="main"):
+        op_value = detect_db_operation_value(selected_op, source)
+        return "operation = ?", [op_value]
+
+    results = []
+
+    if os.path.exists(MAIN_DB):
+        conn = get_main_conn()
+        cur = conn.cursor()
+        sql_where, params = build_multi_like_sql(FIELDS_MAIN)
+        op_clause, op_params = build_operation_clause("main")
+        sql = (
+            f"SELECT * FROM listings WHERE {op_clause} AND {sql_where} "
+            "ORDER BY date_read DESC LIMIT 5000"
+        )
+        cur.execute(sql, op_params + params)
+        for r in cur.fetchall():
+            d = dict(r)
+            d["__source"] = "main"
+            results.append(d)
+        conn.close()
+
+    conn = get_local_conn()
+    cur = conn.cursor()
+    sql_where, params = build_multi_like_sql(FIELDS_LOCAL)
+    op_clause, op_params = build_operation_clause("local")
+    sql = (
+        f"SELECT * FROM listings_approved WHERE {op_clause} AND {sql_where} "
+        "ORDER BY date_added DESC LIMIT 5000"
+    )
+    cur.execute(sql, op_params + params)
+    for r in cur.fetchall():
+        d = dict(r)
+        d["__source"] = "local"
+        results.append(d)
+    conn.close()
+
+    status_map = get_status_map()
+    results = [r for r in results if is_listing_active(r, status_map)]
+    results.sort(key=safe_date, reverse=True)
+    total = len(results)
+    if limit is not None:
+        results = results[offset : offset + limit]
+    return results, total
+
+
+def query_phone_results(raw: str, offset: int = 0, limit: int = None):
+    like = f"%{raw}%"
+    results = []
+
+    if os.path.exists(MAIN_DB):
+        conn = get_main_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT * FROM listings
+            WHERE REPLACE(REPLACE(REPLACE(phone,' ',''),'-',''),'+','') LIKE ?
+            ORDER BY date_read DESC, id DESC
+            LIMIT 2000
+        """,
+            (like,),
+        )
+        for r in cur.fetchall():
+            d = dict(r)
+            d["__source"] = "main"
+            results.append(d)
+        conn.close()
+
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT * FROM listings_approved
+        WHERE REPLACE(REPLACE(REPLACE(phone,' ',''),'-',''),'+','') LIKE ?
+        ORDER BY date_added DESC, id DESC
+        LIMIT 2000
+    """,
+        (like,),
+    )
+    for r in cur.fetchall():
+        d = dict(r)
+        d["__source"] = "local"
+        results.append(d)
+    conn.close()
+
+    status_map = get_status_map()
+    results = [r for r in results if is_listing_active(r, status_map)]
+    results.sort(key=safe_date, reverse=True)
+    total = len(results)
+    if limit is not None:
+        results = results[offset : offset + limit]
+    return results, total
+
+
+def query_favorites_page(chat_id: int, offset: int = 0, limit: int = None):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COUNT(*) FROM favorites WHERE chat_id=?", (chat_id,)
+    )
+    total = cur.fetchone()[0]
+    cur.execute(
+        """
+        SELECT listing_id, source FROM favorites
+        WHERE chat_id=?
+        ORDER BY added_at DESC
+        LIMIT ? OFFSET ?
+    """,
+        (chat_id, limit or PAGE_SIZE, offset),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    items = []
+    for r in rows:
+        ev = fetch_listing_by_source(r["source"], r["listing_id"])
+        if ev:
+            items.append({"data": ev, "source": r["source"]})
+    return items, total
+
+
+def query_status_page(status_code: str, offset: int = 0, limit: int = None):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COUNT(*) FROM listing_status WHERE status=?",
+        (status_code,),
+    )
+    total = cur.fetchone()[0]
+    cur.execute(
+        """
+        SELECT source, listing_id FROM listing_status
+        WHERE status=?
+        ORDER BY updated_at DESC
+        LIMIT ? OFFSET ?
+    """,
+        (status_code, limit or PAGE_SIZE, offset),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    items = []
+    for r in rows:
+        ev = fetch_listing_by_source(r["source"], r["listing_id"])
+        if ev:
+            items.append({"data": ev, "source": r["source"], "id": r["listing_id"]})
+    return items, total
+
+
+def fetch_page_results(chat_id: int, mode: str, params: dict, page: int):
+    offset = (page - 1) * PAGE_SIZE
+    if mode == "filter":
+        filters = params.get("filters") or params
+        return query_structured_results(filters, offset=offset, limit=PAGE_SIZE)
+    if mode == "keyword":
+        return query_keyword_results(
+            params.get("operation"), params.get("words", []), offset=offset, limit=PAGE_SIZE
+        )
+    if mode == "phone":
+        return query_phone_results(params.get("digits", ""), offset=offset, limit=PAGE_SIZE)
+    if mode == "favorites":
+        return query_favorites_page(chat_id, offset=offset, limit=PAGE_SIZE)
+    if mode == "statuslist":
+        return query_status_page(params.get("status", ""), offset=offset, limit=PAGE_SIZE)
+    return [], 0
+
+
+def send_paginated_results(
+    chat_id: int,
+    mode: str,
+    params: dict,
+    page: int = 1,
+    loading_ref=None,
+    show_summary: bool = True,
+):
+    items, total = fetch_page_results(chat_id, mode, params, page)
+    total_pages = compute_total_pages(total) if total else 1
+    if page > total_pages:
+        page = total_pages
+        items, total = fetch_page_results(chat_id, mode, params, page)
+    set_pagination_state(chat_id, mode, params, page, total_pages)
+
+    if total == 0:
+        if not replace_loading_message(loading_ref, "Siyahı boşdur."):
+            bot.send_message(chat_id, "Siyahı boşdur.")
+        return
+
+    summary_map = {
+        "filter": "🔍 Tapıldı",
+        "keyword": "🔍 Tapıldı",
+        "phone": "☎️ Bu nömrə ilə",
+        "favorites": "⭐ Favorilər",
+        "statuslist": params.get("title", "📂 Siyahı"),
+    }
+
+    if show_summary:
+        prefix = summary_map.get(mode, "📄")
+        summary_text = f"{prefix}: {total} elan. Səhifə {page}/{total_pages}" if mode != "favorites" else f"⭐ Favori elanlarınız ({total}): Səhifə {page}/{total_pages}"
+        if not replace_loading_message(loading_ref, summary_text):
+            bot.send_message(chat_id, summary_text)
+
+    for item in items:
+        if mode == "favorites":
+            ev = item["data"]
+            src = item.get("source", ev.get("__source", "main"))
+            lid = ev.get("id") or ev.get("ID") or ev.get("Elan_kodu")
+            rm_btn = types.InlineKeyboardButton(
+                "❌ Favoritdən çıxart", callback_data=f"favdel|{src}|{lid}"
+            )
+            send_listing_card(
+                chat_id,
+                ev,
+                source=src,
+                with_fav_button=False,
+                status_controls=False,
+                extra_buttons=[rm_btn],
+            )
+        elif mode == "statuslist":
+            ev = item["data"]
+            src = item.get("source", ev.get("__source", "main"))
+            lid = item.get("id")
+            undo_label = params.get("undo_label", "🔄 Geri qaytar")
+            btn = types.InlineKeyboardButton(
+                undo_label, callback_data=f"st|undo|{src}|{lid}"
+            )
+            send_listing_card(
+                chat_id,
+                ev,
+                source=src,
+                with_fav_button=True,
+                status_controls=False,
+                extra_buttons=[btn],
+            )
+        else:
+            ev = item
+            send_listing_card(
+                chat_id,
+                ev,
+                source=ev.get("__source", "main"),
+                with_fav_button=True,
+            )
+
+    nav = build_pagination_keyboard(page, total_pages)
+    bot.send_message(chat_id, f"📄 Səhifə {page}/{total_pages}", reply_markup=nav)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("pg:"))
+def cb_pagination(c):
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id
+    st = search_state.get(chat_id)
+    if not st:
+        try:
+            bot.answer_callback_query(c.id, "Səhifə tapılmadı.")
+        except Exception:
+            pass
+        return
+
+    action = c.data.split(":", 1)[1]
+    if action == "noop":
+        try:
+            bot.answer_callback_query(c.id)
+        except Exception:
+            pass
+        return
+
+    current_page = st.get("page", 1)
+    total_pages = st.get("total_pages", 1)
+    mode = st.get("mode")
+    params = st.get("params", {})
+
+    target = current_page
+    if action == "first":
+        target = 1
+    elif action == "prev":
+        target = max(1, current_page - 1)
+    elif action == "next":
+        target = min(total_pages, current_page + 1)
+    elif action == "last":
+        target = total_pages
+
+    if target != current_page and mode:
+        send_paginated_results(
+            chat_id, mode=mode, params=params, page=target, show_summary=False
+        )
+
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
 
 
 def render_op_step(chat_id, message=None):
@@ -2264,16 +2592,6 @@ def cb_structured(c):
         st["awaiting_floor_range"] = True
         st["step"] = "floor_manual"
         bot.send_message(chat_id, "✏️ Mərtəbə intervalı yazın (məs: 1-3):")
-    elif action == "more":
-        try:
-            off = int(parts[2])
-        except Exception:
-            off = 0
-        loading_ref = show_loading_message(chat_id, (c.message.chat.id, c.message.message_id))
-        _send_structured_page(chat_id, off)
-        if not replace_loading_message(loading_ref, "✅ Daha çox elan göstərildi."):
-            bot.send_message(chat_id, "✅ Daha çox elan göstərildi.")
-
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -2333,49 +2651,26 @@ def perform_structured_search(chat_id, offset=0, edit_msg=None):
         query_text=str(filters),
     )
 
-    results = query_structured_results(filters)
-    st["results"] = results
+    page_items, total = query_structured_results(filters, offset=0, limit=PAGE_SIZE)
     st["step"] = "results"
     inc_limit(chat_id, "structured", 1)
 
-    if not results:
+    if not total:
         if not replace_loading_message(loading_ref, "❌ Uyğun elan tapılmadı. Yenidən axtarış edin."):
             bot.send_message(chat_id, "❌ Uyğun elan tapılmadı. Yenidən axtarış edin.")
         return
 
-    summary = f"🔍 Tapıldı: {len(results)} elan. İlk nəticələr göstərilir."
+    summary = f"🔍 Tapıldı: {total} elan. İlk nəticələr göstərilir."
     if not replace_loading_message(loading_ref, summary):
         bot.send_message(chat_id, summary)
 
-    _send_structured_page(chat_id, offset)
-
-
-def _send_structured_page(chat_id, offset):
-    st = search_state.get(chat_id, {})
-    results = st.get("results", [])
-    page_size = 20
-
-    if offset >= len(results):
-        bot.send_message(chat_id, "✅ Bütün uyğun elanlar göstərildi.")
-        return
-
-    slice_results = results[offset : offset + page_size]
-    for ev in slice_results:
-        send_listing_card(
-            chat_id,
-            ev,
-            source=ev.get("__source", "main"),
-            with_fav_button=True,
-        )
-
-    if offset + page_size < len(results):
-        mk = types.InlineKeyboardMarkup()
-        mk.add(
-            types.InlineKeyboardButton(
-                "➡️ Daha çox göstər", callback_data=f"fs|more|{offset + page_size}"
-            )
-        )
-        bot.send_message(chat_id, "⬇️ Daha çox elan üçün:", reply_markup=mk)
+    send_paginated_results(
+        chat_id,
+        mode="filter",
+        params={"filters": filters},
+        page=1,
+        show_summary=False,
+    )
 
 
 # ===== AÇAR SÖZLƏ AXTARIŞ (paging ilə) =====
@@ -2408,138 +2703,25 @@ def keyword_search_handler(message):
         query_text=text,
     )
 
-    # 🔥 Sorğunu sözlərə ayırırıq
     words = [w for w in text.split() if w]
 
-    results = []
-
-    # --- FILTER FUNKSIYASI ---
-    def build_multi_like_sql(fields):
-        sql_parts = []
-        params = []
-
-        # hər söz üçün AND, hər field üçün OR
-        for w in words:
-            part = "(" + " OR ".join([f"LOWER({f}) LIKE ?" for f in fields]) + ")"
-            sql_parts.append(part)
-            like = f"%{w}%"
-            params.extend([like] * len(fields))
-
-        sql = " AND ".join(sql_parts)
-        return sql, params
-
-    FIELDS_MAIN = ["prop_type", "operation", "metro", "rooms", "address", "summary"]
-    FIELDS_LOCAL = ["prop_type", "operation", "metro", "rooms", "rayon", "summary"]
-
-    def build_operation_clause(source="main"):
-        op_value = detect_db_operation_value(selected_op, source)
-        return "operation = ?", [op_value]
-
-    # MAIN DB
-    if os.path.exists(MAIN_DB):
-        conn = get_main_conn()
-        cur = conn.cursor()
-
-        sql_where, params = build_multi_like_sql(FIELDS_MAIN)
-        op_clause, op_params = build_operation_clause("main")
-        sql = (
-            f"SELECT * FROM listings WHERE {op_clause} AND {sql_where} "
-            "ORDER BY date_read DESC LIMIT 5000"
-        )
-
-        cur.execute(sql, op_params + params)
-        for r in cur.fetchall():
-            d = dict(r)
-            d["__source"] = "main"
-            results.append(d)
-        conn.close()
-
-    # LOCAL DB
-    conn = get_local_conn()
-    cur = conn.cursor()
-
-    sql_where, params = build_multi_like_sql(FIELDS_LOCAL)
-    op_clause, op_params = build_operation_clause("local")
-    sql = (
-        f"SELECT * FROM listings_approved WHERE {op_clause} AND {sql_where} "
-        "ORDER BY date_added DESC LIMIT 5000"
+    page_items, total = query_keyword_results(
+        selected_op, words, offset=0, limit=PAGE_SIZE
     )
 
-    cur.execute(sql, op_params + params)
-    for r in cur.fetchall():
-        d = dict(r)
-        d["__source"] = "local"
-        results.append(d)
-    conn.close()
-
-    status_map = get_status_map()
-    results = [r for r in results if is_listing_active(r, status_map)]
-
-    if not results:
+    if not total:
         if not replace_loading_message(loading_ref, "❌ Uyğun elan tapılmadı. Yenidən axtarış edin."):
             bot.send_message(chat_id, "❌ Uyğun elan tapılmadı. Yenidən axtarış edin.")
         return
 
     inc_limit(chat_id, "keyword", 1)
-
-    results.sort(key=safe_date, reverse=True)
-    st["results"] = results
-    st["mode"] = "kw"
-    search_state[chat_id] = st
-
-    _send_keyword_page(chat_id, 0, status_ref=loading_ref)
-
-
-def _send_keyword_page(chat_id, offset, status_ref=None):
-    state = search_state.get(chat_id)
-    if not state or state.get("mode") != "kw":
-        bot.send_message(chat_id, "Sessiya tapılmadı. Yenidən axtarın.")
-        return
-    results = state["results"]
-    page_size = 20
-
-    if offset == 0:
-        summary = f"🔍 Tapıldı: {len(results)} elan. İlk {page_size} göstərilir:"
-        if not replace_loading_message(status_ref, summary):
-            bot.send_message(chat_id, summary)
-
-    slice_results = results[offset : offset + page_size]
-    for ev in slice_results:
-        send_listing_card(
-            chat_id,
-            ev,
-            source=ev.get("__source", "main"),
-            with_fav_button=True,
-        )
-
-    if offset + page_size < len(results):
-        mk = types.InlineKeyboardMarkup()
-        mk.add(
-            types.InlineKeyboardButton(
-                "➡️ Daha çox göstər",
-                callback_data=f"kwmore|{offset + page_size}",
-            )
-        )
-        bot.send_message(chat_id, "⬇️ Daha çox elan üçün:", reply_markup=mk)
-    else:
-        bot.send_message(chat_id, "✅ Bütün uyğun elanlar göstərildi.")
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("kwmore|"))
-def cb_kw_more(c):
-    if not ensure_allowed_cb(c):
-        return
-    chat_id = c.message.chat.id
-    _, off = c.data.split("|")
-    offset = int(off)
-    loading_ref = show_loading_message(chat_id, (c.message.chat.id, c.message.message_id))
-    try:
-        bot.answer_callback_query(c.id)
-    except:
-        pass
-    _send_keyword_page(chat_id, offset, status_ref=loading_ref)
-    if not replace_loading_message(loading_ref, "✅ Daha çox elan göstərildi."):
-        bot.send_message(chat_id, "✅ Daha çox elan göstərildi.")
+    send_paginated_results(
+        chat_id,
+        mode="keyword",
+        params={"operation": selected_op, "words": words},
+        page=1,
+        loading_ref=loading_ref,
+    )
 
 
 # ===== NÖMRƏ İLƏ AXTARIŞ =====
@@ -2561,62 +2743,21 @@ def phone_search_handler(message):
     loading_ref = show_loading_message(chat_id)
     log_search_event(chat_id, "phone", query_text=raw)
 
-    like = f"%{raw}%"
-    results = []
+    page_items, total = query_phone_results(raw, offset=0, limit=PAGE_SIZE)
 
-    if os.path.exists(MAIN_DB):
-        conn = get_main_conn()
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT * FROM listings
-            WHERE REPLACE(REPLACE(REPLACE(phone,' ',''),'-',''),'+','') LIKE ?
-            ORDER BY date_read DESC, id DESC
-            LIMIT 200
-        """,
-            (like,),
-        )
-        for r in cur.fetchall():
-            d = dict(r)
-            d["__source"] = "main"
-            results.append(d)
-        conn.close()
-
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT * FROM listings_approved
-        WHERE REPLACE(REPLACE(REPLACE(phone,' ',''),'-',''),'+','') LIKE ?
-        ORDER BY date_added DESC, id DESC
-        LIMIT 200
-    """,
-        (like,),
-    )
-    for r in cur.fetchall():
-        d = dict(r)
-        d["__source"] = "local"
-        results.append(d)
-    conn.close()
-
-    if not results:
+    if not total:
         if not replace_loading_message(loading_ref, "❌ Uyğun elan tapılmadı. Yenidən axtarış edin."):
             bot.send_message(chat_id, "❌ Bu nömrə ilə heç bir elan tapılmadı.")
         return
 
     inc_limit(chat_id, "phone", 1)
-    results.sort(key=safe_date, reverse=True)
-
-    summary = f"☎️ Bu nömrə ilə {len(results)} elan tapıldı:"
-    if not replace_loading_message(loading_ref, summary):
-        bot.send_message(chat_id, summary)
-    for ev in results[:50]:
-        send_listing_card(
-            chat_id,
-            ev,
-            source=ev.get("__source", "main"),
-            with_fav_button=True,
-        )
+    send_paginated_results(
+        chat_id,
+        mode="phone",
+        params={"digits": raw},
+        page=1,
+        loading_ref=loading_ref,
+    )
 
 
 # =====================================================
