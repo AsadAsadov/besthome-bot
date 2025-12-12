@@ -209,6 +209,20 @@ def init_local_db():
     """
     )
 
+    # Vasitəçi aktivliyi
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_activity (
+            chat_id INTEGER PRIMARY KEY,
+            searches INTEGER DEFAULT 0,
+            views INTEGER DEFAULT 0,
+            whatsapp_clicks INTEGER DEFAULT 0,
+            favorites INTEGER DEFAULT 0,
+            last_activity TEXT
+        )
+        """
+    )
+
     # Abunəliklər
     cur.execute(
         """
@@ -1092,6 +1106,64 @@ def log_search_event(chat_id: int, search_type: str, operation=None, rayon=None,
     finally:
         if conn:
             conn.close()
+    log_agent_activity(chat_id, "search")
+
+
+def is_agent_user(chat_id: Optional[int]) -> bool:
+    if chat_id is None:
+        return False
+    try:
+        conn = get_local_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM agents WHERE chat_id=?", (chat_id,))
+        exists = cur.fetchone() is not None
+        conn.close()
+        return exists
+    except Exception:
+        return False
+
+
+def log_agent_activity(chat_id: Optional[int], action: str):
+    if not chat_id or not is_agent_user(chat_id):
+        return
+    field_map = {
+        "search": "searches",
+        "view": "views",
+        "whatsapp": "whatsapp_clicks",
+        "favorite": "favorites",
+    }
+    field = field_map.get(action)
+    now_iso = datetime.utcnow().isoformat()
+    conn = None
+    try:
+        conn = get_local_conn()
+        cur = conn.cursor()
+        if field:
+            cur.execute(
+                f"""
+                INSERT INTO agent_activity (chat_id, searches, views, whatsapp_clicks, favorites, last_activity)
+                VALUES (?, 0, 0, 0, 0, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    {field}=agent_activity.{field} + 1,
+                    last_activity=excluded.last_activity
+                """,
+                (chat_id, now_iso),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO agent_activity (chat_id, last_activity)
+                VALUES (?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET last_activity=excluded.last_activity
+                """,
+                (chat_id, now_iso),
+            )
+        conn.commit()
+    except Exception as e:
+        print("⚠️ Agent activity log error:", e)
+    finally:
+        if conn:
+            conn.close()
 
 def fetch_listing_by_source(source: str, listing_id: int):
     if source == "main" and os.path.exists(MAIN_DB):
@@ -1367,6 +1439,8 @@ def send_listing_card(
 
     if listing_pk and track_view:
         record_listing_view(source, listing_pk, viewer_id)
+
+    log_agent_activity(viewer_id or chat_id, "view")
 
     badges = []
     try:
@@ -2222,6 +2296,7 @@ def cb_add_favorite(c):
     record_favorite_price(src, lid)
     if added:
         record_listing_stat(lid, "favorite", chat_id)
+        log_agent_activity(chat_id, "favorite")
     bot.answer_callback_query(c.id, "⭐ Favoriyə əlavə olundu.")
 
 
@@ -2244,6 +2319,7 @@ def cb_whatsapp_click(c):
     phone = ev.get("phone") or ev.get("Elaqe_nomresi")
     wa_url = make_whatsapp_url(phone)
     record_listing_stat(lid, "contact", c.message.chat.id)
+    log_agent_activity(c.message.chat.id, "whatsapp")
     if wa_url:
         try:
             bot.answer_callback_query(c.id, url=wa_url)
@@ -4478,6 +4554,11 @@ def open_admin_panel(message):
     )
     mk.add(
         types.InlineKeyboardButton(
+            "🧠 Aktiv / passiv maklerlər", callback_data="adm|agent_activity"
+        )
+    )
+    mk.add(
+        types.InlineKeyboardButton(
             "🚀 Yeniləmə göndər", callback_data="adm|notify_update"
         )
     )
@@ -4534,6 +4615,9 @@ def cb_admin(c):
 
     elif cmd == "agents":
         agents_panel(c)  # ⚡ BURADA ARTIQ DÜZGÜNDÜR
+
+    elif cmd == "agent_activity":
+        show_agent_activity_overview(c.message.chat.id)
 
     elif cmd == "notify_update":
         broadcast_bot_update(c.message.chat.id)
@@ -5296,6 +5380,76 @@ def show_admin_stats(chat_id):
     )
 
     bot.send_message(chat_id, "\n\n".join(sections), parse_mode="Markdown")
+
+
+def show_agent_activity_overview(chat_id: int):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT a.chat_id, a.name, a.phone,
+               COALESCE(act.searches, 0) AS searches,
+               COALESCE(act.views, 0) AS views,
+               COALESCE(act.whatsapp_clicks, 0) AS whatsapp_clicks,
+               COALESCE(act.favorites, 0) AS favorites,
+               act.last_activity
+        FROM agents a
+        LEFT JOIN agent_activity act ON act.chat_id = a.chat_id
+        ORDER BY a.name
+        """
+    )
+    agents = [dict(r) for r in cur.fetchall()]
+    conn.close()
+
+    if not agents:
+        bot.send_message(chat_id, "❌ Vasitəçi siyahısı boşdur.")
+        return
+
+    cutoff = datetime.utcnow() - timedelta(days=7)
+    active_agents = []
+    passive_agents = []
+
+    for ag in agents:
+        last_raw = ag.get("last_activity")
+        try:
+            last_dt = (
+                datetime.fromisoformat(str(last_raw)) if last_raw else None
+            )
+        except Exception:
+            last_dt = None
+
+        target = active_agents if last_dt and last_dt >= cutoff else passive_agents
+        target.append(ag)
+
+    def format_agent_row(idx: int, ag: dict) -> str:
+        name = ag.get("name") or "Ad yoxdur"
+        phone = ag.get("phone") or "—"
+        last_seen = ag.get("last_activity") or "—"
+        return (
+            f"{idx}) {name} ({phone}) — "
+            f"🔎 {ag['searches']} | 👁 {ag['views']} | "
+            f"💬 {ag['whatsapp_clicks']} | ⭐ {ag['favorites']} | ⏱ {last_seen}"
+        )
+
+    def build_block(items: list, title: str) -> str:
+        if not items:
+            return f"{title}: ❌ Tapılmadı"
+        sorted_items = sorted(
+            items, key=lambda x: x.get("last_activity") or "", reverse=True
+        )
+        lines = [title]
+        for idx, ag in enumerate(sorted_items, start=1):
+            lines.append(format_agent_row(idx, ag))
+        return "\n".join(lines)
+
+    text = "\n\n".join(
+        [
+            build_block(active_agents, "🟢 Aktiv maklerlər"),
+            build_block(passive_agents, "⚪️ Passiv maklerlər"),
+        ]
+    )
+
+    bot.send_message(chat_id, text)
 
 
 def admin_agents_broadcast(message):
