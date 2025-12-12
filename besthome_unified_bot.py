@@ -1828,13 +1828,12 @@ def send_main_menu(chat_id: int):
     kb.row("🔎 Axtarış sistemi")
     kb.row("📂 Elan statusları")
     kb.row("⭐ Favorilərim", "📋 Elanlarım")
-    kb.row("ℹ️ Haqqında")
+    kb.row("💳 Ödəniş", "ℹ️ Haqqında")
+    kb.row("🔄 Botu yenilə")
     if is_admin(chat_id):
         kb.row("🔥 Ən çox baxılan elanlar")
         kb.row("📊 Admin Panel")
     bot.send_message(chat_id, "🏠 Əsas menyu:", reply_markup=kb)
-    send_promo_quick_action(chat_id)
-    send_refresh_button(chat_id)
 
 
 # =============== ELAN KARTI (WhatsApp ilə) ===============
@@ -2038,12 +2037,9 @@ def start_cmd(message):
     full_name = message.from_user.full_name or ""
     first_seen = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     search_reminder_shown.discard(chat_id)
+    reset_user_state(chat_id)
+    search_state.pop(chat_id, None)
     referrer_chat_id = parse_referrer_from_text(message.text or "")
-
-    onboarding_text = (
-        "👋 Xoş gəlmisiniz!\n"
-        "Axtarışa başlamaq üçün **Axtarış sistemi** düyməsinə toxunun."
-    )
 
     conn = get_local_conn()
     cur = conn.cursor()
@@ -2069,17 +2065,6 @@ def start_cmd(message):
     ensure_subscription_record(chat_id)
     if is_first_time:
         activate_demo_if_needed(chat_id, force=True)
-        sub_info = get_subscription(chat_id)
-        if sub_info and sub_info.get("plan") == "demo":
-            try:
-                exp_dt = datetime.fromisoformat(str(sub_info.get("expires_at")))
-                bot.send_message(
-                    chat_id,
-                    "🎁 Sizin üçün 3 günlük DEMO aktiv edildi!\n"
-                    f"📅 Bitmə tarixi: {exp_dt.strftime('%d.%m.%Y')}",
-                )
-            except Exception:
-                pass
 
     # 🧩 Admin üçün avtomatik təsdiq
     if chat_id == ADMIN_ID:
@@ -2089,9 +2074,6 @@ def start_cmd(message):
         conn.commit()
         conn.close()
         main_menu(chat_id)
-        if is_first_time:
-            bot.send_message(chat_id, onboarding_text, parse_mode="Markdown")
-        bot.send_message(chat_id, "✅ Admin kimi daxil oldun.")
         return
 
     # 🧩 İstifadəçi təsdiqlənməyibsə
@@ -2100,24 +2082,14 @@ def start_cmd(message):
     conn.close()
 
     if not approved:
-        if is_first_time:
-            bot.send_message(chat_id, onboarding_text, parse_mode="Markdown")
         bot.send_message(
             chat_id, "❌ Admin icazə verməyib. Zəhmət olmasa təsdiq gözləyin."
         )
         return
 
     # 🧩 Təsdiqlənmiş istifadəçi üçün menyunu aç
+    check_subscription(chat_id, silent=True)
     main_menu(chat_id)
-    if not check_subscription(chat_id):
-        bot.send_message(
-            chat_id,
-            "ℹ️ Aktiv abunəlik tələb olunur. Ödəniş menyusunu açdım.",
-        )
-    if is_first_time:
-        bot.send_message(chat_id, onboarding_text, parse_mode="Markdown")
-    else:
-        bot.send_message(chat_id, "👋 Xoş gəlmisiniz! Menyudan seçim edin:")
 
 
 # =============== ℹ️ Haqqında ===============
@@ -6265,6 +6237,11 @@ def handle_bot_refresh(message):
     bot.send_message(chat_id, "🔄 Bot yeniləndi.\nƏsas menyudan seçim edə bilərsən.")
 
 
+@bot.message_handler(func=lambda m: m.text == "🔄 Botu yenilə")
+def refresh_button_message(message):
+    handle_bot_refresh(message)
+
+
 @bot.callback_query_handler(func=lambda c: c.data == "bot_refresh")
 def cb_bot_refresh(c):
     try:
@@ -6875,13 +6852,12 @@ def main_menu(chat_id):
     mk.add("📂 Elan statusları")
     mk.add("⭐ Favorilərim", "📋 Elanlarım")
     mk.add("💳 Ödəniş", "ℹ️ Haqqında")
+    mk.add("🔄 Botu yenilə")
 
     if is_admin(chat_id):
         mk.add("📊 Admin Panel")
 
     bot.send_message(chat_id, "📋 Əsas menyudan seçim et:", reply_markup=mk)
-    send_promo_quick_action(chat_id)
-    send_refresh_button(chat_id)
 
 
 if __name__ == "__main__":
