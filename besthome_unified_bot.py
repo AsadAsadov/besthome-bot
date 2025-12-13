@@ -95,9 +95,45 @@ NEW_LISTING_WINDOW_HOURS = 24
 HOT_VIEWS_THRESHOLD = 50
 
 
+main_db_connections = set()
+main_db_connections_lock = threading.Lock()
+main_db_update_in_progress = threading.Event()
+
+
+def register_main_conn(conn):
+    with main_db_connections_lock:
+        main_db_connections.add(conn)
+
+
+def close_main_conn(conn):
+    if conn is None:
+        return
+    try:
+        conn.close()
+    except Exception as e:
+        print("⚠️ main DB close error:", e)
+    finally:
+        with main_db_connections_lock:
+            main_db_connections.discard(conn)
+
+
+def close_all_main_conns():
+    with main_db_connections_lock:
+        conns = list(main_db_connections)
+        main_db_connections.clear()
+    for conn in conns:
+        try:
+            conn.close()
+        except Exception as e:
+            print("⚠️ main DB close error:", e)
+
+
 def get_main_conn():
+    while main_db_update_in_progress.is_set():
+        time.sleep(0.05)
     conn = sqlite3.connect(MAIN_DB)
     conn.row_factory = sqlite3.Row
+    register_main_conn(conn)
     return conn
 
 
@@ -179,6 +215,33 @@ def download_main_db_document(document) -> str:
             os.remove(temp_path)
         raise
     return temp_path
+
+
+def validate_main_db_file(db_path: str):
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = {row[0] for row in cur.fetchall() if row and row[0]}
+        if "listings" not in tables:
+            raise RuntimeError("Yeni bazada 'listings' cədvəli tapılmadı")
+        cur.execute("PRAGMA table_info(listings)")
+        cols = [row[1] for row in cur.fetchall() if len(row) > 1]
+        if not cols:
+            raise RuntimeError("'listings' cədvəli boşdur")
+    finally:
+        conn.close()
+
+
+def sanity_check_main_db():
+    conn = sqlite3.connect(MAIN_DB)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM listings")
+        cur.fetchone()
+    finally:
+        conn.close()
 
 
 def init_local_db():
@@ -587,7 +650,7 @@ def init_main_db_indices():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_main_price ON listings(price)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_main_date ON listings(date_read)")
         conn.commit()
-        conn.close()
+        close_main_conn(conn)
         print("✅ besthome.db indeksləri hazırdır.")
     except Exception as e:
         print("⚠️ İndeks yaradarkən xəta:", e)
@@ -641,7 +704,7 @@ def ensure_fts_tables():
         if os.path.exists(MAIN_DB):
             conn = get_main_conn()
             build_fts(conn, "listings", "listings_fts")
-            conn.close()
+            close_main_conn(conn)
     except Exception as e:
         print("⚠️ FTS (main) yaradarkən xəta:", e)
 
@@ -1697,8 +1760,10 @@ def detect_db_operation_value(op_norm: str, source: str):
         return _operation_cache[key]
 
     values = set()
+    conn = None
+    source_is_main = source == "main" and os.path.exists(MAIN_DB)
     try:
-        if source == "main" and os.path.exists(MAIN_DB):
+        if source_is_main:
             conn = get_main_conn()
             cur = conn.cursor()
             cur.execute("SELECT DISTINCT operation FROM listings LIMIT 200")
@@ -1707,9 +1772,14 @@ def detect_db_operation_value(op_norm: str, source: str):
             cur = conn.cursor()
             cur.execute("SELECT DISTINCT operation FROM listings_approved LIMIT 200")
         values = {str(r[0]).strip().lower() for r in cur.fetchall() if r[0]}
-        conn.close()
     except Exception:
         values = set()
+    finally:
+        if conn:
+            if source_is_main:
+                close_main_conn(conn)
+            else:
+                conn.close()
 
     for candidate in OPERATION_VARIANTS[op_norm]:
         if candidate.lower() in values:
@@ -1839,7 +1909,7 @@ def fetch_listing_by_source(source: str, listing_id: int):
         cur = conn.cursor()
         cur.execute("SELECT * FROM listings WHERE id=?", (listing_id,))
         row = cur.fetchone()
-        conn.close()
+        close_main_conn(conn)
         if row:
             d = dict(row)
             d["__source"] = "main"
@@ -3769,7 +3839,7 @@ def load_recent_listings(since_dt: datetime):
             d["__source"] = "main"
             if safe_date(d) > since_dt:
                 results.append(d)
-        conn.close()
+        close_main_conn(conn)
 
     conn = get_local_conn()
     cur = conn.cursor()
@@ -3934,7 +4004,7 @@ def query_structured_results(filters: dict, offset: int = 0, limit: int = None):
             d = dict(r)
             d["__source"] = "main"
             results.append(d)
-        conn.close()
+        close_main_conn(conn)
 
     conn = get_local_conn()
     cur = conn.cursor()
@@ -4044,7 +4114,7 @@ def query_keyword_results(selected_op: str, words: list, offset: int = 0, limit:
             d = dict(r)
             d["__source"] = "main"
             results.append(d)
-        conn.close()
+        close_main_conn(conn)
 
     conn = get_local_conn()
     cur = conn.cursor()
@@ -4246,7 +4316,7 @@ def query_smart_results(criteria: dict, offset: int = 0, limit: int = None):
             d = dict(r)
             d["__source"] = "main"
             results.append(d)
-        conn.close()
+        close_main_conn(conn)
 
     # LOCAL
     conn = get_local_conn()
@@ -4320,7 +4390,7 @@ def query_phone_results(raw: str, offset: int = 0, limit: int = None):
             d = dict(r)
             d["__source"] = "main"
             results.append(d)
-        conn.close()
+        close_main_conn(conn)
 
     conn = get_local_conn()
     cur = conn.cursor()
@@ -5414,14 +5484,19 @@ def handle_admin_db_upload(message):
     temp_path = None
     with db_update_lock:
         try:
+            main_db_update_in_progress.set()
             user_state[chat_id] = "UPDATING_MAIN_DB"
             temp_path = download_main_db_document(doc)
+            validate_main_db_file(temp_path)
+            close_all_main_conns()
             prepare_main_db_for_swap()
             backup_path = backup_main_db_file()
             if backup_path is None:
                 raise RuntimeError("Backup alınmadı")
 
             os.replace(temp_path, MAIN_DB)
+
+            sanity_check_main_db()
 
             bot.send_message(
                 chat_id,
@@ -5435,9 +5510,11 @@ def handle_admin_db_upload(message):
             except Exception as restore_err:
                 print("DB restore error:", restore_err)
             bot.send_message(
-                chat_id, "❌ Xəta baş verdi.\n⏪ Köhnə baza bərpa edildi."
+                chat_id,
+                f"❌ Xəta baş verdi: {e}.\n⏪ Köhnə baza bərpa edildi.",
             )
         finally:
+            main_db_update_in_progress.clear()
             user_state.pop(chat_id, None)
             if temp_path and os.path.exists(temp_path):
                 try:
@@ -7126,7 +7203,7 @@ def admin_search_handler(message):
                 (like, like, like),
             )
             rows = cur.fetchall()
-            conn.close()
+            close_main_conn(conn)
             for r in rows:
                 send_listing_card(
                     message.chat.id,
