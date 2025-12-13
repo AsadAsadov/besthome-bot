@@ -5654,7 +5654,12 @@ def cb_admin_update_db(c):
     start_admin_update_db(c.message.chat.id, callback_id=c.id)
 
 
-@bot.message_handler(content_types=["text"])
+@bot.message_handler(
+    content_types=["text"],
+    func=lambda m: m.from_user
+    and m.from_user.id == ADMIN_ID
+    and user_state.get(m.chat.id) == "WAITING_MAIN_DB",
+)
 def handle_admin_db_upload(message):
     chat_id = message.chat.id
     if not message.from_user or message.from_user.id != ADMIN_ID:
