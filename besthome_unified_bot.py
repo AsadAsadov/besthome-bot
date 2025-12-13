@@ -88,6 +88,31 @@ search_state = {}  # Açar sözlə axtarış paging state
 search_reminder_shown = set()  # Session-level reminder flag
 session_interactions = {}
 db_update_lock = threading.Lock()
+ADMIN_PANEL_PAGE1 = [
+    "✅ Təsdiqlənməyən elanlar",
+    "📊 Statistikalar",
+    "💰 Aylıq gəlir hesabatı",
+    "🤝 Referral statistikası",
+    "📢 Vasitəçilərə bildiriş",
+    "🧠 Aktiv / passiv maklerlər",
+    "🧾 Ödəniş tarixçəsi",
+    "🔎 Bazada axtar",
+]
+ADMIN_PANEL_PAGE2 = [
+    "🆔 İstifadəçi ID ilə axtar",
+    "🎟 Promo kodlar",
+    "♻️ Limitləri sıfırla",
+    "👥 İstifadəçilər",
+    "🏢 Vasitəçi elanları",
+    "🚀 Yeniləmə göndər",
+    "🔥 Ən çox baxılan elanlar",
+    "📦 Baza yenilə",
+]
+ADMIN_PANEL_NAV_NEXT = "▶️ Növbəti səhifə"
+ADMIN_PANEL_NAV_PREV = "◀️ Əvvəlki səhifə"
+ADMIN_PANEL_BACK_MAIN = "⬅️ Əsas menyuya qayıt"
+admin_panel_page_state = {}
+ADMIN_PANEL_ACTIONS = set(ADMIN_PANEL_PAGE1 + ADMIN_PANEL_PAGE2)
 
 # Pagination
 PAGE_SIZE = 20
@@ -5125,13 +5150,7 @@ def phone_search_handler(message):
 # =====================================================
 
 
-def agents_panel(c):
-    """Admin üçün vasitəçi elanları paneli."""
-    chat_id = c.message.chat.id
-
-    if not is_admin(chat_id):
-        return
-
+def build_agents_panel_markup():
     mk = types.InlineKeyboardMarkup()
     mk.add(
         types.InlineKeyboardButton(
@@ -5148,6 +5167,17 @@ def agents_panel(c):
             "📞 Nömrə ilə axtar", callback_data="agent_search|phone"
         )
     )
+    return mk
+
+
+def agents_panel(c):
+    """Admin üçün vasitəçi elanları paneli."""
+    chat_id = c.message.chat.id
+
+    if not is_admin(chat_id):
+        return
+
+    mk = build_agents_panel_markup()
 
     bot.edit_message_text(
         "🏢 Vasitəçi elanları axtarış sistemi:",
@@ -5155,6 +5185,13 @@ def agents_panel(c):
         message_id=c.message.message_id,
         reply_markup=mk,
     )
+
+
+def send_agents_panel_message(chat_id: int):
+    if not is_admin(chat_id):
+        return
+    mk = build_agents_panel_markup()
+    bot.send_message(chat_id, "🏢 Vasitəçi elanları axtarış sistemi:", reply_markup=mk)
 
 
 # =======================
@@ -5364,6 +5401,24 @@ def send_agent_card(chat_id, ev):
 # =============== 📊 ADMIN PANEL (MENYU + CALLBACK) ===============
 
 
+def build_admin_panel_keyboard(chat_id: int, page: int = 1):
+    buttons = ADMIN_PANEL_PAGE1 if page == 1 else ADMIN_PANEL_PAGE2
+    mk = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    for i in range(0, len(buttons), 2):
+        mk.row(*buttons[i : i + 2])
+    if page == 1:
+        mk.row(ADMIN_PANEL_NAV_NEXT, ADMIN_PANEL_BACK_MAIN)
+    else:
+        mk.row(ADMIN_PANEL_NAV_PREV, ADMIN_PANEL_BACK_MAIN)
+    admin_panel_page_state[chat_id] = page
+    return mk
+
+
+def send_admin_panel(chat_id: int, page: int = 1, text: str = "🛠 Admin Panel:"):
+    mk = build_admin_panel_keyboard(chat_id, page)
+    bot.send_message(chat_id, text, reply_markup=mk)
+
+
 @bot.message_handler(func=lambda m: m.text == "📊 Admin Panel")
 @bot.message_handler(commands=["admin"])
 def open_admin_panel(message):
@@ -5371,90 +5426,102 @@ def open_admin_panel(message):
         bot.send_message(message.chat.id, "❌ Bu bölməyə yalnız admin daxil ola bilər.")
         return
 
-    mk = types.InlineKeyboardMarkup()
-    mk.add(
-        types.InlineKeyboardButton(
-            "✅ Təsdiqlənməyən elanlar", callback_data="adm|pending"
-        )
-    )
-    mk.add(
-        types.InlineKeyboardButton("📊 Statistikalar", callback_data="adm|stats")
-    )
-    mk.add(
-        types.InlineKeyboardButton(
-            "📊 Aylıq gəlir hesabatı", callback_data="adm|revenue"
-        )
-    )
-    mk.add(
-        types.InlineKeyboardButton("🤝 Referral statistikası", callback_data="adm|referrals")
-        )
-    mk.add(
-        types.InlineKeyboardButton(
-            "📤 Vasitəçilərə bildiriş", callback_data="adm|agents_broadcast"
-        )
-    )
-    mk.add(
-        types.InlineKeyboardButton(
-            "🧠 Aktiv / passiv maklerlər", callback_data="adm|agent_activity"
-        )
-    )
-    mk.add(
-        types.InlineKeyboardButton("🧾 Ödəniş tarixçəsi", callback_data="adm|payhist")
-    )
-    mk.add(types.InlineKeyboardButton("🔍 Bazada axtar", callback_data="adm|search"))
-    mk.add(
-        types.InlineKeyboardButton(
-            "🔍 İstifadəçi ID ilə axtar", callback_data="adm|user_search_id"
-        )
-    )
-    mk.add(types.InlineKeyboardButton("🎟 Promo kodlar", callback_data="adm|promos"))
-    mk.add(
-        types.InlineKeyboardButton(
-            "♻️ Limitləri sıfırla", callback_data="adm|reset_limits"
-        )
-    )
-    mk.add(types.InlineKeyboardButton("👥 İstifadəçilər", callback_data="adm|users"))
-    mk.add(
-        types.InlineKeyboardButton("🏢 Vasitəçi elanları", callback_data="adm|agents")
-    )
-    mk.add(
-        types.InlineKeyboardButton(
-            "🚀 Yeniləmə göndər", callback_data="adm|notify_update"
-        )
-    )
-    mk.add(
-        types.InlineKeyboardButton("🔥 Ən çox baxılan elanlar", callback_data="adm|topviews")
-    )
-    mk.add(
-        types.InlineKeyboardButton("📦 Baza yenilə", callback_data="admin_update_db")
-    )
+    send_admin_panel(message.chat.id, page=1)
 
-    bot.send_message(message.chat.id, "🛠 Admin Panel:", reply_markup=mk)
+
+@bot.message_handler(func=lambda m: is_admin(m.chat.id) and m.text == ADMIN_PANEL_NAV_NEXT)
+def admin_panel_next_page(message):
+    send_admin_panel(message.chat.id, page=2)
+
+
+@bot.message_handler(func=lambda m: is_admin(m.chat.id) and m.text == ADMIN_PANEL_NAV_PREV)
+def admin_panel_prev_page(message):
+    send_admin_panel(message.chat.id, page=1)
+
+
+@bot.message_handler(func=lambda m: is_admin(m.chat.id) and m.text == ADMIN_PANEL_BACK_MAIN)
+def admin_panel_back_to_main(message):
+    admin_panel_page_state.pop(message.chat.id, None)
+    send_main_menu(message.chat.id)
+
+
+@bot.message_handler(func=lambda m: is_admin(m.chat.id) and m.text in ADMIN_PANEL_ACTIONS)
+def handle_admin_panel_action(message):
+    chat_id = message.chat.id
+    txt = message.text
+
+    if txt == "✅ Təsdiqlənməyən elanlar":
+        show_pending_listings(chat_id)
+    elif txt == "📊 Statistikalar":
+        show_admin_stats(chat_id)
+    elif txt == "💰 Aylıq gəlir hesabatı":
+        show_revenue_report(chat_id)
+    elif txt == "🤝 Referral statistikası":
+        show_referral_stats(chat_id)
+    elif txt == "📢 Vasitəçilərə bildiriş":
+        msg = bot.send_message(chat_id, "✍️ Vasitəçilərə göndəriləcək mətni yaz:")
+        bot.register_next_step_handler(msg, admin_agents_broadcast)
+    elif txt == "🧠 Aktiv / passiv maklerlər":
+        show_agent_activity_overview(chat_id)
+    elif txt == "🧾 Ödəniş tarixçəsi":
+        show_payment_history_list(chat_id, page=1)
+    elif txt == "🔎 Bazada axtar":
+        msg = bot.send_message(chat_id, "🔍 Açar söz yaz (əsas baza + lokal):")
+        bot.register_next_step_handler(msg, admin_search_handler)
+    elif txt == "🆔 İstifadəçi ID ilə axtar":
+        msg = bot.send_message(chat_id, "🔍 İstifadəçi chat_id daxil et:")
+        bot.register_next_step_handler(msg, admin_search_by_id_step)
+    elif txt == "🎟 Promo kodlar":
+        show_admin_promo_menu(chat_id)
+    elif txt == "♻️ Limitləri sıfırla":
+        conn = get_local_conn()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM search_limits")
+        conn.commit()
+        conn.close()
+        bot.send_message(chat_id, "♻️ Bütün istifadəçi limitləri sıfırlandı.")
+    elif txt == "👥 İstifadəçilər":
+        show_users_menu(chat_id)
+    elif txt == "🏢 Vasitəçi elanları":
+        send_agents_panel_message(chat_id)
+    elif txt == "🚀 Yeniləmə göndər":
+        broadcast_bot_update(chat_id)
+    elif txt == "🔥 Ən çox baxılan elanlar":
+        reset_search_state(chat_id)
+        send_paginated_results(chat_id, "topviews", params={"days": 7}, page=1)
+    elif txt == "📦 Baza yenilə":
+        start_admin_update_db(chat_id)
+
+
+def start_admin_update_db(chat_id: int, callback_id: Optional[str] = None):
+    if not is_admin(chat_id):
+        return
+
+    if db_update_lock.locked():
+        if callback_id:
+            try:
+                bot.answer_callback_query(callback_id, "⚠️ Baza yenilənir.")
+            except Exception:
+                pass
+        bot.send_message(chat_id, "⚠️ Hal-hazırda baza yenilənir. Zəhmət olmasa gözləyin.")
+        return
+
+    if callback_id:
+        try:
+            bot.answer_callback_query(callback_id, "📦 Baza yeniləmə")
+        except Exception:
+            pass
+
+    user_state[chat_id] = "WAITING_MAIN_DB"
+    bot.send_message(
+        chat_id,
+        "🔗 Yeni besthome.zip yükləmə linkini göndərin.",
+    )
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "admin_update_db")
 def cb_admin_update_db(c):
-    if not is_admin(c.message.chat.id):
-        return
-
-    if db_update_lock.locked():
-        try:
-            bot.answer_callback_query(c.id, "⚠️ Baza yenilənir.")
-        except Exception:
-            pass
-        bot.send_message(c.message.chat.id, "⚠️ Hal-hazırda baza yenilənir. Zəhmət olmasa gözləyin.")
-        return
-
-    try:
-        bot.answer_callback_query(c.id, "📦 Baza yeniləmə")
-    except Exception:
-        pass
-
-    user_state[c.message.chat.id] = "WAITING_MAIN_DB"
-    bot.send_message(
-        c.message.chat.id,
-        "🔗 Yeni besthome.zip yükləmə linkini göndərin.",
-    )
+    start_admin_update_db(c.message.chat.id, callback_id=c.id)
 
 
 @bot.message_handler(content_types=["text"])
