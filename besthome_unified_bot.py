@@ -5481,7 +5481,6 @@ def handle_admin_db_upload(message):
     temp_zip_path = None
     extracted_db_path = None
     extracted_dir = None
-    backup_temp = None
     with db_update_lock:
         try:
             main_db_update_in_progress.set()
@@ -5493,13 +5492,20 @@ def handle_admin_db_upload(message):
             close_all_main_conns()
             prepare_main_db_for_swap()
 
-            backup_fd, backup_temp = tempfile.mkstemp(suffix=".db")
-            os.close(backup_fd)
-            shutil.copy2(MAIN_DB, backup_temp)
+            shutil.copyfile(extracted_db_path, MAIN_DB)
 
-            os.replace(extracted_db_path, MAIN_DB)
+            with open(MAIN_DB, "rb") as f:
+                os.fsync(f.fileno())
 
-            final_count = validate_main_db_file(MAIN_DB)
+            conn = sqlite3.connect(MAIN_DB)
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) FROM listings")
+                row = cur.fetchone()
+                final_count = int(row[0]) if row and row[0] is not None else 0
+            finally:
+                conn.close()
+
             added = final_count - old_count
             if added < 0:
                 added = 0
@@ -5511,15 +5517,6 @@ def handle_admin_db_upload(message):
             )
         except Exception as e:
             print("DB update error:", e)
-            try:
-                if backup_temp and os.path.exists(backup_temp):
-                    if os.path.exists(MAIN_DB):
-                        os.replace(backup_temp, MAIN_DB)
-                    else:
-                        shutil.copy2(backup_temp, MAIN_DB)
-                    backup_temp = None
-            except Exception as restore_err:
-                print("DB restore error:", restore_err)
             bot.send_message(
                 chat_id,
                 f"❌ Xəta baş verdi: {e}",
@@ -5527,7 +5524,7 @@ def handle_admin_db_upload(message):
         finally:
             main_db_update_in_progress.clear()
             user_state.pop(chat_id, None)
-            for path in (temp_zip_path, extracted_db_path, backup_temp):
+            for path in (temp_zip_path, extracted_db_path):
                 if path and os.path.exists(path):
                     try:
                         if os.path.isdir(path):
