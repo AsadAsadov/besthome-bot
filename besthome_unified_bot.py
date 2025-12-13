@@ -2155,6 +2155,23 @@ def send_main_menu(chat_id: int):
     bot.send_message(chat_id, "🏠 Əsas menyu:", reply_markup=kb)
 
 
+def build_search_menu_keyboard():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row("🏠 Satılır")
+    kb.row("🏢 Kirayə verilir")
+    kb.row("🔍 Açar sözlə axtar")
+    kb.row("📞 Nömrə ilə axtar")
+    kb.row("⭐ Favorilərim")
+    kb.row("🔔 Bildirişlərim")
+    kb.row("⬅️ Əsas menyuya qayıt")
+    return kb
+
+
+def send_search_menu(chat_id: int):
+    kb = build_search_menu_keyboard()
+    bot.send_message(chat_id, "\u2063", reply_markup=kb)
+
+
 # =============== ELAN KARTI (WhatsApp ilə) ===============
 
 
@@ -3367,19 +3384,133 @@ def show_top_viewed(message):
 def search_system_menu(message):
     if not ensure_allowed(message):
         return
-    mk = types.InlineKeyboardMarkup()
-    mk.add(
-        types.InlineKeyboardButton("📋 Filtrlə axtar", callback_data="ss|structured")
+    send_search_menu(message.chat.id)
+
+
+def start_structured_search_from_menu(chat_id: int, op_code: str):
+    reset_search_state(chat_id)
+    search_state[chat_id] = {
+        "mode": "structured",
+        "filters": {},
+        "history": [],
+        "awaiting_floor_range": False,
+        "step": "op",
+    }
+    search_state[chat_id]["filters"]["op"] = op_code
+    structured_push_history(chat_id)
+    render_prop_step(chat_id)
+
+
+@bot.message_handler(func=lambda m: m.text in ["🏠 Satılır", "🏢 Kirayə verilir"])
+def structured_search_from_menu(message):
+    if not ensure_allowed(message):
+        return
+    chat_id = message.chat.id
+    if not check_limit(chat_id, "structured", 200):
+        bot.send_message(chat_id, "Günlük filtrli axtarış limitiniz bitib.")
+        return
+    op_code = "sat" if message.text == "🏠 Satılır" else "kir"
+    start_structured_search_from_menu(chat_id, op_code)
+
+
+@bot.message_handler(func=lambda m: m.text == "🔍 Açar sözlə axtar")
+def keyword_search_from_menu(message):
+    if not ensure_allowed(message):
+        return
+    chat_id = message.chat.id
+    if not check_limit(chat_id, "keyword", 30):
+        bot.send_message(chat_id, "Günlük açar sözlə axtarış limitiniz bitib.")
+        return
+    search_state[chat_id] = {"mode": "keyword", "operation": None}
+    send_keyword_operation_prompt(chat_id)
+
+
+@bot.message_handler(func=lambda m: m.text == "📞 Nömrə ilə axtar")
+def phone_search_from_menu(message):
+    if not ensure_allowed(message):
+        return
+    chat_id = message.chat.id
+    if not check_limit(chat_id, "phone", 50):
+        bot.send_message(chat_id, "Günlük nömrə ilə axtarış limitiniz bitib.")
+        return
+    msg = bot.send_message(chat_id, "☎️ Axtarmaq istədiyiniz nömrəni yazın:")
+    bot.register_next_step_handler(msg, phone_search_handler)
+
+
+def return_to_main_menu(chat_id: int):
+    search_state.pop(chat_id, None)
+    admin_panel_page_state.pop(chat_id, None)
+    if is_admin(chat_id):
+        send_main_menu(chat_id)
+    else:
+        main_menu(chat_id)
+
+
+def format_saved_search_entry(row: dict) -> str:
+    op = row.get("operation")
+    if op == "sale":
+        op_txt = "Satılır"
+    elif op == "rent":
+        op_txt = "Kirayə"
+    else:
+        op_txt = "Hamısı"
+
+    parts = [f"💼 {op_txt}"]
+
+    rooms = row.get("rooms")
+    if rooms:
+        parts.append(f"🚪 {rooms} otaq")
+
+    price_min = row.get("price_min")
+    price_max = row.get("price_max")
+    if price_min is not None or price_max is not None:
+        if price_min and price_max:
+            parts.append(f"💰 {price_min}-{price_max}")
+        elif price_min:
+            parts.append(f"💰 {price_min}+")
+        elif price_max:
+            parts.append(f"💰 0-{price_max}")
+
+    rayon = row.get("rayon")
+    if rayon:
+        parts.append(f"📍 {rayon}")
+
+    prop_type = row.get("prop_type")
+    if prop_type:
+        parts.append(f"🏠 {prop_type}")
+
+    return " | ".join(parts)
+
+
+@bot.message_handler(
+    func=lambda m: not is_admin(m.chat.id) and m.text == ADMIN_PANEL_BACK_MAIN
+)
+def public_back_to_main(message):
+    if not ensure_allowed(message):
+        return
+    return_to_main_menu(message.chat.id)
+
+
+@bot.message_handler(func=lambda m: m.text == "🔔 Bildirişlərim")
+def show_saved_notifications(message):
+    if not ensure_allowed(message):
+        return
+    chat_id = message.chat.id
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT operation, rooms, price_min, price_max, rayon, prop_type FROM saved_searches WHERE chat_id=?",
+        (chat_id,),
     )
-    mk.add(
-        types.InlineKeyboardButton("🔍 Açar sözlə axtar", callback_data="ss|keyword")
-    )
-    mk.add(types.InlineKeyboardButton("☎️ Nömrə ilə axtar", callback_data="ss|phone"))
-    bot.send_message(
-        message.chat.id,
-        "🔎 Axtarış metodunu seçin:",
-        reply_markup=mk,
-    )
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        bot.send_message(chat_id, "🔔 Aktiv bildirişiniz yoxdur.")
+        return
+
+    lines = [format_saved_search_entry(dict(r)) for r in rows]
+    bot.send_message(chat_id, "🔔 Aktiv bildirişləriniz:\n" + "\n".join(lines))
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ss|"))
@@ -5441,8 +5572,7 @@ def admin_panel_prev_page(message):
 
 @bot.message_handler(func=lambda m: is_admin(m.chat.id) and m.text == ADMIN_PANEL_BACK_MAIN)
 def admin_panel_back_to_main(message):
-    admin_panel_page_state.pop(message.chat.id, None)
-    send_main_menu(message.chat.id)
+    return_to_main_menu(message.chat.id)
 
 
 @bot.message_handler(func=lambda m: is_admin(m.chat.id) and m.text in ADMIN_PANEL_ACTIONS)
@@ -6729,8 +6859,8 @@ def handle_bot_refresh(message):
     search_state.pop(chat_id, None)
     session_interactions.pop(chat_id, None)
     search_reminder_shown.discard(chat_id)
-    start_cmd(message)
-    bot.send_message(chat_id, "🔄 Bot yeniləndi.\nƏsas menyudan seçim edə bilərsən.")
+    admin_panel_page_state.pop(chat_id, None)
+    return_to_main_menu(chat_id)
 
 
 @bot.message_handler(func=lambda m: m.text == "🔄 Botu yenilə")
