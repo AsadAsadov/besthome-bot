@@ -6857,32 +6857,95 @@ def admin_agents_broadcast(message):
         bot.send_message(message.chat.id, "⚠️ Boş mətni göndərə bilmərəm.")
         return
 
-    conn = get_local_conn()
-    cur = conn.cursor()
-    # agents cədvəlindən unikal chat_id-lər
-    cur.execute("SELECT DISTINCT chat_id FROM agents")
-    rows = cur.fetchall()
-    conn.close()
+    def fetch_targets():
+        conn = None
+        try:
+            conn = get_agents_conn()
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cols = {
+                row["name"] if isinstance(row, sqlite3.Row) else row[1]
+                for row in cur.execute("PRAGMA table_info(users)").fetchall()
+            }
 
-    if not rows:
+            filters = []
+            if "status" in cols:
+                filters.append("status='active'")
+            if "is_blocked" in cols:
+                filters.append("is_blocked=0")
+            elif "blocked" in cols:
+                filters.append("blocked=0")
+
+            joins = ""
+            if "subscription_expires_at" in cols:
+                filters.append("datetime(subscription_expires_at) > datetime('now')")
+            else:
+                cur.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='subscriptions'"
+                )
+                if cur.fetchone():
+                    joins = "LEFT JOIN subscriptions s ON s.chat_id = u.chat_id"
+                    filters.append("datetime(s.expires_at) > datetime('now')")
+
+            where_clause = " AND ".join(filters) if filters else "1=1"
+            cur.execute(
+                f"""
+                SELECT DISTINCT u.chat_id
+                FROM users u
+                {joins}
+                WHERE {where_clause}
+                """
+            )
+            rows = [r[0] for r in cur.fetchall() if r[0]]
+            if rows:
+                return rows
+        except Exception:
+            pass
+        finally:
+            if conn:
+                conn.close()
+
+        # Fallback: local agents cədvəli
+        conn = get_local_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT chat_id FROM agents")
+        rows = [r[0] for r in cur.fetchall() if r[0]]
+        conn.close()
+        return rows
+
+    target_ids = list({uid for uid in fetch_targets()})
+
+    if not target_ids:
         bot.send_message(message.chat.id, "❌ Vasitəçi tapılmadı.")
         return
 
-    sent = 0
-    for (uid,) in rows:
-        try:
-            bot.send_message(
-                uid,
-                f"📢 Admin bildirişi:\n{text}",
-            )
-            sent += 1
-        except:
-            continue
+    def send_broadcast(admin_chat_id, recipients, payload):
+        total = len(recipients)
+        success = 0
+        failed = 0
+        for uid in recipients:
+            try:
+                bot.send_message(uid, f"📢 Admin bildirişi:\n{payload}")
+                success += 1
+            except Exception:
+                failed += 1
 
-    bot.send_message(
-        message.chat.id,
-        f"✅ Bildiriş {sent} vasitəçiyə göndərildi.",
-    )
+        summary = (
+            "✅ Bildiriş göndərildi\n"
+            f"👥 Ümumi istifadəçi: {total}\n"
+            f"📤 Uğurla göndərildi: {success}\n"
+            f"⚠️ Uğursuz: {failed}"
+        )
+        try:
+            bot.send_message(admin_chat_id, summary)
+        except Exception:
+            pass
+
+    threading.Thread(
+        target=send_broadcast,
+        args=(message.chat.id, target_ids, text),
+        daemon=True,
+    ).start()
 
 
 def admin_search_handler(message):
