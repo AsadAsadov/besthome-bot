@@ -5384,23 +5384,24 @@ def cb_admin_update_db(c):
 @bot.message_handler(content_types=["document"])
 def handle_admin_db_upload(message):
     chat_id = message.chat.id
-    if chat_id != ADMIN_ID:
+    if not message.from_user or message.from_user.id != ADMIN_ID:
         return
 
     if user_state.get(chat_id) != "WAITING_MAIN_DB":
         return
 
     doc = message.document
-    mime_valid = False
-    if doc and doc.mime_type:
-        mime_valid = doc.mime_type in DB_ALLOWED_MIME_TYPES
+    file_name = doc.file_name if doc else None
 
-    if not doc or doc.file_name != "besthome.db" or not mime_valid:
+    if not doc or not file_name or not file_name.lower().endswith(".db"):
         bot.send_message(
             chat_id,
             "❌ Yanlış fayl.\nZəhmət olmasa yalnız besthome.db göndərin.",
         )
         return
+
+    if file_name.lower() != "besthome.db":
+        bot.send_message(chat_id, "⚠️ Fayl adı 'besthome.db' deyil. Yeniləmə davam edir.")
 
     if db_update_lock.locked():
         bot.send_message(
