@@ -6849,7 +6849,7 @@ def show_revenue_report(chat_id: int):
 
 
 def admin_agents_broadcast(message):
-    """Adminin yazdığı mətni bütün agents cədvəlində olanlara göndər."""
+    """Adminin yazdığı mətni bütün qeydiyyatlı istifadəçilərə göndər."""
     if not is_admin(message.chat.id):
         return
     text = (message.text or "").strip()
@@ -6857,70 +6857,62 @@ def admin_agents_broadcast(message):
         bot.send_message(message.chat.id, "⚠️ Boş mətni göndərə bilmərəm.")
         return
 
-    def fetch_targets():
+    def fetch_targets_and_stats():
         conn = None
+        total_users = 0
+        blocked_users = 0
+        paid_users = 0
+        demo_users = 0
+        targets = []
         try:
-            conn = get_agents_conn()
-            conn.row_factory = sqlite3.Row
+            conn = get_local_conn()
             cur = conn.cursor()
-            cols = {
-                row["name"] if isinstance(row, sqlite3.Row) else row[1]
-                for row in cur.execute("PRAGMA table_info(users)").fetchall()
-            }
 
-            filters = []
-            if "status" in cols:
-                filters.append("status='active'")
-            if "is_blocked" in cols:
-                filters.append("is_blocked=0")
-            elif "blocked" in cols:
-                filters.append("blocked=0")
+            cur.execute("SELECT COUNT(*) FROM users")
+            total_users = cur.fetchone()[0] or 0
 
-            joins = ""
-            if "subscription_expires_at" in cols:
-                filters.append("datetime(subscription_expires_at) > datetime('now')")
-            else:
+            cur.execute("SELECT COUNT(*) FROM users WHERE blocked=1")
+            blocked_users = cur.fetchone()[0] or 0
+
+            cur.execute("SELECT chat_id FROM users WHERE blocked=0")
+            targets = [r[0] for r in cur.fetchall() if r[0]]
+
+            try:
                 cur.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name='subscriptions'"
+                    """
+                    SELECT COUNT(*) FROM subscriptions
+                    WHERE is_demo=0
+                      AND is_active=1
+                      AND expires_at IS NOT NULL
+                      AND datetime(expires_at) >= datetime('now')
+                    """
                 )
-                if cur.fetchone():
-                    joins = "LEFT JOIN subscriptions s ON s.chat_id = u.chat_id"
-                    filters.append("datetime(s.expires_at) > datetime('now')")
+                paid_users = cur.fetchone()[0] or 0
+            except Exception:
+                paid_users = 0
 
-            where_clause = " AND ".join(filters) if filters else "1=1"
-            cur.execute(
-                f"""
-                SELECT DISTINCT u.chat_id
-                FROM users u
-                {joins}
-                WHERE {where_clause}
-                """
-            )
-            rows = [r[0] for r in cur.fetchall() if r[0]]
-            if rows:
-                return rows
+            try:
+                cur.execute("SELECT COUNT(*) FROM subscriptions WHERE is_demo=1")
+                demo_users = cur.fetchone()[0] or 0
+            except Exception:
+                demo_users = 0
         except Exception:
             pass
         finally:
             if conn:
                 conn.close()
 
-        # Fallback: local agents cədvəli
-        conn = get_local_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT DISTINCT chat_id FROM agents")
-        rows = [r[0] for r in cur.fetchall() if r[0]]
-        conn.close()
-        return rows
+        return targets, total_users, blocked_users, paid_users, demo_users
 
-    target_ids = list({uid for uid in fetch_targets()})
+    target_ids, total_users, blocked_users, paid_users, demo_users = fetch_targets_and_stats()
 
     if not target_ids:
-        bot.send_message(message.chat.id, "❌ Vasitəçi tapılmadı.")
+        bot.send_message(message.chat.id, "❌ İstifadəçi tapılmadı.")
         return
 
-    def send_broadcast(admin_chat_id, recipients, payload):
-        total = len(recipients)
+    def send_broadcast(
+        admin_chat_id, recipients, payload, total_users, blocked_users, paid_users, demo_users
+    ):
         success = 0
         failed = 0
         for uid in recipients:
@@ -6931,10 +6923,15 @@ def admin_agents_broadcast(message):
                 failed += 1
 
         summary = (
-            "✅ Bildiriş göndərildi\n"
-            f"👥 Ümumi istifadəçi: {total}\n"
+            "📣 Bildiriş göndərildi\n"
+            f"👥 Ümumi qeydiyyatlı istifadəçi: {total_users}\n"
             f"📤 Uğurla göndərildi: {success}\n"
+            f"🚫 Bloklanmış istifadəçilər: {blocked_users}\n"
             f"⚠️ Uğursuz: {failed}"
+        )
+        summary += (
+            f"\n\n💳 Ödənişli istifadəçilər: {paid_users}"
+            f"\n🎁 Demo istifadəçilər: {demo_users}"
         )
         try:
             bot.send_message(admin_chat_id, summary)
@@ -6943,10 +6940,17 @@ def admin_agents_broadcast(message):
 
     threading.Thread(
         target=send_broadcast,
-        args=(message.chat.id, target_ids, text),
+        args=(
+            message.chat.id,
+            list({uid for uid in target_ids if uid}),
+            text,
+            total_users,
+            blocked_users,
+            paid_users,
+            demo_users,
+        ),
         daemon=True,
     ).start()
-
 
 def admin_search_handler(message):
     """Admin üçün ümumi açar sözlə axtarış (əsas + lokal + agent)."""
