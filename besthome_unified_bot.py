@@ -21,6 +21,8 @@ import threading
 import math
 import re
 import random
+import shutil
+import tempfile
 from datetime import datetime, date, timedelta
 from typing import Optional
 from urllib.parse import quote
@@ -85,6 +87,7 @@ user_state = {}  # Yeni elan proses state
 search_state = {}  # Açar sözlə axtarış paging state
 search_reminder_shown = set()  # Session-level reminder flag
 session_interactions = {}
+db_update_lock = threading.Lock()
 
 # Pagination
 PAGE_SIZE = 20
@@ -108,6 +111,74 @@ def get_agents_conn():
     conn = sqlite3.connect(AGENTS_DB, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def get_user_step(chat_id: int):
+    state = user_state.get(chat_id)
+    if isinstance(state, dict):
+        return state.get("step")
+    return None
+
+
+def prepare_main_db_for_swap():
+    try:
+        conn = sqlite3.connect(MAIN_DB, timeout=5)
+        conn.execute("PRAGMA wal_checkpoint(FULL)")
+        conn.close()
+    except Exception as e:
+        print("⚠️ DB checkpoint xətası:", e)
+
+
+def backup_main_db_file() -> Optional[str]:
+    if not os.path.exists(MAIN_DB):
+        return None
+
+    ts = datetime.utcnow().strftime("%Y-%m-%d_%H-%M")
+    backup_path = os.path.join(DATA_DIR, f"besthome_backup_{ts}.db")
+    shutil.copy2(MAIN_DB, backup_path)
+    return backup_path
+
+
+def restore_main_db_from_backup(backup_path: Optional[str]):
+    if not backup_path or not os.path.exists(backup_path):
+        return
+    try:
+        if os.path.exists(MAIN_DB):
+            os.remove(MAIN_DB)
+    except Exception:
+        pass
+    shutil.copy2(backup_path, MAIN_DB)
+
+
+def restart_bot_safely(delay: int = 2):
+    time.sleep(delay)
+    os._exit(0)
+
+
+DB_ALLOWED_MIME_TYPES = {
+    "application/vnd.sqlite3",
+    "application/octet-stream",
+    "application/x-sqlite3",
+}
+
+
+def download_main_db_document(document) -> str:
+    file_info = bot.get_file(document.file_id)
+    fd, temp_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
+    try:
+        with requests.get(file_url, stream=True, timeout=300) as r:
+            r.raise_for_status()
+            with open(temp_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+    except Exception:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise
+    return temp_path
 
 
 def init_local_db():
@@ -2527,7 +2598,7 @@ def start_new_listing(message):
     bot.send_message(chat_id, "👤 Rolunuzu seçin:", reply_markup=kb)
 
 
-@bot.message_handler(func=lambda m: user_state.get(m.chat.id, {}).get("step") == "role")
+@bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "role")
 def step_role(message):
     if not ensure_allowed(message):
         return
@@ -2548,9 +2619,7 @@ def step_role(message):
     bot.send_message(chat_id, "💸 Əməliyyat növünü seçin:", reply_markup=kb)
 
 
-@bot.message_handler(
-    func=lambda m: user_state.get(m.chat.id, {}).get("step") == "operation"
-)
+@bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "operation")
 def step_operation(message):
     if not ensure_allowed(message):
         return
@@ -2574,9 +2643,7 @@ def step_operation(message):
     bot.send_message(chat_id, "🏠 Əmlak tipini seçin:", reply_markup=kb)
 
 
-@bot.message_handler(
-    func=lambda m: user_state.get(m.chat.id, {}).get("step") == "prop_type"
-)
+@bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "prop_type")
 def step_prop_type(message):
     if not ensure_allowed(message):
         return
@@ -2603,9 +2670,7 @@ def step_prop_type(message):
     bot.send_message(chat_id, "🔢 Otaq sayını seçin:", reply_markup=kb)
 
 
-@bot.message_handler(
-    func=lambda m: user_state.get(m.chat.id, {}).get("step") == "rooms"
-)
+@bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "rooms")
 def step_rooms(message):
     if not ensure_allowed(message):
         return
@@ -2647,9 +2712,7 @@ def step_rooms(message):
     bot.send_message(chat_id, "📍 Rayon / ərazi seçin:", reply_markup=kb)
 
 
-@bot.message_handler(
-    func=lambda m: user_state.get(m.chat.id, {}).get("step") == "rayon"
-)
+@bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "rayon")
 def step_rayon(message):
     if not ensure_allowed(message):
         return
@@ -2698,9 +2761,7 @@ def step_rayon(message):
     )
 
 
-@bot.message_handler(
-    func=lambda m: user_state.get(m.chat.id, {}).get("step") == "metro"
-)
+@bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "metro")
 def step_metro(message):
     if not ensure_allowed(message):
         return
@@ -2714,7 +2775,7 @@ def step_metro(message):
     bot.send_message(chat_id, "📏 Sahə (m²) yazın:", reply_markup=kb)
 
 
-@bot.message_handler(func=lambda m: user_state.get(m.chat.id, {}).get("step") == "area")
+@bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "area")
 def step_area(message):
     if not ensure_allowed(message):
         return
@@ -2728,9 +2789,7 @@ def step_area(message):
     bot.send_message(chat_id, "💰 Qiyməti yazın:", reply_markup=kb)
 
 
-@bot.message_handler(
-    func=lambda m: user_state.get(m.chat.id, {}).get("step") == "price"
-)
+@bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "price")
 def step_price(message):
     if not ensure_allowed(message):
         return
@@ -2744,9 +2803,7 @@ def step_price(message):
     bot.send_message(chat_id, "💱 Valyuta seçin:", reply_markup=kb)
 
 
-@bot.message_handler(
-    func=lambda m: user_state.get(m.chat.id, {}).get("step") == "currency"
-)
+@bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "currency")
 def step_currency(message):
     if not ensure_allowed(message):
         return
@@ -2764,9 +2821,7 @@ def step_currency(message):
     bot.send_message(chat_id, "📞 Əlaqə nömrəsini yazın:", reply_markup=kb)
 
 
-@bot.message_handler(
-    func=lambda m: user_state.get(m.chat.id, {}).get("step") == "phone"
-)
+@bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "phone")
 def step_phone(message):
     if not ensure_allowed(message):
         return
@@ -2780,9 +2835,7 @@ def step_phone(message):
     bot.send_message(chat_id, "👤 Əlaqədar şəxsin adını yazın:", reply_markup=kb)
 
 
-@bot.message_handler(
-    func=lambda m: user_state.get(m.chat.id, {}).get("step") == "contact_name"
-)
+@bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "contact_name")
 def step_contact_name(message):
     if not ensure_allowed(message):
         return
@@ -2796,9 +2849,7 @@ def step_contact_name(message):
     bot.send_message(chat_id, "🧾 Elan haqqında qısa təsvir yazın:", reply_markup=kb)
 
 
-@bot.message_handler(
-    func=lambda m: user_state.get(m.chat.id, {}).get("step") == "summary"
-)
+@bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "summary")
 def step_summary(message):
     if not ensure_allowed(message):
         return
@@ -2884,7 +2935,7 @@ def add_listing_new(data: dict) -> int:
     return new_id
 
 
-@bot.message_handler(func=lambda m: user_state.get(m.chat.id, {}).get("step") == "link")
+@bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "link")
 def step_link(message):
     if not ensure_allowed(message):
         return
@@ -5260,7 +5311,7 @@ def open_admin_panel(message):
     )
     mk.add(
         types.InlineKeyboardButton("🤝 Referral statistikası", callback_data="adm|referrals")
-    )
+        )
     mk.add(
         types.InlineKeyboardButton(
             "📤 Vasitəçilərə bildiriş", callback_data="adm|agents_broadcast"
@@ -5298,8 +5349,100 @@ def open_admin_panel(message):
     mk.add(
         types.InlineKeyboardButton("🔥 Ən çox baxılan elanlar", callback_data="adm|topviews")
     )
+    mk.add(
+        types.InlineKeyboardButton("📦 Baza yenilə", callback_data="admin_update_db")
+    )
 
     bot.send_message(message.chat.id, "🛠 Admin Panel:", reply_markup=mk)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "admin_update_db")
+def cb_admin_update_db(c):
+    if not is_admin(c.message.chat.id):
+        return
+
+    if db_update_lock.locked():
+        try:
+            bot.answer_callback_query(c.id, "⚠️ Baza yenilənir.")
+        except Exception:
+            pass
+        bot.send_message(c.message.chat.id, "⚠️ Hal-hazırda baza yenilənir. Zəhmət olmasa gözləyin.")
+        return
+
+    try:
+        bot.answer_callback_query(c.id, "📦 Baza yeniləmə")
+    except Exception:
+        pass
+
+    user_state[c.message.chat.id] = "WAITING_MAIN_DB"
+    bot.send_message(
+        c.message.chat.id,
+        "📦 Yeni besthome.db faylını göndərin.\n⚠️ Yalnız .db faylı qəbul olunur.",
+    )
+
+
+@bot.message_handler(content_types=["document"])
+def handle_admin_db_upload(message):
+    chat_id = message.chat.id
+    if chat_id != ADMIN_ID:
+        return
+
+    if user_state.get(chat_id) != "WAITING_MAIN_DB":
+        return
+
+    doc = message.document
+    mime_valid = False
+    if doc and doc.mime_type:
+        mime_valid = doc.mime_type in DB_ALLOWED_MIME_TYPES
+
+    if not doc or doc.file_name != "besthome.db" or not mime_valid:
+        bot.send_message(
+            chat_id,
+            "❌ Yanlış fayl.\nZəhmət olmasa yalnız besthome.db göndərin.",
+        )
+        return
+
+    if db_update_lock.locked():
+        bot.send_message(
+            chat_id,
+            "⚠️ Hal-hazırda baza yenilənir. Zəhmət olmasa gözləyin.",
+        )
+        return
+
+    backup_path = None
+    temp_path = None
+    with db_update_lock:
+        try:
+            user_state[chat_id] = "UPDATING_MAIN_DB"
+            temp_path = download_main_db_document(doc)
+            prepare_main_db_for_swap()
+            backup_path = backup_main_db_file()
+            if backup_path is None:
+                raise RuntimeError("Backup alınmadı")
+
+            os.replace(temp_path, MAIN_DB)
+
+            bot.send_message(
+                chat_id,
+                "✅ Baza uğurla yeniləndi.\n🗂 Köhnə baza backup edildi.\n🔄 Bot yenidən başladılır...",
+            )
+            threading.Thread(target=restart_bot_safely, args=(2,), daemon=True).start()
+        except Exception as e:
+            print("DB update error:", e)
+            try:
+                restore_main_db_from_backup(backup_path)
+            except Exception as restore_err:
+                print("DB restore error:", restore_err)
+            bot.send_message(
+                chat_id, "❌ Xəta baş verdi.\n⏪ Köhnə baza bərpa edildi."
+            )
+        finally:
+            user_state.pop(chat_id, None)
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm|"))
