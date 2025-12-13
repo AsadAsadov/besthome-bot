@@ -80,6 +80,7 @@ user_state = {}  # Yeni elan prosesi
 search_state = {}  # Axtarış paging və filter state
 
 bot = telebot.TeleBot(BOT_TOKEN)
+BOT_USERNAME = bot.get_me().username
 user_state = {}  # Yeni elan proses state
 search_state = {}  # Açar sözlə axtarış paging state
 search_reminder_shown = set()  # Session-level reminder flag
@@ -2259,12 +2260,23 @@ def share_referral(message):
     if is_admin(chat_id):
         main_menu(chat_id)
         return
-    referral_link = f"https://t.me/BestHomeBot?start=ref_{chat_id}"
+    if not is_user_allowed(chat_id):
+        bot.send_message(
+            chat_id,
+            "🛑 Botdan istifadə üçün admin təsdiqi tələb olunur.",
+        )
+        return
+
+    referral_link = f"https://t.me/{BOT_USERNAME}?start=ref_{chat_id}"
     text = (
         "🤝 Dostunu dəvət et və BONUS qazan!\n\n"
         f"Bu linki dostuna göndər:\n{referral_link}\n\n"
-        "🎁 Hər aktiv istifadəçi üçün +3 gün!\n"
-        "🎯 10 istifadəçi → +45 gün bonus!"
+        "Bu link vasitəsi ilə botda qeydiyyatdan keçən\n"
+        "və hesabını ən azı 1 gün aktivləşdirən\n"
+        "HƏR istifadəçi üçün:\n\n"
+        "🎁 Sənə +3 gün PULSUZ botdan istifadə!\n\n"
+        "🎯 10 istifadəçi tamam olduqda isə:\n"
+        "→ +45 gün əlavə BONUS 🎉"
     )
     bot.send_message(chat_id, text)
 
