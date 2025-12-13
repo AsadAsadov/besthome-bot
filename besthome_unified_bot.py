@@ -24,7 +24,7 @@ import random
 import shutil
 import tempfile
 from datetime import datetime, date, timedelta
-from typing import Optional
+from typing import Optional, Tuple
 from urllib.parse import quote
 
 import requests
@@ -198,14 +198,13 @@ DB_ALLOWED_MIME_TYPES = {
 }
 
 
-def download_main_db_document(document) -> str:
-    file_info = bot.get_file(document.file_id)
-    fd, temp_path = tempfile.mkstemp(suffix=".db")
+def download_main_db_zip(url: str) -> str:
+    fd, temp_path = tempfile.mkstemp(suffix=".zip")
     os.close(fd)
-    file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
     try:
-        with requests.get(file_url, stream=True, timeout=300) as r:
-            r.raise_for_status()
+        with requests.get(url, stream=True, timeout=300) as r:
+            if r.status_code != 200:
+                raise RuntimeError(f"HTTP status {r.status_code}")
             with open(temp_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=1024 * 1024):
                     if chunk:
@@ -217,19 +216,26 @@ def download_main_db_document(document) -> str:
     return temp_path
 
 
-def validate_main_db_file(db_path: str):
+def extract_main_db_from_zip(zip_path: str) -> Tuple[str, str]:
+    if not zipfile.is_zipfile(zip_path):
+        raise RuntimeError("Fayl ZIP formatında deyil")
+
+    temp_dir = tempfile.mkdtemp()
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        names = zf.namelist()
+        if "besthome.db" not in names:
+            raise RuntimeError("ZIP daxilində 'besthome.db' tapılmadı")
+        zf.extract("besthome.db", path=temp_dir)
+    return os.path.join(temp_dir, "besthome.db"), temp_dir
+
+
+def validate_main_db_file(db_path: str) -> int:
     conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
     try:
         cur = conn.cursor()
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        tables = {row[0] for row in cur.fetchall() if row and row[0]}
-        if "listings" not in tables:
-            raise RuntimeError("Yeni bazada 'listings' cədvəli tapılmadı")
-        cur.execute("PRAGMA table_info(listings)")
-        cols = [row[1] for row in cur.fetchall() if len(row) > 1]
-        if not cols:
-            raise RuntimeError("'listings' cədvəli boşdur")
+        cur.execute("SELECT COUNT(*) FROM listings")
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
     finally:
         conn.close()
 
@@ -5447,11 +5453,11 @@ def cb_admin_update_db(c):
     user_state[c.message.chat.id] = "WAITING_MAIN_DB"
     bot.send_message(
         c.message.chat.id,
-        "📦 Yeni besthome.db faylını göndərin.\n⚠️ Yalnız .db faylı qəbul olunur.",
+        "🔗 Yeni besthome.zip yükləmə linkini göndərin.",
     )
 
 
-@bot.message_handler(content_types=["document"])
+@bot.message_handler(content_types=["text"])
 def handle_admin_db_upload(message):
     chat_id = message.chat.id
     if not message.from_user or message.from_user.id != ADMIN_ID:
@@ -5460,18 +5466,10 @@ def handle_admin_db_upload(message):
     if user_state.get(chat_id) != "WAITING_MAIN_DB":
         return
 
-    doc = message.document
-    file_name = doc.file_name if doc else None
-
-    if not doc or not file_name or not file_name.lower().endswith(".db"):
-        bot.send_message(
-            chat_id,
-            "❌ Yanlış fayl.\nZəhmət olmasa yalnız besthome.db göndərin.",
-        )
+    url = message.text.strip() if message.text else ""
+    if not url or not re.match(r"https?://", url):
+        bot.send_message(chat_id, "❌ Zəhmət olmasa keçərli link göndərin.")
         return
-
-    if file_name.lower() != "besthome.db":
-        bot.send_message(chat_id, "⚠️ Fayl adı 'besthome.db' deyil. Yeniləmə davam edir.")
 
     if db_update_lock.locked():
         bot.send_message(
@@ -5480,47 +5478,66 @@ def handle_admin_db_upload(message):
         )
         return
 
-    backup_path = None
-    temp_path = None
+    temp_zip_path = None
+    extracted_db_path = None
+    extracted_dir = None
+    backup_temp = None
     with db_update_lock:
         try:
             main_db_update_in_progress.set()
             user_state[chat_id] = "UPDATING_MAIN_DB"
-            temp_path = download_main_db_document(doc)
-            validate_main_db_file(temp_path)
+            temp_zip_path = download_main_db_zip(url)
+            extracted_db_path, extracted_dir = extract_main_db_from_zip(temp_zip_path)
+            validate_main_db_file(extracted_db_path)
+            old_count = validate_main_db_file(MAIN_DB)
             close_all_main_conns()
             prepare_main_db_for_swap()
-            backup_path = backup_main_db_file()
-            if backup_path is None:
-                raise RuntimeError("Backup alınmadı")
 
-            os.replace(temp_path, MAIN_DB)
+            backup_fd, backup_temp = tempfile.mkstemp(suffix=".db")
+            os.close(backup_fd)
+            shutil.copy2(MAIN_DB, backup_temp)
 
-            sanity_check_main_db()
+            os.replace(extracted_db_path, MAIN_DB)
+
+            final_count = validate_main_db_file(MAIN_DB)
+            added = final_count - old_count
+            if added < 0:
+                added = 0
 
             bot.send_message(
                 chat_id,
-                "✅ Baza uğurla yeniləndi.\n🗂 Köhnə baza backup edildi.\n🔄 Bot yenidən başladılır...",
+                "✅ Baza uğurla yeniləndi.\n📦 Yeni elanlar: "
+                f"{added}\n📊 Ümumi elan sayı: {final_count}",
             )
-            threading.Thread(target=restart_bot_safely, args=(2,), daemon=True).start()
         except Exception as e:
             print("DB update error:", e)
             try:
-                restore_main_db_from_backup(backup_path)
+                if backup_temp and os.path.exists(backup_temp):
+                    if os.path.exists(MAIN_DB):
+                        os.replace(backup_temp, MAIN_DB)
+                    else:
+                        shutil.copy2(backup_temp, MAIN_DB)
+                    backup_temp = None
             except Exception as restore_err:
                 print("DB restore error:", restore_err)
             bot.send_message(
                 chat_id,
-                f"❌ Xəta baş verdi: {e}.\n⏪ Köhnə baza bərpa edildi.",
+                f"❌ Xəta baş verdi: {e}",
             )
         finally:
             main_db_update_in_progress.clear()
             user_state.pop(chat_id, None)
-            if temp_path and os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except Exception:
-                    pass
+            for path in (temp_zip_path, extracted_db_path, backup_temp):
+                if path and os.path.exists(path):
+                    try:
+                        if os.path.isdir(path):
+                            shutil.rmtree(path, ignore_errors=True)
+                        else:
+                            os.remove(path)
+                    except Exception:
+                        pass
+            if extracted_dir and os.path.exists(extracted_dir):
+                shutil.rmtree(extracted_dir, ignore_errors=True)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm|"))
