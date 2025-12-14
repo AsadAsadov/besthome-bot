@@ -93,25 +93,32 @@ complaint_records = {}
 admin_reply_state = {}
 last_complaint_time = {}
 admin_stats_period = {}
+admin_direct_message_state = {}
+FINANCIAL_REPORTS_BUTTON = "💰 Maliyyə hesabatları"
+FINANCIAL_REPORTS_BACK = "⬅️ Geri (Admin Panel)"
+FINANCIAL_REPORTS_MENU = [
+    "📜 Ödəniş tarixçəsi",
+    "🤝 Referral statistikası",
+    "📈 Aylıq gəlir hesabatı",
+    FINANCIAL_REPORTS_BACK,
+]
 ADMIN_PANEL_PAGE1 = [
     "✅ Təsdiqlənməyən elanlar",
     "📊 Statistikalar",
-    "💰 Aylıq gəlir hesabatı",
-    "🤝 Referral statistikası",
+    FINANCIAL_REPORTS_BUTTON,
     "📢 Vasitəçilərə bildiriş",
     "🧠 Aktiv / passiv maklerlər",
-    "🧾 Ödəniş tarixçəsi",
-    "🔎 Bazada axtar",
+    "🧪 Demo istifadəçilər",
+    "🆔 İstifadəçi ID ilə axtar",
+    "👥 İstifadəçilər",
 ]
 ADMIN_PANEL_PAGE2 = [
-    "🆔 İstifadəçi ID ilə axtar",
     "🎟 Promo kodlar",
     "♻️ Limitləri sıfırla",
-    "👥 İstifadəçilər",
-    "🏢 Vasitəçi elanları",
     "🚀 Yeniləmə göndər",
     "🔥 Ən çox baxılan elanlar",
     "📦 Baza yenilə",
+    "📨 İstifadəçiyə mesaj göndər",
 ]
 ADMIN_PANEL_NAV_NEXT = "▶️ Növbəti səhifə"
 ADMIN_PANEL_NAV_PREV = "◀️ Əvvəlki səhifə"
@@ -5930,20 +5937,15 @@ def handle_admin_panel_action(message):
     elif txt == "📊 Statistikalar":
         admin_stats_period[chat_id] = "day"
         show_admin_stats(chat_id)
-    elif txt == "💰 Aylıq gəlir hesabatı":
-        show_revenue_report(chat_id)
-    elif txt == "🤝 Referral statistikası":
-        show_referral_stats(chat_id)
+    elif txt == FINANCIAL_REPORTS_BUTTON:
+        send_financial_reports_menu(chat_id)
     elif txt == "📢 Vasitəçilərə bildiriş":
         msg = bot.send_message(chat_id, "✍️ Vasitəçilərə göndəriləcək mətni yaz:")
         bot.register_next_step_handler(msg, admin_agents_broadcast)
     elif txt == "🧠 Aktiv / passiv maklerlər":
         show_agent_activity_overview(chat_id)
-    elif txt == "🧾 Ödəniş tarixçəsi":
-        show_payment_history_list(chat_id, page=1)
-    elif txt == "🔎 Bazada axtar":
-        msg = bot.send_message(chat_id, "🔍 Açar söz yaz (əsas baza + lokal):")
-        bot.register_next_step_handler(msg, admin_search_handler)
+    elif txt == "🧪 Demo istifadəçilər":
+        send_demo_users_report(chat_id)
     elif txt == "🆔 İstifadəçi ID ilə axtar":
         msg = bot.send_message(chat_id, "🔍 İstifadəçi chat_id daxil et:")
         bot.register_next_step_handler(msg, admin_search_by_id_step)
@@ -5958,8 +5960,6 @@ def handle_admin_panel_action(message):
         bot.send_message(chat_id, "♻️ Bütün istifadəçi limitləri sıfırlandı.")
     elif txt == "👥 İstifadəçilər":
         show_users_menu(chat_id)
-    elif txt == "🏢 Vasitəçi elanları":
-        send_agents_panel_message(chat_id)
     elif txt == "🚀 Yeniləmə göndər":
         broadcast_bot_update(chat_id)
     elif txt == "🔥 Ən çox baxılan elanlar":
@@ -5967,6 +5967,211 @@ def handle_admin_panel_action(message):
         send_paginated_results(chat_id, "topviews", params={"days": 7}, page=1)
     elif txt == "📦 Baza yenilə":
         start_admin_update_db(chat_id)
+    elif txt == "📨 İstifadəçiyə mesaj göndər":
+        start_direct_user_message_flow(chat_id)
+
+
+def send_financial_reports_menu(chat_id: int):
+    if not is_admin(chat_id):
+        return
+
+    mk = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    mk.row("📜 Ödəniş tarixçəsi", "🤝 Referral statistikası")
+    mk.row("📈 Aylıq gəlir hesabatı")
+    mk.row(FINANCIAL_REPORTS_BACK)
+    bot.send_message(chat_id, "💰 Maliyyə hesabatları:", reply_markup=mk)
+
+
+@bot.message_handler(func=lambda m: is_admin(m.chat.id) and m.text in FINANCIAL_REPORTS_MENU)
+def handle_financial_reports_menu(message):
+    if message.text == "📜 Ödəniş tarixçəsi":
+        show_payment_history_list(message.chat.id, page=1)
+    elif message.text == "🤝 Referral statistikası":
+        show_referral_stats(message.chat.id)
+    elif message.text == "📈 Aylıq gəlir hesabatı":
+        show_revenue_report(message.chat.id)
+    elif message.text == FINANCIAL_REPORTS_BACK:
+        page = admin_panel_page_state.get(message.chat.id, 1)
+        send_admin_panel(message.chat.id, page=page)
+
+
+def format_remaining_time(delta: timedelta) -> str:
+    total_seconds = max(0, int(delta.total_seconds()))
+    days, remainder = divmod(total_seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes = remainder // 60
+    parts = []
+    if days:
+        parts.append(f"{days} gün")
+    if hours:
+        parts.append(f"{hours} saat")
+    if not parts:
+        parts.append(f"{minutes} dəq")
+    return " ".join(parts)
+
+
+def send_demo_users_report(chat_id: int):
+    if not is_admin(chat_id):
+        return
+
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT u.chat_id,
+               u.full_name,
+               u.username,
+               u.demo_expires_at,
+               s.expires_at AS sub_expires_at
+        FROM users u
+        LEFT JOIN subscriptions s ON s.chat_id = u.chat_id
+        WHERE u.demo_used=1 OR s.is_demo=1
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        bot.send_message(chat_id, "❌ Demo istifadəçisi yoxdur.")
+        return
+
+    now = datetime.utcnow()
+    entries = []
+
+    for r in rows:
+        expiry_raw = r["demo_expires_at"] or r["sub_expires_at"]
+        expiry_dt = None
+        if expiry_raw:
+            try:
+                expiry_dt = datetime.fromisoformat(str(expiry_raw))
+            except Exception:
+                try:
+                    expiry_dt = datetime.fromisoformat(str(expiry_raw).replace(" ", "T"))
+                except Exception:
+                    expiry_dt = None
+
+        start_dt = expiry_dt - timedelta(days=3) if expiry_dt else None
+
+        name = r["full_name"] or ""
+        if r["username"]:
+            uname = f"@{r['username']}"
+            name = f"{name} ({uname})" if name else uname
+        if not name:
+            name = f"ID: {r['chat_id']}"
+
+        line = f"• {name}"
+        start_txt = start_dt.strftime("%d.%m.%Y") if start_dt else "-"
+        end_txt = expiry_dt.strftime("%d.%m.%Y") if expiry_dt else "-"
+        line += f" — start: {start_txt} — bitir: {end_txt}"
+
+        if expiry_dt:
+            if expiry_dt > now:
+                remaining_txt = format_remaining_time(expiry_dt - now)
+                line += f" — qalıq: {remaining_txt}"
+            else:
+                line += " — Bitib"
+        else:
+            line += " — Demo tarixi yoxdur"
+
+        entries.append({"line": line, "expiry": expiry_dt or datetime.min})
+
+    entries.sort(key=lambda x: x["expiry"], reverse=True)
+
+    lines = ["🧪 Demo istifadəçilər"] + [item["line"] for item in entries]
+    chunk = ""
+    for line in lines:
+        if len(chunk) + len(line) + 1 > 3800:
+            bot.send_message(chat_id, chunk.strip())
+            chunk = ""
+        chunk += line + "\n"
+    if chunk.strip():
+        bot.send_message(chat_id, chunk.strip())
+
+
+def start_direct_user_message_flow(chat_id: int):
+    if not is_admin(chat_id):
+        return
+
+    admin_direct_message_state[chat_id] = {"step": "awaiting_id"}
+    msg = bot.send_message(
+        chat_id, "📨 Mesaj göndərmək üçün istifadəçi ID-sini daxil et:"
+    )
+    bot.register_next_step_handler(msg, admin_direct_message_get_user)
+
+
+def admin_direct_message_get_user(message):
+    if not is_admin(message.chat.id):
+        return
+
+    state = admin_direct_message_state.get(message.chat.id)
+    if not state or state.get("step") != "awaiting_id":
+        return
+
+    try:
+        target_id = int(str(message.text).strip())
+    except Exception:
+        msg = bot.send_message(message.chat.id, "⚠️ Düzgün rəqəm daxil et:")
+        bot.register_next_step_handler(msg, admin_direct_message_get_user)
+        return
+
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT full_name, username FROM users WHERE chat_id=?", (target_id,)
+    )
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        msg = bot.send_message(
+            message.chat.id, "❌ İstifadəçi tapılmadı. Yenidən ID daxil et:"
+        )
+        bot.register_next_step_handler(msg, admin_direct_message_get_user)
+        return
+
+    name = row["full_name"] or "-"
+    uname = f"@{row['username']}" if row["username"] else "—"
+
+    admin_direct_message_state[message.chat.id] = {
+        "step": "awaiting_message",
+        "target_id": target_id,
+        "target_name": name,
+    }
+
+    msg = bot.send_message(
+        message.chat.id,
+        f"📨 İstifadəçi tapıldı:\nID: {target_id}\nAd: {name}\nİstifadəçi adı: {uname}\n\n✍️ Mesajı yazın:",
+    )
+    bot.register_next_step_handler(msg, admin_direct_message_send)
+
+
+def admin_direct_message_send(message):
+    if not is_admin(message.chat.id):
+        return
+
+    state = admin_direct_message_state.get(message.chat.id)
+    if not state or state.get("step") != "awaiting_message":
+        return
+
+    target_id = state.get("target_id")
+    if not target_id:
+        admin_direct_message_state.pop(message.chat.id, None)
+        return
+
+    if not message.text or not message.text.strip():
+        msg = bot.send_message(message.chat.id, "⚠️ Mesaj boş ola bilməz. Yenidən yaz:")
+        bot.register_next_step_handler(msg, admin_direct_message_send)
+        return
+
+    try:
+        bot.send_message(target_id, message.text)
+        bot.send_message(message.chat.id, "✅ Mesaj istifadəçiyə göndərildi.")
+    except Exception:
+        bot.send_message(
+            message.chat.id, "⚠️ Mesaj göndərilə bilmədi. İstifadəçi əlçatmazdır."
+        )
+    finally:
+        admin_direct_message_state.pop(message.chat.id, None)
 
 
 def start_admin_update_db(chat_id: int, callback_id: Optional[str] = None):
@@ -6550,7 +6755,7 @@ def show_payment_history_list(chat_id: int, page: int = 1):
     rows = cur.fetchall()
     conn.close()
 
-    lines = ["🧾 Ödəniş tarixçəsi (admin):"]
+    lines = ["📜 Ödəniş tarixçəsi (admin):"]
     for r in rows:
         last_dt = "-"
         if r["last_payment_date"]:
