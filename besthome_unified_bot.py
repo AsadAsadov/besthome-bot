@@ -431,6 +431,14 @@ def init_local_db():
         )
     except sqlite3.OperationalError:
         pass
+    try:
+        cur.execute("ALTER TABLE users ADD COLUMN demo_used INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cur.execute("ALTER TABLE users ADD COLUMN demo_expires_at TEXT")
+    except sqlite3.OperationalError:
+        pass
 
     # Abunəliklər
     cur.execute(
@@ -910,6 +918,31 @@ def set_subscription(
             note,
             chat_id,
         ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_user_demo_status(chat_id: int) -> dict:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT demo_used, demo_expires_at FROM users WHERE chat_id=?", (chat_id,)
+    )
+    row = cur.fetchone()
+    conn.close()
+    return {
+        "demo_used": row[0] if row else 0,
+        "demo_expires_at": row[1] if row else None,
+    }
+
+
+def mark_demo_used(chat_id: int, expires_at: datetime):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET demo_used=1, demo_expires_at=?, approved=1 WHERE chat_id=?",
+        (expires_at.isoformat(), chat_id),
     )
     conn.commit()
     conn.close()
@@ -1433,7 +1466,21 @@ def subscription_payment_code(chat_id: int) -> str:
     return f"BH-{chat_id}"
 
 
-def send_payment_menu(chat_id: int):
+
+def is_demo_available(chat_id: int) -> bool:
+    status = get_user_demo_status(chat_id)
+    if status.get("demo_used"):
+        return False
+    sub = get_subscription(chat_id)
+    now = datetime.utcnow()
+    if sub and sub.get("is_active"):
+        exp_dt = parse_subscription_expiry(sub)
+        if not exp_dt or exp_dt > now:
+            return False
+    return True
+
+
+def build_payment_menu_markup(chat_id: int):
     mk = types.InlineKeyboardMarkup()
     for key, info in SUBSCRIPTION_PLANS.items():
         mk.add(
@@ -1441,8 +1488,19 @@ def send_payment_menu(chat_id: int):
                 f"{info['title']} — {info['price']}", callback_data=f"payplan|{key}"
             )
         )
+    if is_demo_available(chat_id):
+        mk.add(
+            types.InlineKeyboardButton(
+                "🎁 3 günlük demo istifadə et", callback_data="demo3"
+            )
+        )
     mk.add(build_promo_button(chat_id))
     mk.add(types.InlineKeyboardButton("ℹ️ Haqqında", callback_data="payinfo"))
+    return mk
+
+
+def send_payment_menu(chat_id: int):
+    mk = build_payment_menu_markup(chat_id)
     bot.send_message(
         chat_id,
         "💳 Abunəlik planını seç və ödəniş et:\n\n" "✅ Demo bitibsə, yeniləmək üçün plan seçin.",
@@ -1456,6 +1514,15 @@ def check_subscription(chat_id: int, silent: bool = False) -> bool:
 
     sub = get_subscription(chat_id)
     now = datetime.utcnow()
+    demo_status = get_user_demo_status(chat_id)
+    demo_expired = False
+    if demo_status.get("demo_expires_at"):
+        try:
+            demo_dt = datetime.fromisoformat(str(demo_status["demo_expires_at"]))
+            if demo_dt < now:
+                demo_expired = True
+        except Exception:
+            pass
     expired = False
     if sub and sub.get("expires_at"):
         try:
@@ -1464,6 +1531,8 @@ def check_subscription(chat_id: int, silent: bool = False) -> bool:
                 expired = True
         except Exception:
             expired = True
+    if demo_expired:
+        expired = True
 
     if sub and expired and sub.get("is_active"):
         conn = get_local_conn()
@@ -2428,7 +2497,7 @@ def start_cmd(message):
 
     ensure_subscription_record(chat_id)
     if is_first_time:
-        activate_demo_if_needed(chat_id, force=True)
+        send_payment_menu(chat_id)
 
     # 🧩 Admin üçün avtomatik təsdiq
     if chat_id == ADMIN_ID:
@@ -2771,6 +2840,54 @@ def cb_payplan(c):
         f"{subscription_payment_code(chat_id)}"
     )
     bot.send_message(chat_id, pay_text, reply_markup=mk)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "demo3")
+def cb_demo_activate(c):
+    chat_id = c.message.chat.id
+    if not is_demo_available(chat_id):
+        try:
+            bot.answer_callback_query(c.id, "Demo artıq istifadə olunub və ya hesab aktivdir", show_alert=True)
+        except Exception:
+            pass
+        return
+    ensure_subscription_record(chat_id)
+    expires = datetime.utcnow() + timedelta(days=3)
+    set_subscription(chat_id, "demo", expires, is_active=1, is_demo=1, note="demo")
+    mark_demo_used(chat_id, expires)
+    try:
+        bot.edit_message_reply_markup(
+            chat_id,
+            c.message.message_id,
+            reply_markup=build_payment_menu_markup(chat_id),
+        )
+    except Exception:
+        pass
+    bot.send_message(
+        chat_id,
+        "🎉 Demo aktiv edildi!\nBotdan 3 gün pulsuz istifadə edə bilərsiniz.",
+    )
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT full_name, username FROM users WHERE chat_id=?", (chat_id,))
+    row = cur.fetchone()
+    conn.close()
+    full_name = row[0] if row else ""
+    username = row[1] if row else ""
+    admin_username = f"@{username}" if username else "-"
+    admin_text = (
+        "👤 Yeni demo istifadəçisi\n\n"
+        f"ID: {chat_id}\n"
+        f"Ad: {full_name if full_name else '-'}\n"
+        f"Username: {admin_username}\n\n"
+        "⏳ Demo bitmə tarixi:\n"
+        f"{expires.strftime('%d.%m.%Y %H:%M')}"
+    )
+    bot.send_message(ADMIN_ID, admin_text)
     try:
         bot.answer_callback_query(c.id)
     except Exception:
