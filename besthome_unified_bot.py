@@ -2888,6 +2888,9 @@ def cb_demo_activate(c):
         f"{expires.strftime('%d.%m.%Y %H:%M')}"
     )
     bot.send_message(ADMIN_ID, admin_text)
+    reset_user_state(chat_id)
+    reset_search_state(chat_id)
+    send_main_menu(chat_id)
     try:
         bot.answer_callback_query(c.id)
     except Exception:
