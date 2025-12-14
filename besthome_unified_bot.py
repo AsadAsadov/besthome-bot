@@ -7330,143 +7330,228 @@ def show_admin_stats(chat_id):
     if not is_admin(chat_id):
         return
 
-    now = datetime.utcnow()
-    conn = get_local_conn()
-    cur = conn.cursor()
+    def table_exists(cur, name: str) -> bool:
+        try:
+            cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (name,),
+            )
+            return cur.fetchone() is not None
+        except Exception:
+            return False
 
-    cur.execute("SELECT COUNT(*) FROM users")
-    total_users = cur.fetchone()[0] or 0
+    def safe_count(cur, query: str, params: Tuple = ()) -> int:
+        try:
+            cur.execute(query, params)
+            row = cur.fetchone()
+            return (row[0] if row else 0) or 0
+        except Exception:
+            return 0
 
-    cur.execute("SELECT COUNT(*) FROM users WHERE approved=1 AND blocked=0")
-    active_users = cur.fetchone()[0] or 0
+    def column_lookup(cur, table: str):
+        try:
+            cur.execute(f"PRAGMA table_info('{table}')")
+            return {row[1].lower(): row[1] for row in cur.fetchall()}
+        except Exception:
+            return {}
 
-    cur.execute("SELECT COUNT(*) FROM listings_new")
-    total_new = cur.fetchone()[0] or 0
+    def detect_operation_column(cur, table: str) -> Optional[str]:
+        cols = column_lookup(cur, table)
+        for key in ("operation", "emeliyyat", "əməliyyat", "eməliyyat"):
+            if key in cols:
+                return cols[key]
+        return None
 
-    cur.execute("SELECT COUNT(*) FROM listings_new WHERE approved=0")
-    pending_new = cur.fetchone()[0] or 0
+    def op_counts(cur, table: str):
+        total = safe_count(cur, f"SELECT COUNT(*) FROM {table}") if table_exists(cur, table) else 0
+        sale = rent = 0
+        if table_exists(cur, table):
+            op_col = detect_operation_column(cur, table)
+            if op_col:
+                try:
+                    cur.execute(
+                        f"SELECT LOWER({op_col}) as op, COUNT(*) FROM {table} GROUP BY LOWER({op_col})"
+                    )
+                    for op, cnt in cur.fetchall():
+                        norm = normalize_operation_value(op)
+                        if norm == "sale":
+                            sale += cnt or 0
+                        elif norm == "rent":
+                            rent += cnt or 0
+                except Exception:
+                    pass
+        return total, sale, rent
 
-    cur.execute("SELECT COUNT(*) FROM listings_approved")
-    total_local = cur.fetchone()[0] or 0
+    total_users = active_users = pending_users = 0
+    today_searches = 0
+    top_rayons = []
+    top_users = []
+    search_stats_available = False
 
-    today = date.today().isoformat()
-    cur.execute(
-        "SELECT COUNT(*) FROM search_logs WHERE DATE(created_at)=?",
-        (today,),
-    )
-    today_searches = cur.fetchone()[0] or 0
-
-    since_24h = (now - timedelta(hours=24)).isoformat()
-    cur.execute(
-        "SELECT COUNT(*) FROM search_logs WHERE datetime(created_at) >= datetime(?)",
-        (since_24h,),
-    )
-    last_24h_searches = cur.fetchone()[0] or 0
-
-    week_cutoff = (now - timedelta(days=7)).isoformat()
-    cur.execute(
-        """
-        SELECT COALESCE(NULLIF(TRIM(rayon), ''), '(rayon qeyd olunmayıb)') AS rn,
-               COUNT(*) AS cnt
-        FROM search_logs
-        WHERE datetime(created_at) >= datetime(?)
-        GROUP BY rn
-        ORDER BY cnt DESC
-        LIMIT 10
-        """,
-        (week_cutoff,),
-    )
-    top_rayons = cur.fetchall()
-
-    cur.execute(
-        """
-        SELECT ua.chat_id, ua.total_searches, u.full_name, u.username
-        FROM user_activity ua
-        LEFT JOIN users u ON u.chat_id = ua.chat_id
-        ORDER BY ua.total_searches DESC
-        LIMIT 10
-        """
-    )
-    top_users = cur.fetchall()
-
-    cur.execute(
-        """
-        SELECT listing_id, views, favorites, contacts, popularity_score
-        FROM listing_stats
-        WHERE popularity_score > 0
-        ORDER BY popularity_score DESC, datetime(last_interaction) DESC
-        LIMIT 10
-        """
-    )
-    top_viewed = cur.fetchall()
-    conn.close()
-
-    # Agents DB
     try:
-        conn_a = get_agents_conn()
-        cur_a = conn_a.cursor()
-        cur_a.execute("SELECT COUNT(*) FROM arenda_data")
-        total_agents = cur_a.fetchone()[0] or 0
-        conn_a.close()
-    except Exception:
-        total_agents = 0
+        conn_local = get_local_conn()
+        cur_local = conn_local.cursor()
 
-    sections = ["📊 *Admin Statistikası*"]
-    sections.append(
-        "🔎 Axtarış aktivliyi:\n"
-        f"• Bu gün: {today_searches}\n"
-        f"• Son 24 saat: {last_24h_searches}"
-    )
-
-    if top_rayons:
-        lines = ["🏘 Son 7 günün TOP rayonları:"]
-        for idx, (rn, cnt) in enumerate(top_rayons, start=1):
-            lines.append(f"{idx}) {rn}: {cnt}")
-        sections.append("\n".join(lines))
-
-    if top_users:
-        lines = ["👥 TOP aktiv istifadəçilər:"]
-        for idx, row in enumerate(top_users, start=1):
-            chat_id_u, total_s, full_name, username = row
-            uname = f"@{username}" if username else "—"
-            title = full_name or uname or chat_id_u
-            lines.append(f"{idx}) {title} ({uname}) — {total_s}")
-        sections.append("\n".join(lines))
-
-    if top_viewed:
-        status_map = get_status_map()
-        lines = ["🔥 TOP baxılan elanlar:"]
-        idx = 1
-        for row in top_viewed:
-            ev = fetch_listing_by_any(row["listing_id"])
-            if not ev or not is_listing_active(ev, status_map):
-                continue
-            title = ev.get("prop_type") or ev.get("Emlakin_novu") or "-"
-            rooms = ev.get("rooms") or ev.get("Otaq_sayi") or "-"
-            op = ev.get("operation") or ev.get("Emeliyyat") or "-"
-            price = format_price(ev.get("price") or ev.get("Qiymet"))
-            stats_txt = (
-                f"👁 {row['views']} | ⭐ {row['favorites']} | "
-                f"📞 {row['contacts']} | 🔥 {row['popularity_score']}"
+        if table_exists(cur_local, "users"):
+            total_users = safe_count(cur_local, "SELECT COUNT(*) FROM users")
+            active_users = safe_count(
+                cur_local, "SELECT COUNT(*) FROM users WHERE approved=1 AND blocked=0"
             )
-            lines.append(
-                f"{idx}) {title} | {rooms} — {op}, {price} ({stats_txt})"
+            pending_users = safe_count(cur_local, "SELECT COUNT(*) FROM users WHERE approved=0")
+
+        if table_exists(cur_local, "subscriptions"):
+            cols = column_lookup(cur_local, "subscriptions")
+            active_col = cols.get("is_active")
+            demo_col = cols.get("is_demo")
+            active_from_subs = (
+                safe_count(cur_local, f"SELECT COUNT(*) FROM subscriptions WHERE {active_col}=1")
+                if active_col
+                else 0
             )
-            idx += 1
-        if len(lines) > 1:
-            sections.append("\n".join(lines))
+            demo_from_subs = (
+                safe_count(cur_local, f"SELECT COUNT(*) FROM subscriptions WHERE {demo_col}=1")
+                if demo_col
+                else 0
+            )
+            if active_from_subs or demo_from_subs:
+                active_users = active_from_subs + demo_from_subs
 
-    sections.append(
-        "📂 Baza xülasəsi:\n"
-        f"• Ümumi istifadəçi: {total_users}\n"
-        f"• Aktiv: {active_users}\n"
-        f"• Yeni elanlar: {total_new}\n"
-        f"• Gözləyən elanlar: {pending_new}\n"
-        f"• Lokal elanlar: {total_local}\n"
-        f"• Vasitəçi elanları: {total_agents}"
-    )
+        if table_exists(cur_local, "search_logs"):
+            search_stats_available = True
+            today = date.today().isoformat()
+            today_searches = safe_count(
+                cur_local, "SELECT COUNT(*) FROM search_logs WHERE DATE(created_at)=?", (today,)
+            )
+            try:
+                cur_local.execute(
+                    """
+                    SELECT COALESCE(NULLIF(TRIM(rayon), ''), '(rayon qeyd olunmayıb)') AS rn,
+                           COUNT(*) AS cnt
+                    FROM search_logs
+                    GROUP BY rn
+                    ORDER BY cnt DESC
+                    LIMIT 5
+                    """
+                )
+                top_rayons = cur_local.fetchall()
+            except Exception:
+                top_rayons = []
 
-    bot.send_message(chat_id, "\n\n".join(sections), parse_mode="Markdown")
+            if table_exists(cur_local, "user_activity"):
+                try:
+                    cur_local.execute(
+                        """
+                        SELECT ua.chat_id, ua.total_searches, u.full_name, u.username
+                        FROM user_activity ua
+                        LEFT JOIN users u ON u.chat_id = ua.chat_id
+                        ORDER BY ua.total_searches DESC
+                        LIMIT 5
+                        """
+                    )
+                    top_users = cur_local.fetchall()
+                except Exception:
+                    top_users = []
+            else:
+                try:
+                    cur_local.execute(
+                        """
+                        SELECT chat_id, COUNT(*) AS cnt
+                        FROM search_logs
+                        GROUP BY chat_id
+                        ORDER BY cnt DESC
+                        LIMIT 5
+                        """
+                    )
+                    top_users = [(*row, None, None) for row in cur_local.fetchall()]
+                except Exception:
+                    top_users = []
+    finally:
+        try:
+            conn_local.close()
+        except Exception:
+            pass
+
+    main_total = main_sale = main_rent = 0
+    conn_main = None
+    if os.path.exists(MAIN_DB):
+        try:
+            conn_main = get_main_conn()
+            cur_main = conn_main.cursor()
+            cur_main.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%listing%'"
+            )
+            rows = cur_main.fetchall()
+            main_table = None
+            for row in rows:
+                candidate = row[0]
+                if candidate:
+                    main_table = candidate
+                    if candidate.lower() == "listings":
+                        break
+            if main_table:
+                main_total, main_sale, main_rent = op_counts(cur_main, main_table)
+        except Exception:
+            pass
+        finally:
+            try:
+                close_main_conn(conn_main)
+            except Exception:
+                pass
+
+    local_total = local_sale = local_rent = 0
+    conn_local_counts = None
+    try:
+        conn_local_counts = get_local_conn()
+        cur_local_counts = conn_local_counts.cursor()
+        if table_exists(cur_local_counts, "listings_approved"):
+            local_total, local_sale, local_rent = op_counts(cur_local_counts, "listings_approved")
+    finally:
+        try:
+            conn_local_counts.close()
+        except Exception:
+            pass
+
+    total_listings = main_total + local_total
+    sale_total = main_sale + local_sale
+    rent_total = main_rent + local_rent
+
+    lines = ["📊 BestHome Statistikalar", ""]
+    lines.append("👥 İstifadəçilər:")
+    lines.append(f"• Cəmi: {total_users}")
+    lines.append(f"• Aktiv: {active_users}")
+    lines.append(f"• Təsdiqsiz: {pending_users}")
+    lines.append("")
+
+    lines.append("📄 Elanlar:")
+    lines.append(f"• Ümumi elan sayı: {total_listings}")
+    lines.append(f"• Satılır: {sale_total}")
+    lines.append(f"• Kirayə verilir: {rent_total}")
+    lines.append("")
+
+    if search_stats_available:
+        lines.append("🔎 Axtarışlar (bu gün):")
+        lines.append(f"• Cəmi axtarış: {today_searches}")
+        if top_rayons:
+            rayon_txt = ", ".join([f"{idx+1}) {r[0]} ({r[1]})" for idx, r in enumerate(top_rayons)])
+            lines.append(f"• Top rayonlar: {rayon_txt}")
+        else:
+            lines.append("• Top rayonlar: —")
+
+        if top_users:
+            user_lines = []
+            for idx, row in enumerate(top_users, start=1):
+                chat_id_u, total_s, full_name, username = row
+                uname = f"@{username}" if username else "—"
+                title = full_name or uname or chat_id_u
+                user_lines.append(f"{idx}) {title} ({uname}) — {total_s}")
+            lines.append("• Aktiv userlər: " + "; ".join(user_lines))
+        else:
+            lines.append("• Aktiv userlər: —")
+    else:
+        lines.append("🔎 Axtarışlar:")
+        lines.append("• Axtarış statistikası hələ aktiv deyil.")
+
+    bot.send_message(chat_id, "\n".join(lines))
 
 
 def show_referral_stats(chat_id: int):
