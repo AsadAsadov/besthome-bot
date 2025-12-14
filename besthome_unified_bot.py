@@ -23,6 +23,7 @@ import re
 import random
 import shutil
 import tempfile
+import html
 from datetime import datetime, date, timedelta
 from typing import Optional, Tuple
 from urllib.parse import quote
@@ -92,6 +93,7 @@ complaint_flow_state = {}
 complaint_tokens = {}
 admin_reply_state = {}
 last_complaint_time = {}
+admin_stats_period = {}
 ADMIN_PANEL_PAGE1 = [
     "✅ Təsdiqlənməyən elanlar",
     "📊 Statistikalar",
@@ -5887,6 +5889,7 @@ def handle_admin_panel_action(message):
     if txt == "✅ Təsdiqlənməyən elanlar":
         show_pending_listings(chat_id)
     elif txt == "📊 Statistikalar":
+        admin_stats_period[chat_id] = "day"
         show_admin_stats(chat_id)
     elif txt == "💰 Aylıq gəlir hesabatı":
         show_revenue_report(chat_id)
@@ -6058,6 +6061,7 @@ def cb_admin(c):
         show_pending_listings(c.message.chat.id)
 
     elif cmd == "stats":
+        admin_stats_period[c.message.chat.id] = "day"
         show_admin_stats(c.message.chat.id)
 
     elif cmd == "revenue":
@@ -7326,9 +7330,97 @@ def show_agent_activity_overview(chat_id: int):
 # =============== ADMIN STATİSTİKA, AXTARIŞ, BROADCAST ===============
 
 
-def show_admin_stats(chat_id):
+STATS_PERIOD_MAP = {
+    "day": "Bu gün",
+    "week": "Bu həftə",
+    "month": "Bu ay",
+}
+
+
+def build_bar(value: int, max_value: int) -> str:
+    if value <= 0 or max_value <= 0:
+        return ""
+    length = math.ceil((value / max_value) * 10)
+    length = max(1, min(10, length))
+    return "🔵" * length
+
+
+def stats_period_keyboard(selected: str) -> types.InlineKeyboardMarkup:
+    mk = types.InlineKeyboardMarkup()
+    buttons = [
+        types.InlineKeyboardButton("📆 Bu gün", callback_data="stats_period:day"),
+        types.InlineKeyboardButton("📆 Bu həftə", callback_data="stats_period:week"),
+        types.InlineKeyboardButton("📆 Bu ay", callback_data="stats_period:month"),
+    ]
+    mk.row(*buttons)
+    return mk
+
+
+def stats_period_range(period: str) -> Tuple[date, date, str]:
+    today = date.today()
+    if period == "week":
+        start = today - timedelta(days=6)
+    elif period == "month":
+        start = today.replace(day=1)
+    else:
+        period = "day"
+        start = today
+    end = today
+    label = STATS_PERIOD_MAP.get(period, "Bu gün")
+    return start, end, label
+
+
+def format_bar_lines(items, name_key: str, count_key: str):
+    if not items:
+        return []
+
+    processed = []
+    for row in items:
+        name_raw = None
+        count_raw = 0
+        if isinstance(row, sqlite3.Row):
+            try:
+                name_raw = row[name_key]
+            except Exception:
+                name_raw = None
+            try:
+                count_raw = row[count_key]
+            except Exception:
+                count_raw = 0
+        else:
+            try:
+                name_raw = row[name_key]
+            except Exception:
+                name_raw = row[0] if len(row) > 0 else ""
+            try:
+                count_raw = row[count_key]
+            except Exception:
+                count_raw = row[1] if len(row) > 1 else 0
+
+        name = str(name_raw or "").strip()
+        if not name:
+            name = "Naməlum"
+        processed.append({"name": name, "count": int(count_raw or 0)})
+
+    max_len = max(len(item["name"]) for item in processed)
+    max_value = max(item["count"] for item in processed)
+    if max_value <= 0:
+        return []
+    lines = []
+    for item in processed:
+        padded_name = html.escape(item["name"].ljust(max_len + 2))
+        bar = build_bar(item["count"], max_value)
+        lines.append(f"{padded_name}{bar}  {item['count']}")
+    return lines
+
+
+def show_admin_stats(chat_id, period: Optional[str] = None, message_id: Optional[int] = None):
     if not is_admin(chat_id):
         return
+
+    selected_period = period or admin_stats_period.get(chat_id, "day")
+    admin_stats_period[chat_id] = selected_period
+    start_date, end_date, period_label = stats_period_range(selected_period)
 
     def table_exists(cur, name: str) -> bool:
         try:
@@ -7383,7 +7475,7 @@ def show_admin_stats(chat_id):
         return total, sale, rent
 
     total_users = active_users = pending_users = 0
-    today_searches = 0
+    period_searches = 0
     top_rayons = []
     top_users = []
     search_stats_available = False
@@ -7418,53 +7510,51 @@ def show_admin_stats(chat_id):
 
         if table_exists(cur_local, "search_logs"):
             search_stats_available = True
-            today = date.today().isoformat()
-            today_searches = safe_count(
-                cur_local, "SELECT COUNT(*) FROM search_logs WHERE DATE(created_at)=?", (today,)
+            start_str = start_date.isoformat()
+            end_str = end_date.isoformat()
+            period_searches = safe_count(
+                cur_local,
+                """
+                SELECT COUNT(*) FROM search_logs
+                WHERE DATE(created_at) BETWEEN ? AND ?
+                """,
+                (start_str, end_str),
             )
             try:
                 cur_local.execute(
                     """
-                    SELECT COALESCE(NULLIF(TRIM(rayon), ''), '(rayon qeyd olunmayıb)') AS rn,
+                    SELECT COALESCE(NULLIF(TRIM(rayon), ''), '') AS rn,
                            COUNT(*) AS cnt
                     FROM search_logs
+                    WHERE DATE(created_at) BETWEEN ? AND ?
                     GROUP BY rn
                     ORDER BY cnt DESC
                     LIMIT 5
-                    """
+                    """,
+                    (start_str, end_str),
                 )
                 top_rayons = cur_local.fetchall()
             except Exception:
                 top_rayons = []
 
-            if table_exists(cur_local, "user_activity"):
-                try:
-                    cur_local.execute(
-                        """
-                        SELECT ua.chat_id, ua.total_searches, u.full_name, u.username
-                        FROM user_activity ua
-                        LEFT JOIN users u ON u.chat_id = ua.chat_id
-                        ORDER BY ua.total_searches DESC
-                        LIMIT 5
-                        """
-                    )
-                    top_users = cur_local.fetchall()
-                except Exception:
-                    top_users = []
-            else:
-                try:
-                    cur_local.execute(
-                        """
-                        SELECT chat_id, COUNT(*) AS cnt
-                        FROM search_logs
-                        GROUP BY chat_id
-                        ORDER BY cnt DESC
-                        LIMIT 5
-                        """
-                    )
-                    top_users = [(*row, None, None) for row in cur_local.fetchall()]
-                except Exception:
-                    top_users = []
+            try:
+                cur_local.execute(
+                    """
+                    SELECT sl.chat_id,
+                           COUNT(*) AS cnt,
+                           COALESCE(NULLIF(u.full_name, ''), NULLIF(u.username, ''), CAST(sl.chat_id AS TEXT)) AS nm
+                    FROM search_logs sl
+                    LEFT JOIN users u ON u.chat_id = sl.chat_id
+                    WHERE DATE(sl.created_at) BETWEEN ? AND ?
+                    GROUP BY sl.chat_id
+                    ORDER BY cnt DESC
+                    LIMIT 5
+                    """,
+                    (start_str, end_str),
+                )
+                top_users = cur_local.fetchall()
+            except Exception:
+                top_users = []
     finally:
         try:
             conn_local.close()
@@ -7515,43 +7605,93 @@ def show_admin_stats(chat_id):
     sale_total = main_sale + local_sale
     rent_total = main_rent + local_rent
 
-    lines = ["📊 BestHome Statistikalar", ""]
-    lines.append("👥 İstifadəçilər:")
+    lines = [f"📈 <b>BestHome Statistikalar — {period_label}</b>", ""]
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("👥 İstifadəçilər")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append(f"• Cəmi: {total_users}")
     lines.append(f"• Aktiv: {active_users}")
     lines.append(f"• Təsdiqsiz: {pending_users}")
     lines.append("")
 
-    lines.append("📄 Elanlar:")
-    lines.append(f"• Ümumi elan sayı: {total_listings}")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🏠 Elanlar")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"• Ümumi: {total_listings}")
     lines.append(f"• Satılır: {sale_total}")
-    lines.append(f"• Kirayə verilir: {rent_total}")
+    lines.append(f"• Kirayə: {rent_total}")
     lines.append("")
 
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🔎 Aktivlik")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+
     if search_stats_available:
-        lines.append("🔎 Axtarışlar (bu gün):")
-        lines.append(f"• Cəmi axtarış: {today_searches}")
-        if top_rayons:
-            rayon_txt = ", ".join([f"{idx+1}) {r[0]} ({r[1]})" for idx, r in enumerate(top_rayons)])
-            lines.append(f"• Top rayonlar: {rayon_txt}")
+        rayon_lines = format_bar_lines(top_rayons, "rn", "cnt")
+        lines.append(f"📍 <b>Top rayonlar ({period_label})</b>")
+        if rayon_lines:
+            lines.append("<pre>" + "\n".join(rayon_lines) + "</pre>")
         else:
-            lines.append("• Top rayonlar: —")
+            lines.append("— Məlumat yoxdur")
+        lines.append("")
 
-        if top_users:
-            user_lines = []
-            for idx, row in enumerate(top_users, start=1):
-                chat_id_u, total_s, full_name, username = row
-                uname = f"@{username}" if username else "—"
-                title = full_name or uname or chat_id_u
-                user_lines.append(f"{idx}) {title} ({uname}) — {total_s}")
-            lines.append("• Aktiv userlər: " + "; ".join(user_lines))
+        lines.append(f"🔎 <b>Axtarış sayı ({period_label})</b>")
+        if period_searches > 0:
+            search_bar = build_bar(period_searches, period_searches)
+            lines.append(f"<pre>{search_bar}  {period_searches}</pre>")
         else:
-            lines.append("• Aktiv userlər: —")
+            lines.append("— Məlumat yoxdur")
+        lines.append("")
+
+        user_lines = format_bar_lines(top_users, "nm", "cnt")
+        lines.append(f"⚡ <b>Ən aktiv istifadəçilər ({period_label})</b>")
+        if user_lines:
+            lines.append("<pre>" + "\n".join(user_lines) + "</pre>")
+        else:
+            lines.append("— Məlumat yoxdur")
     else:
-        lines.append("🔎 Axtarışlar:")
-        lines.append("• Axtarış statistikası hələ aktiv deyil.")
+        lines.append("— Məlumat yoxdur")
 
-    bot.send_message(chat_id, "\n".join(lines))
+    text = "\n".join(lines)
+    keyboard = stats_period_keyboard(selected_period)
+
+    if message_id:
+        try:
+            bot.edit_message_text(
+                text,
+                chat_id,
+                message_id,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
+        except Exception:
+            bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode="HTML")
+    else:
+        bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("stats_period:"))
+def handle_stats_period_callback(c):
+    period = c.data.split(":", 1)[1] if c.data else "day"
+    if period not in STATS_PERIOD_MAP:
+        period = "day"
+
+    chat_id = c.message.chat.id if c.message else c.from_user.id
+    if not is_admin(chat_id):
+        try:
+            bot.answer_callback_query(c.id, "❌ Yalnız adminlər üçün.")
+        except Exception:
+            pass
+        return
+
+    admin_stats_period[chat_id] = period
+    try:
+        bot.answer_callback_query(c.id, f"📆 {STATS_PERIOD_MAP.get(period, 'Bu gün')}")
+    except Exception:
+        pass
+
+    if c.message:
+        show_admin_stats(chat_id, period=period, message_id=c.message.message_id)
 
 
 def show_referral_stats(chat_id: int):
