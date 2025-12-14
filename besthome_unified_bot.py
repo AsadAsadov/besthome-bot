@@ -94,6 +94,15 @@ admin_reply_state = {}
 last_complaint_time = {}
 admin_stats_period = {}
 admin_direct_message_state = {}
+BLOCKED_MESSAGE_TEXT = (
+    "⛔ Hesabınız müvəqqəti olaraq dayandırıldı.\n\n"
+    "Səbəb:\n"
+    "Ödəniş edilməyib və ya demo müddəti bitib.\n\n"
+    "✅ Davam etmək üçün seçimlər:\n"
+    "• 💳 Ödəniş edin və sorğunu yenidən göndərin\n"
+    "• 🎁 Əgər mümkündürsə, 3 günlük demo istifadə edin\n\n"
+    "Sorğu göndərdikdən sonra admin tərəfindən yenidən yoxlanılacaq."
+)
 FINANCIAL_REPORTS_BUTTON = "💰 Maliyyə hesabatları"
 FINANCIAL_REPORTS_BACK = "⬅️ Geri (Admin Panel)"
 FINANCIAL_REPORTS_MENU = [
@@ -409,7 +418,8 @@ def init_local_db():
             username TEXT,
             date_joined TEXT,
             approved INTEGER DEFAULT 0,
-            blocked INTEGER DEFAULT 0
+            blocked INTEGER DEFAULT 0,
+            blocked_at TEXT
         )
         """
     )
@@ -445,6 +455,10 @@ def init_local_db():
         pass
     try:
         cur.execute("ALTER TABLE users ADD COLUMN demo_expires_at TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cur.execute("ALTER TABLE users ADD COLUMN blocked_at TEXT")
     except sqlite3.OperationalError:
         pass
 
@@ -7056,12 +7070,64 @@ def parse_join_datetime(dt_raw: Optional[str]) -> Tuple[str, str]:
         return str(dt_raw), "-"
 
 
+def block_user(chat_id: int) -> bool:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT blocked FROM users WHERE chat_id=?", (chat_id,))
+    row = cur.fetchone()
+
+    if not row:
+        conn.close()
+        return False
+
+    if row["blocked"]:
+        conn.close()
+        return False
+
+    blocked_at = datetime.now().isoformat(sep=" ", timespec="seconds")
+    cur.execute(
+        "UPDATE users SET approved=0, blocked=1, blocked_at=? WHERE chat_id=?",
+        (blocked_at, chat_id),
+    )
+    conn.commit()
+    conn.close()
+
+    try:
+        bot.send_message(chat_id, BLOCKED_MESSAGE_TEXT)
+    except Exception:
+        pass
+
+    return True
+
+
+def restore_user_to_pending(chat_id: int):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET approved=0, blocked=0, blocked_at=NULL WHERE chat_id=?",
+        (chat_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_user_fully(chat_id: int):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM favorites WHERE chat_id=?", (chat_id,))
+    cur.execute("DELETE FROM subscriptions WHERE chat_id=?", (chat_id,))
+    cur.execute("DELETE FROM agent_activity WHERE chat_id=?", (chat_id,))
+    cur.execute("DELETE FROM users WHERE chat_id=?", (chat_id,))
+    conn.commit()
+    conn.close()
+
+
 def show_all_users(chat_id, status="active"):
     conn = get_local_conn()
     cur = conn.cursor()
 
     base_query = (
-        "SELECT chat_id, full_name, username, date_joined, approved, blocked FROM users"
+        "SELECT chat_id, full_name, username, date_joined, approved, blocked, blocked_at FROM users"
     )
 
     if status == "active":
@@ -7070,10 +7136,12 @@ def show_all_users(chat_id, status="active"):
         )
         title = "✅ Aktiv istifadəçilər"
     elif status == "blocked":
-        cur.execute(base_query + " WHERE blocked=1 ORDER BY date_joined DESC")
+        cur.execute(base_query + " WHERE blocked=1 ORDER BY blocked_at DESC")
         title = "🚫 Bloklanmış istifadəçilər"
     elif status == "pending":
-        cur.execute(base_query + " WHERE approved=0 ORDER BY date_joined DESC")
+        cur.execute(
+            base_query + " WHERE approved=0 AND blocked=0 ORDER BY date_joined DESC"
+        )
         title = "⏳ Təsdiqlənməmiş istifadəçilər"
     else:
         cur.execute(base_query + " ORDER BY date_joined DESC")
@@ -7089,7 +7157,7 @@ def show_all_users(chat_id, status="active"):
     bot.send_message(chat_id, f"{title} ({len(rows)} nəfər):")
 
     for r in rows:
-        chat_id_u, full_name, username, date_joined, approved, blocked = r
+        chat_id_u, full_name, username, date_joined, approved, blocked, blocked_at = r
         username_value = f"@{username}" if username else "yoxdur"
         status_text = (
             "✅ Aktiv"
@@ -7099,7 +7167,17 @@ def show_all_users(chat_id, status="active"):
 
         join_date, join_time = parse_join_datetime(date_joined)
 
-        if status == "pending":
+        if status == "blocked":
+            block_date, block_time = parse_join_datetime(blocked_at)
+            txt = (
+                "🚫 Bloklanmış istifadəçi:\n\n"
+                f"• 👤 Ad: {full_name or 'Ad yoxdur'}\n"
+                f"• 🆔 ID: <code>{chat_id_u}</code>\n"
+                f"• 👤 Username: {username_value}\n"
+                f"• 📅 Bloklanma tarixi: {block_date}\n"
+                f"• ⏰ Saat: {block_time or '-'}"
+            )
+        elif status == "pending":
             txt = (
                 "❌ Təsdiqlənməmiş istifadəçilər:\n\n"
                 f"• 👤 Ad: {full_name or 'Ad yoxdur'}\n"
@@ -7117,7 +7195,16 @@ def show_all_users(chat_id, status="active"):
             )
 
         mk = types.InlineKeyboardMarkup()
-        if approved == 0:
+        if status == "blocked":
+            mk.add(
+                types.InlineKeyboardButton(
+                    "↩️ Geri qaytar", callback_data=f"user_restore|{chat_id_u}"
+                ),
+                types.InlineKeyboardButton(
+                    "🗑 Siyahıdan sil", callback_data=f"user_delete|{chat_id_u}"
+                ),
+            )
+        elif approved == 0:
             mk.add(
                 types.InlineKeyboardButton(
                     "✅ Qəbul et", callback_data=f"user_approve|{chat_id_u}"
@@ -7129,8 +7216,8 @@ def show_all_users(chat_id, status="active"):
         elif blocked:
             mk.add(
                 types.InlineKeyboardButton(
-                    "✅ Aktiv et",
-                    callback_data=f"user_unblock|{chat_id_u}",
+                    "↩️ Geri qaytar",
+                    callback_data=f"user_restore|{chat_id_u}",
                 )
             )
         else:
@@ -7155,23 +7242,9 @@ def cb_user_block_action(c):
         return
     uid = int(c.data.split("|")[1])
 
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE users SET blocked=1 WHERE chat_id=?",
-        (uid,),
-    )
-    conn.commit()
-    conn.close()
+    block_user(uid)
 
     bot.answer_callback_query(c.id, "🚫 İstifadəçi dayandırıldı.")
-    try:
-        bot.send_message(
-            uid,
-            "⚠️ Hesabınız admin tərəfindən dayandırıldı.",
-        )
-    except:
-        pass
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_approve|"))
@@ -7207,29 +7280,28 @@ def cb_user_approve_action(c):
     show_all_users(c.message.chat.id, "pending")
 
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("user_unblock|"))
-def cb_user_unblock_action(c):
+@bot.callback_query_handler(func=lambda c: c.data.startswith("user_restore|"))
+def cb_user_restore_action(c):
     if not is_admin(c.message.chat.id):
         return
     uid = int(c.data.split("|")[1])
 
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE users SET blocked=0 WHERE chat_id=?",
-        (uid,),
-    )
-    conn.commit()
-    conn.close()
+    restore_user_to_pending(uid)
 
-    bot.answer_callback_query(c.id, "✅ İstifadəçi aktiv edildi.")
-    try:
-        bot.send_message(
-            uid,
-            "🎉 Hesabınız yenidən aktivləşdirildi!",
-        )
-    except:
-        pass
+    bot.answer_callback_query(c.id, "↩️ İstifadəçi gözləməyə qaytarıldı.")
+    show_all_users(c.message.chat.id, "blocked")
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("user_delete|"))
+def cb_user_delete_action(c):
+    if not is_admin(c.message.chat.id):
+        return
+    uid = int(c.data.split("|")[1])
+
+    delete_user_fully(uid)
+
+    bot.answer_callback_query(c.id, "🗑 İstifadəçi silindi.")
+    show_all_users(c.message.chat.id, "blocked")
 
 
 # =============== 🕓 TƏSDİQ GÖZLƏYƏN ELANLAR ===============
@@ -7310,7 +7382,7 @@ def show_pending_users(chat_id):
                 callback_data=f"uappr|{uid}",
             ),
             types.InlineKeyboardButton(
-                "❌ Blokla",
+                "❌ Dayandır",
                 callback_data=f"ublock|{uid}",
             ),
         )
@@ -7362,23 +7434,9 @@ def cb_user_block_pending(c):
         return
     uid = int(c.data.split("|")[1])
 
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE users SET approved=0, blocked=1 WHERE chat_id=?",
-        (uid,),
-    )
-    conn.commit()
-    conn.close()
+    block_user(uid)
 
     bot.answer_callback_query(c.id, "⛔ İstifadəçi bloklandı.")
-    try:
-        bot.send_message(
-            uid,
-            "⛔ Hesabınız admin tərəfindən bloklandı.",
-        )
-    except:
-        pass
 
 
 # =============== BOT YENİLƏMƏ BİLDİRİŞİ ===============
