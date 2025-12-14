@@ -23,7 +23,6 @@ import re
 import random
 import shutil
 import tempfile
-import html
 from datetime import datetime, date, timedelta
 from typing import Optional, Tuple
 from urllib.parse import quote
@@ -90,7 +89,7 @@ search_reminder_shown = set()  # Session-level reminder flag
 session_interactions = {}
 db_update_lock = threading.Lock()
 complaint_flow_state = {}
-complaint_tokens = {}
+complaint_records = {}
 admin_reply_state = {}
 last_complaint_time = {}
 admin_stats_period = {}
@@ -2585,6 +2584,14 @@ def notify_admin_complaint(message, category: str, user_text: str):
     full_name = user.full_name if user else ""
     username = f"@{user.username}" if user and user.username else "-"
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    complaint_id = str(int(time.time() * 1000)) + str(random.randint(1000, 9999))
+    complaint_records[complaint_id] = {
+        "complaint_id": complaint_id,
+        "user_id": chat_id,
+        "category": category,
+        "message": user_text,
+        "timestamp": ts,
+    }
     text = (
         "📩 Yeni şikayət / təklif\n\n"
         "👤 İstifadəçi:\n"
@@ -2596,12 +2603,15 @@ def notify_admin_complaint(message, category: str, user_text: str):
         "📝 Mesaj:\n"
         f"{user_text}\n\n"
         "⏰ Tarix:\n"
-        f"{ts}"
+        f"{ts}\n\n"
+        f"🆔 ID: {complaint_id}"
     )
-    token = str(int(time.time() * 1000)) + str(random.randint(1000, 9999))
-    complaint_tokens[token] = chat_id
     mk = types.InlineKeyboardMarkup()
-    mk.add(types.InlineKeyboardButton("✉️ Cavab yaz", callback_data=f"complaint_reply:{token}"))
+    mk.add(
+        types.InlineKeyboardButton(
+            "✉️ Cavab yaz", callback_data=f"complaint_reply:{complaint_id}:{chat_id}"
+        )
+    )
     bot.send_message(ADMIN_ID, text, reply_markup=mk)
 
 
@@ -2684,20 +2694,43 @@ def complaint_reply_callback(c):
         except Exception:
             pass
         return
-    token = c.data.split(":", 1)[1]
-    target = complaint_tokens.get(token)
+    parts = c.data.split(":")
+    if len(parts) < 3:
+        try:
+            bot.answer_callback_query(c.id, "Məlumat tapılmadı.")
+        except Exception:
+            pass
+        return
+    complaint_id = parts[1]
+    try:
+        target = int(parts[2])
+    except Exception:
+        target = None
     if not target:
         try:
             bot.answer_callback_query(c.id, "Məlumat tapılmadı.")
         except Exception:
             pass
         return
-    admin_reply_state[c.from_user.id] = {"target": target, "token": token}
+
+    if complaint_id not in complaint_records:
+        complaint_records[complaint_id] = {
+            "complaint_id": complaint_id,
+            "user_id": target,
+            "category": "",
+            "message": "",
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    admin_reply_state[c.from_user.id] = {
+        "target": target,
+        "complaint_id": complaint_id,
+    }
     try:
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-    bot.send_message(c.message.chat.id, "✍️ İstifadəçiyə cavabınızı yazın.")
+    bot.send_message(c.message.chat.id, "✍️ Cavabı yazın:")
 
 
 @bot.message_handler(
@@ -2711,16 +2744,22 @@ def admin_reply_to_user(message):
         return
     data = admin_reply_state.pop(chat_id, {})
     target = data.get("target")
-    token = data.get("token")
-    if token:
-        complaint_tokens.pop(token, None)
+    complaint_id = data.get("complaint_id")
     if not target:
         return
     try:
         bot.send_message(target, f"📩 Admin cavabı:\n\n{message.text}")
-        bot.send_message(chat_id, "✅ Cavab istifadəçiyə göndərildi.")
     except Exception:
         bot.send_message(chat_id, "⚠️ Cavab göndərilə bilmədi.")
+        return
+
+    if complaint_id:
+        record = complaint_records.get(complaint_id, {})
+        record["reply"] = message.text
+        record["replied_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        complaint_records[complaint_id] = record
+
+    bot.send_message(chat_id, "✅ Cavab istifadəçiyə göndərildi.")
 
 
 # =============== ℹ️ Haqqında ===============
@@ -7335,16 +7374,6 @@ STATS_PERIOD_MAP = {
     "week": "Bu həftə",
     "month": "Bu ay",
 }
-
-
-def build_bar(value: int, max_value: int) -> str:
-    if value <= 0 or max_value <= 0:
-        return ""
-    length = math.ceil((value / max_value) * 10)
-    length = max(1, min(10, length))
-    return "🔵" * length
-
-
 def stats_period_keyboard(selected: str) -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup()
     buttons = [
@@ -7370,47 +7399,24 @@ def stats_period_range(period: str) -> Tuple[date, date, str]:
     return start, end, label
 
 
-def format_bar_lines(items, name_key: str, count_key: str):
+def format_ranked_lines(items, name_key: str, count_key: str):
     if not items:
         return []
 
-    processed = []
-    for row in items:
-        name_raw = None
-        count_raw = 0
-        if isinstance(row, sqlite3.Row):
-            try:
-                name_raw = row[name_key]
-            except Exception:
-                name_raw = None
-            try:
-                count_raw = row[count_key]
-            except Exception:
-                count_raw = 0
-        else:
-            try:
-                name_raw = row[name_key]
-            except Exception:
-                name_raw = row[0] if len(row) > 0 else ""
-            try:
-                count_raw = row[count_key]
-            except Exception:
-                count_raw = row[1] if len(row) > 1 else 0
-
-        name = str(name_raw or "").strip()
-        if not name:
-            name = "Naməlum"
-        processed.append({"name": name, "count": int(count_raw or 0)})
-
-    max_len = max(len(item["name"]) for item in processed)
-    max_value = max(item["count"] for item in processed)
-    if max_value <= 0:
-        return []
     lines = []
-    for item in processed:
-        padded_name = html.escape(item["name"].ljust(max_len + 2))
-        bar = build_bar(item["count"], max_value)
-        lines.append(f"{padded_name}{bar}  {item['count']}")
+    for idx, row in enumerate(items, start=1):
+        try:
+            name_raw = row[name_key]
+        except Exception:
+            name_raw = row[0] if len(row) > 0 else ""
+        try:
+            count_raw = row[count_key]
+        except Exception:
+            count_raw = row[1] if len(row) > 1 else 0
+
+        name = str(name_raw or "").strip() or "Naməlum"
+        count = int(count_raw or 0)
+        lines.append(f"{idx}) {name} — {count} axtarış")
     return lines
 
 
@@ -7475,6 +7481,7 @@ def show_admin_stats(chat_id, period: Optional[str] = None, message_id: Optional
         return total, sale, rent
 
     total_users = active_users = pending_users = 0
+    demo_users = 0
     period_searches = 0
     top_rayons = []
     top_users = []
@@ -7506,7 +7513,8 @@ def show_admin_stats(chat_id, period: Optional[str] = None, message_id: Optional
                 else 0
             )
             if active_from_subs or demo_from_subs:
-                active_users = active_from_subs + demo_from_subs
+                active_users = active_from_subs
+                demo_users = demo_from_subs
 
         if table_exists(cur_local, "search_logs"):
             search_stats_available = True
@@ -7605,52 +7613,39 @@ def show_admin_stats(chat_id, period: Optional[str] = None, message_id: Optional
     sale_total = main_sale + local_sale
     rent_total = main_rent + local_rent
 
-    lines = [f"📈 <b>BestHome Statistikalar — {period_label}</b>", ""]
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append("👥 İstifadəçilər")
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines = [f"📊 BestHome Statistikalar — {period_label}", ""]
+    lines.append("👥 İstifadəçilər:")
     lines.append(f"• Cəmi: {total_users}")
     lines.append(f"• Aktiv: {active_users}")
+    lines.append(f"• Demo: {demo_users}")
     lines.append(f"• Təsdiqsiz: {pending_users}")
     lines.append("")
 
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append("🏠 Elanlar")
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🏠 Elanlar:")
     lines.append(f"• Ümumi: {total_listings}")
     lines.append(f"• Satılır: {sale_total}")
     lines.append(f"• Kirayə: {rent_total}")
     lines.append("")
 
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append("🔎 Aktivlik")
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
-
-    if search_stats_available:
-        rayon_lines = format_bar_lines(top_rayons, "rn", "cnt")
-        lines.append(f"📍 <b>Top rayonlar ({period_label})</b>")
-        if rayon_lines:
-            lines.append("<pre>" + "\n".join(rayon_lines) + "</pre>")
-        else:
-            lines.append("— Məlumat yoxdur")
-        lines.append("")
-
-        lines.append(f"🔎 <b>Axtarış sayı ({period_label})</b>")
-        if period_searches > 0:
-            search_bar = build_bar(period_searches, period_searches)
-            lines.append(f"<pre>{search_bar}  {period_searches}</pre>")
-        else:
-            lines.append("— Məlumat yoxdur")
-        lines.append("")
-
-        user_lines = format_bar_lines(top_users, "nm", "cnt")
-        lines.append(f"⚡ <b>Ən aktiv istifadəçilər ({period_label})</b>")
-        if user_lines:
-            lines.append("<pre>" + "\n".join(user_lines) + "</pre>")
-        else:
-            lines.append("— Məlumat yoxdur")
+    lines.append(f"📍 Top rayonlar ({period_label}):")
+    if search_stats_available and top_rayons:
+        lines.extend(format_ranked_lines(top_rayons, "rn", "cnt"))
     else:
-        lines.append("— Məlumat yoxdur")
+        lines.append("• Məlumat yoxdur")
+    lines.append("")
+
+    lines.append(f"🔍 Axtarışlar ({period_label}):")
+    if search_stats_available and period_searches > 0:
+        lines.append(f"• Cəmi: {period_searches}")
+    else:
+        lines.append("• Məlumat yoxdur")
+    lines.append("")
+
+    lines.append(f"⚡ Aktiv istifadəçilər ({period_label}):")
+    if search_stats_available and top_users:
+        lines.extend(format_ranked_lines(top_users, "nm", "cnt"))
+    else:
+        lines.append("• Məlumat yoxdur")
 
     text = "\n".join(lines)
     keyboard = stats_period_keyboard(selected_period)
