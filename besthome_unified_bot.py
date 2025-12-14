@@ -2240,7 +2240,6 @@ def send_main_menu(chat_id: int):
     kb.row("📩 Şikayət və təkliflər")
     kb.row("🔄 Botu yenilə")
     if is_admin(chat_id):
-        kb.row("🔥 Ən çox baxılan elanlar")
         kb.row("📊 Admin Panel")
     bot.send_message(chat_id, "🏠 Əsas menyu:", reply_markup=kb)
 
