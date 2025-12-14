@@ -88,6 +88,10 @@ search_state = {}  # Açar sözlə axtarış paging state
 search_reminder_shown = set()  # Session-level reminder flag
 session_interactions = {}
 db_update_lock = threading.Lock()
+complaint_flow_state = {}
+complaint_tokens = {}
+admin_reply_state = {}
+last_complaint_time = {}
 ADMIN_PANEL_PAGE1 = [
     "✅ Təsdiqlənməyən elanlar",
     "📊 Statistikalar",
@@ -118,6 +122,14 @@ ADMIN_PANEL_ACTIONS = set(ADMIN_PANEL_PAGE1 + ADMIN_PANEL_PAGE2)
 PAGE_SIZE = 20
 NEW_LISTING_WINDOW_HOURS = 24
 HOT_VIEWS_THRESHOLD = 50
+COMPLAINT_CATEGORIES = [
+    "🐞 Texniki problem",
+    "💡 Təklif",
+    "❗ Şikayət",
+    "💬 Digər",
+]
+COMPLAINT_BACK = "⬅️ Geri"
+COMPLAINT_COOLDOWN_SECONDS = 300
 
 
 main_db_connections = set()
@@ -2148,6 +2160,7 @@ def send_main_menu(chat_id: int):
     kb.row("📂 Elan statusları")
     kb.row("⭐ Favorilərim", "📋 Elanlarım")
     kb.row("💳 Ödəniş", "ℹ️ Haqqında")
+    kb.row("📩 Şikayət və təkliflər")
     kb.row("🔄 Botu yenilə")
     if is_admin(chat_id):
         kb.row("🔥 Ən çox baxılan elanlar")
@@ -2470,6 +2483,175 @@ def share_referral(message):
     bot.send_message(chat_id, text)
 
 
+# =============== 📩 Şikayət və təkliflər ===============
+
+
+def build_complaint_categories_keyboard():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    for cat in COMPLAINT_CATEGORIES:
+        kb.row(cat)
+    kb.row(COMPLAINT_BACK)
+    return kb
+
+
+def start_complaint_flow(chat_id: int):
+    now = time.time()
+    last_ts = last_complaint_time.get(chat_id)
+    if last_ts and now - last_ts < COMPLAINT_COOLDOWN_SECONDS:
+        bot.send_message(chat_id, "⏳ Zəhmət olmasa bir neçə dəqiqə sonra yenidən göndərin.")
+        return
+    complaint_flow_state[chat_id] = {"step": "category"}
+    bot.send_message(
+        chat_id,
+        "📂 Kateqoriyanı seçin:",
+        reply_markup=build_complaint_categories_keyboard(),
+    )
+
+
+def notify_admin_complaint(message, category: str, user_text: str):
+    chat_id = message.chat.id
+    user = message.from_user
+    full_name = user.full_name if user else ""
+    username = f"@{user.username}" if user and user.username else "-"
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    text = (
+        "📩 Yeni şikayət / təklif\n\n"
+        "👤 İstifadəçi:\n"
+        f"ID: {chat_id}\n"
+        f"Ad: {full_name or '-'}\n"
+        f"Username: {username}\n\n"
+        "📂 Kateqoriya:\n"
+        f"{category}\n\n"
+        "📝 Mesaj:\n"
+        f"{user_text}\n\n"
+        "⏰ Tarix:\n"
+        f"{ts}"
+    )
+    token = str(int(time.time() * 1000)) + str(random.randint(1000, 9999))
+    complaint_tokens[token] = chat_id
+    mk = types.InlineKeyboardMarkup()
+    mk.add(types.InlineKeyboardButton("✉️ Cavab yaz", callback_data=f"complaint_reply:{token}"))
+    bot.send_message(ADMIN_ID, text, reply_markup=mk)
+
+
+@bot.message_handler(func=lambda m: m.text == "📩 Şikayət və təkliflər")
+def complaint_entry(message):
+    if not ensure_allowed(message):
+        return
+    start_complaint_flow(message.chat.id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "open_complaint")
+def cb_open_complaint(c):
+    if not ensure_allowed_cb(c):
+        return
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+    start_complaint_flow(c.message.chat.id)
+
+
+@bot.message_handler(
+    func=lambda m: complaint_flow_state.get(m.chat.id, {}).get("step") == "category"
+)
+def complaint_category_handler(message):
+    chat_id = message.chat.id
+    choice = message.text
+    if choice == COMPLAINT_BACK:
+        complaint_flow_state.pop(chat_id, None)
+        send_main_menu(chat_id)
+        return
+    if choice not in COMPLAINT_CATEGORIES:
+        bot.send_message(
+            chat_id,
+            "📂 Kateqoriyanı seçin:",
+            reply_markup=build_complaint_categories_keyboard(),
+        )
+        return
+    complaint_flow_state[chat_id] = {"step": "message", "category": choice}
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row(COMPLAINT_BACK)
+    bot.send_message(chat_id, "✍️ Zəhmət olmasa mesajınızı yazın.", reply_markup=kb)
+
+
+@bot.message_handler(
+    func=lambda m: complaint_flow_state.get(m.chat.id, {}).get("step") == "message",
+    content_types=["text"],
+)
+def complaint_message_handler(message):
+    chat_id = message.chat.id
+    text = message.text
+    if text == COMPLAINT_BACK:
+        complaint_flow_state[chat_id] = {"step": "category"}
+        bot.send_message(
+            chat_id,
+            "📂 Kateqoriyanı seçin:",
+            reply_markup=build_complaint_categories_keyboard(),
+        )
+        return
+    data = complaint_flow_state.pop(chat_id, {})
+    category = data.get("category", "-")
+    last_complaint_time[chat_id] = time.time()
+    try:
+        notify_admin_complaint(message, category, text)
+    except Exception:
+        pass
+    bot.send_message(
+        chat_id,
+        "✅ Mesajınız qəbul edildi.\nTəşəkkür edirik! 🙏",
+        reply_markup=types.ReplyKeyboardRemove(),
+    )
+    send_main_menu(chat_id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("complaint_reply:"))
+def complaint_reply_callback(c):
+    if not is_admin(c.from_user.id):
+        try:
+            bot.answer_callback_query(c.id)
+        except Exception:
+            pass
+        return
+    token = c.data.split(":", 1)[1]
+    target = complaint_tokens.get(token)
+    if not target:
+        try:
+            bot.answer_callback_query(c.id, "Məlumat tapılmadı.")
+        except Exception:
+            pass
+        return
+    admin_reply_state[c.from_user.id] = {"target": target, "token": token}
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+    bot.send_message(c.message.chat.id, "✍️ İstifadəçiyə cavabınızı yazın.")
+
+
+@bot.message_handler(
+    func=lambda m: admin_reply_state.get(m.chat.id) is not None,
+    content_types=["text"],
+)
+def admin_reply_to_user(message):
+    chat_id = message.chat.id
+    if not is_admin(chat_id):
+        admin_reply_state.pop(chat_id, None)
+        return
+    data = admin_reply_state.pop(chat_id, {})
+    target = data.get("target")
+    token = data.get("token")
+    if token:
+        complaint_tokens.pop(token, None)
+    if not target:
+        return
+    try:
+        bot.send_message(target, f"📩 Admin cavabı:\n\n{message.text}")
+        bot.send_message(chat_id, "✅ Cavab istifadəçiyə göndərildi.")
+    except Exception:
+        bot.send_message(chat_id, "⚠️ Cavab göndərilə bilmədi.")
+
+
 # =============== ℹ️ Haqqında ===============
 
 
@@ -2498,7 +2680,9 @@ def about(message):
         "📞 Əlaqə\n"
         "Admin: @esedovesed"
     )
-    bot.send_message(message.chat.id, text, parse_mode="Markdown")
+    mk = types.InlineKeyboardMarkup()
+    mk.add(types.InlineKeyboardButton("📩 Şikayət və təkliflər", callback_data="open_complaint"))
+    bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=mk)
 
 
 @bot.message_handler(func=lambda m: m.text == "💳 Ödəniş")
@@ -7561,6 +7745,7 @@ def main_menu(chat_id):
     mk.add("📂 Elan statusları")
     mk.add("⭐ Favorilərim", "📋 Elanlarım")
     mk.add("💳 Ödəniş", "ℹ️ Haqqında")
+    mk.add("📩 Şikayət və təkliflər")
     mk.add("🔄 Botu yenilə")
 
     if not is_admin(chat_id):
