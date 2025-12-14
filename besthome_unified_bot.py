@@ -7046,36 +7046,37 @@ def cb_userlist(c):
     show_all_users(c.message.chat.id, status)
 
 
+def parse_join_datetime(dt_raw: Optional[str]) -> Tuple[str, str]:
+    if not dt_raw:
+        return "-", "-"
+    try:
+        join_dt = datetime.fromisoformat(str(dt_raw).replace(" ", "T"))
+        return join_dt.strftime("%Y-%m-%d"), join_dt.strftime("%H:%M")
+    except Exception:
+        return str(dt_raw), "-"
+
+
 def show_all_users(chat_id, status="active"):
     conn = get_local_conn()
     cur = conn.cursor()
 
+    base_query = (
+        "SELECT chat_id, full_name, username, date_joined, approved, blocked FROM users"
+    )
+
     if status == "active":
         cur.execute(
-            "SELECT chat_id, full_name, username, approved, blocked "
-            "FROM users WHERE approved=1 AND blocked=0 "
-            "ORDER BY date_joined DESC"
+            base_query + " WHERE approved=1 AND blocked=0 ORDER BY date_joined DESC"
         )
         title = "✅ Aktiv istifadəçilər"
     elif status == "blocked":
-        cur.execute(
-            "SELECT chat_id, full_name, username, approved, blocked "
-            "FROM users WHERE blocked=1 "
-            "ORDER BY date_joined DESC"
-        )
+        cur.execute(base_query + " WHERE blocked=1 ORDER BY date_joined DESC")
         title = "🚫 Bloklanmış istifadəçilər"
     elif status == "pending":
-        cur.execute(
-            "SELECT chat_id, full_name, username, approved, blocked "
-            "FROM users WHERE approved=0 "
-            "ORDER BY date_joined DESC"
-        )
+        cur.execute(base_query + " WHERE approved=0 ORDER BY date_joined DESC")
         title = "⏳ Təsdiqlənməmiş istifadəçilər"
     else:
-        cur.execute(
-            "SELECT chat_id, full_name, username, approved, blocked "
-            "FROM users ORDER BY date_joined DESC"
-        )
+        cur.execute(base_query + " ORDER BY date_joined DESC")
         title = "👥 Bütün istifadəçilər"
 
     rows = cur.fetchall()
@@ -7088,20 +7089,32 @@ def show_all_users(chat_id, status="active"):
     bot.send_message(chat_id, f"{title} ({len(rows)} nəfər):")
 
     for r in rows:
-        chat_id_u, full_name, username, approved, blocked = r
-        uname = f"@{username}" if username else "—"
+        chat_id_u, full_name, username, date_joined, approved, blocked = r
+        username_value = f"@{username}" if username else "yoxdur"
         status_text = (
             "✅ Aktiv"
             if approved and not blocked
             else "🚫 Bloklanıb" if blocked else "⏳ Təsdiqlənməyib"
         )
 
-        txt = (
-            f"👤 {full_name or 'Ad yoxdur'}\n"
-            f"💬 {uname}\n"
-            f"🆔 <code>{chat_id_u}</code>\n"
-            f"📊 Status: {status_text}"
-        )
+        join_date, join_time = parse_join_datetime(date_joined)
+
+        if status == "pending":
+            txt = (
+                "❌ Təsdiqlənməmiş istifadəçilər:\n\n"
+                f"• 👤 Ad: {full_name or 'Ad yoxdur'}\n"
+                f"• 🆔 ID: <code>{chat_id_u}</code>\n"
+                f"• 👤 Username: {username_value}\n"
+                f"• 📅 Sorğu tarixi: {join_date}\n"
+                f"• ⏰ Saat: {join_time or '-'}"
+            )
+        else:
+            txt = (
+                f"👤 {full_name or 'Ad yoxdur'}\n"
+                f"💬 Username: {username_value}\n"
+                f"🆔 <code>{chat_id_u}</code>\n"
+                f"📊 Status: {status_text}"
+            )
 
         mk = types.InlineKeyboardMarkup()
         if approved == 0:
@@ -7301,12 +7314,15 @@ def show_pending_users(chat_id):
                 callback_data=f"ublock|{uid}",
             ),
         )
-        prof = f"@{username}" if username else "username yoxdur"
+        prof = f"@{username}" if username else "yoxdur"
+        join_date, join_time = parse_join_datetime(dt)
         txt = (
-            f"👤 {full_name or '-'}\n"
-            f"💬 {prof}\n"
-            f"🆔 <code>{uid}</code>\n"
-            f"📅 {dt}\n"
+            "❌ Təsdiqlənməmiş istifadəçilər:\n\n"
+            f"• 👤 Ad: {full_name or '-'}\n"
+            f"• 🆔 ID: <code>{uid}</code>\n"
+            f"• 👤 Username: {prof}\n"
+            f"• 📅 Sorğu tarixi: {join_date}\n"
+            f"• ⏰ Saat: {join_time}"
         )
         bot.send_message(chat_id, txt, parse_mode="HTML", reply_markup=mk)
 
