@@ -426,6 +426,7 @@ def init_local_db():
             chat_id INTEGER PRIMARY KEY,
             full_name TEXT,
             username TEXT,
+            role TEXT,
             date_joined TEXT,
             approved INTEGER DEFAULT 0,
             blocked INTEGER DEFAULT 0,
@@ -449,6 +450,7 @@ def init_local_db():
         "ALTER TABLE users ADD COLUMN referral_milestone_used INTEGER DEFAULT 0",
         "ALTER TABLE users ADD COLUMN demo_used INTEGER DEFAULT 0",
         "ALTER TABLE users ADD COLUMN demo_expires_at TEXT",
+        "ALTER TABLE users ADD COLUMN role TEXT",
         "ALTER TABLE users ADD COLUMN blocked_at TEXT",
         "ALTER TABLE users ADD COLUMN status TEXT",
         "ALTER TABLE users ADD COLUMN joined_at TEXT",
@@ -649,6 +651,35 @@ def init_local_db():
             status TEXT DEFAULT 'active'
         )
         """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_interests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_chat_id INTEGER,
+            request_id INTEGER,
+            created_at TEXT DEFAULT (CURRENT_TIMESTAMP),
+            UNIQUE(agent_chat_id, request_id)
+        )
+        """
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_interests_agent ON agent_interests(agent_chat_id)"
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_chat_id INTEGER,
+            request_id INTEGER,
+            created_at TEXT DEFAULT (CURRENT_TIMESTAMP),
+            status TEXT DEFAULT 'new',
+            UNIQUE(agent_chat_id, request_id)
+        )
+        """
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_notifications_agent ON agent_notifications(agent_chat_id)"
     )
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_customer_requests_status ON customer_requests(status)"
@@ -2256,10 +2287,37 @@ def is_agent_user(chat_id: Optional[int]) -> bool:
         cur = conn.cursor()
         cur.execute("SELECT 1 FROM agents WHERE chat_id=?", (chat_id,))
         row = cur.fetchone()
+        if row:
+            conn.close()
+            return True
+        try:
+            cur.execute("SELECT role FROM users WHERE chat_id=?", (chat_id,))
+            r_user = cur.fetchone()
+            if r_user and str(r_user[0] or "").lower() == "agent":
+                conn.close()
+                return True
+        except Exception:
+            pass
         conn.close()
-        return bool(row)
     except Exception:
         return False
+
+    try:
+        conn_a = get_agents_conn()
+        cur_a = conn_a.cursor()
+        cur_a.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='agents'"
+        )
+        has_agents_table = cur_a.fetchone()
+        if has_agents_table:
+            cur_a.execute("SELECT 1 FROM agents WHERE chat_id=?", (chat_id,))
+            if cur_a.fetchone():
+                conn_a.close()
+                return True
+        conn_a.close()
+    except Exception:
+        pass
+    return False
 
 
 def record_agent_activity(chat_id: Optional[int], metric: Optional[str] = None):
@@ -2933,7 +2991,7 @@ def check_request_rate_limit(chat_id: int) -> Optional[int]:
     return None
 
 
-def persist_customer_request(chat_id: int, data: dict):
+def persist_customer_request(chat_id: int, data: dict) -> Optional[int]:
     conn = get_local_conn()
     cur = conn.cursor()
     cur.execute(
@@ -2951,8 +3009,10 @@ def persist_customer_request(chat_id: int, data: dict):
             data.get("phone"),
         ),
     )
+    req_id = cur.lastrowid
     conn.commit()
     conn.close()
+    return req_id
 
 
 def format_customer_request_card(row: dict) -> str:
@@ -2992,6 +3052,140 @@ def fetch_active_requests_by_rayon(
     rows = cur.fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def fetch_customer_request_by_id(req_id: Optional[int]) -> Optional[dict]:
+    if not req_id:
+        return None
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM customer_requests WHERE id=?", (req_id,))
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def format_agent_request_card(row: dict) -> str:
+    req_type = row.get("request_type")
+    req_txt = "Alış" if req_type == "buy" else "Kirayə"
+    created_raw = row.get("created_at") or row.get("request_created_at")
+    created_dt = parse_dt_safe(created_raw)
+    date_txt = created_dt.strftime("%d.%m.%Y") if created_dt else "-"
+
+    lines = [
+        "👥 Müştəri istəyi",
+        f"📍 Rayon: {row.get('rayon') or '-'}",
+        f"🏠 Tip: {req_txt}",
+        f"🚪 Otaq: {row.get('rooms') or '-'}",
+        f"💰 Büdcə: {row.get('budget') or '-'}",
+        f"📝 Qeyd: {row.get('notes') or '-'}",
+        f"📞 Əlaqə: {row.get('phone') or '-'}",
+        f"📅 Tarix: {date_txt}",
+    ]
+    return "\n".join(lines)
+
+
+def fetch_agent_requests_page(rayon: str, page: int, page_size: int = PAGE_SIZE_REQ):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    like_val = f"%{rayon.strip()}%"
+    cur.execute(
+        "SELECT COUNT(*) FROM customer_requests WHERE status='active' AND LOWER(rayon) LIKE LOWER(?)",
+        (like_val,),
+    )
+    total = cur.fetchone()[0] or 0
+    total_pages = max(1, math.ceil(total / page_size)) if total else 1
+    page = max(1, min(page, total_pages))
+    offset = (page - 1) * page_size
+    cur.execute(
+        """
+        SELECT * FROM customer_requests
+        WHERE status='active' AND LOWER(rayon) LIKE LOWER(?)
+        ORDER BY datetime(created_at) DESC
+        LIMIT ? OFFSET ?
+        """,
+        (like_val, page_size, offset),
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows, total, total_pages, page
+
+
+def agent_has_interest(agent_chat_id: int, request_id: int) -> bool:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT 1 FROM agent_interests WHERE agent_chat_id=? AND request_id=?",
+        (agent_chat_id, request_id),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return bool(row)
+
+
+def store_agent_interest(agent_chat_id: int, request_id: int) -> bool:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO agent_interests (agent_chat_id, request_id)
+        VALUES (?, ?)
+        """,
+        (agent_chat_id, request_id),
+    )
+    inserted = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return inserted
+
+
+def add_agent_notification(agent_chat_id: int, request_id: int) -> bool:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO agent_notifications (agent_chat_id, request_id, status)
+        VALUES (?, ?, 'new')
+        """,
+        (agent_chat_id, request_id),
+    )
+    inserted = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return inserted
+
+
+def notify_agents_for_request(req_row: Optional[dict]):
+    if not req_row:
+        return
+    rayon = (req_row.get("rayon") or "").strip()
+    if not rayon:
+        return
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT DISTINCT ai.agent_chat_id
+        FROM agent_interests ai
+        JOIN customer_requests cr ON cr.id = ai.request_id
+        WHERE cr.status='active' AND LOWER(cr.rayon) LIKE LOWER(?)
+        """,
+        (f"%{rayon}%",),
+    )
+    agent_rows = [r[0] for r in cur.fetchall() if r and r[0]]
+    conn.close()
+
+    for agent_id in agent_rows:
+        if not is_agent_user(agent_id):
+            continue
+        if add_agent_notification(agent_id, req_row.get("id")):
+            try:
+                bot.send_message(
+                    agent_id,
+                    f"📢 Yeni müştəri istəyi var ({rayon}) — Bildirişlər bölməsinə baxın",
+                )
+            except Exception:
+                pass
 
 
 def show_request_type_menu(chat_id: int):
@@ -3146,12 +3340,16 @@ def handle_request_phone(message):
     st = customer_request_state.get(chat_id, {})
     st["phone"] = phone
 
-    persist_customer_request(chat_id, st)
+    req_id = persist_customer_request(chat_id, st)
     reset_customer_request(chat_id)
     bot.send_message(
         chat_id,
         "✅ Sorğunuz qeydə alındı.\nUyğun vasitəçilər sizinlə əlaqə saxlayacaq.",
     )
+    try:
+        notify_agents_for_request(fetch_customer_request_by_id(req_id))
+    except Exception:
+        pass
     return_to_main_menu(chat_id)
 
 # =============== 📩 Şikayət və təkliflər ===============
@@ -4453,6 +4651,12 @@ def show_notifications_inbox(chat_id: int, page: int = 1, message=None):
         mk_empty.add(
             types.InlineKeyboardButton("⚙️ Kriteriyalar", callback_data="notif_crit")
         )
+        if is_agent_user(chat_id):
+            mk_empty.add(
+                types.InlineKeyboardButton(
+                    "👥 Müştəri istəkləri", callback_data="agent_notif:1"
+                )
+            )
         try:
             if message:
                 bot.edit_message_text(
@@ -4515,6 +4719,12 @@ def show_notifications_inbox(chat_id: int, page: int = 1, message=None):
         ),
     ]
     mk.row(*nav_buttons)
+    if is_agent_user(chat_id):
+        mk.add(
+            types.InlineKeyboardButton(
+                "👥 Müştəri istəkləri", callback_data="agent_notif:1"
+            )
+        )
     mk.add(types.InlineKeyboardButton("⚙️ Kriteriyalar", callback_data="notif_crit"))
 
     header_text = "\n".join(header_lines)
@@ -4551,6 +4761,127 @@ def show_notifications_inbox(chat_id: int, page: int = 1, message=None):
                 bot.send_message(chat_id, f"🗂 Elan tapılmadı: ID {r.get('listing_id')}")
             except Exception:
                 pass
+
+
+def show_agent_notifications_inbox(chat_id: int, page: int = 1, message=None):
+    page = max(1, int(page or 1))
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COUNT(*) FROM agent_notifications WHERE agent_chat_id=?", (chat_id,)
+    )
+    total = cur.fetchone()[0] or 0
+
+    if total == 0:
+        conn.close()
+        mk_empty = types.InlineKeyboardMarkup()
+        mk_empty.add(
+            types.InlineKeyboardButton("🏠 Elan bildirişləri", callback_data="notif_open:1")
+        )
+        mk_empty.add(
+            types.InlineKeyboardButton("🎯 Müştəri istəkləri", callback_data="agent_requests")
+        )
+        try:
+            if message:
+                bot.edit_message_text(
+                    "🔔 Müştəri istəyi bildirişi yoxdur.",
+                    chat_id=message.chat.id,
+                    message_id=message.message_id,
+                    reply_markup=mk_empty,
+                )
+            else:
+                bot.send_message(
+                    chat_id, "🔔 Müştəri istəyi bildirişi yoxdur.", reply_markup=mk_empty
+                )
+        except Exception:
+            pass
+        return
+
+    total_pages = max(1, math.ceil(total / PAGE_SIZE_NOTIFICATIONS))
+    if page > total_pages:
+        page = total_pages
+    offset = (page - 1) * PAGE_SIZE_NOTIFICATIONS
+
+    cur.execute(
+        """
+        SELECT an.id as notif_id, an.request_id, an.created_at as notif_created_at,
+               an.status as notif_status, cr.*
+        FROM agent_notifications an
+        JOIN customer_requests cr ON cr.id = an.request_id
+        WHERE an.agent_chat_id=?
+        ORDER BY datetime(an.created_at) DESC
+        LIMIT ? OFFSET ?
+        """,
+        (chat_id, PAGE_SIZE_NOTIFICATIONS, offset),
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+
+    unseen_ids = [r.get("notif_id") for r in rows if r.get("notif_status") == "new"]
+    if unseen_ids:
+        placeholders = ",".join(["?"] * len(unseen_ids))
+        cur.execute(
+            f"UPDATE agent_notifications SET status='seen' WHERE id IN ({placeholders})",
+            unseen_ids,
+        )
+        conn.commit()
+    conn.close()
+
+    header_lines = [
+        "🔔 Müştəri istəkləri",
+        f"Səhifə: {page} / {total_pages}",
+        f"Cəmi: {total}",
+    ]
+    mk = types.InlineKeyboardMarkup()
+    nav_buttons = [
+        types.InlineKeyboardButton("⏮ İlk", callback_data="agent_notif:1"),
+        types.InlineKeyboardButton(
+            "◀️ Geri", callback_data=f"agent_notif:{max(1, page - 1)}"
+        ),
+        types.InlineKeyboardButton(
+            f"📄 {page} / {total_pages}", callback_data=f"agent_notif:{page}"
+        ),
+        types.InlineKeyboardButton(
+            "▶️ İrəli", callback_data=f"agent_notif:{min(total_pages, page + 1)}"
+        ),
+        types.InlineKeyboardButton(
+            "⏭ Son", callback_data=f"agent_notif:{total_pages}"
+        ),
+    ]
+    mk.row(*nav_buttons)
+    mk.add(types.InlineKeyboardButton("🏠 Elan bildirişləri", callback_data="notif_open:1"))
+    mk.add(types.InlineKeyboardButton("👥 Mənim müştərilərim", callback_data="agt_my:1"))
+
+    header_text = "\n".join(header_lines)
+    try:
+        if message:
+            bot.edit_message_text(
+                header_text,
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=mk,
+            )
+        else:
+            bot.send_message(chat_id, header_text, reply_markup=mk)
+    except Exception:
+        pass
+
+    for r in rows:
+        card = format_agent_request_card(r)
+        mk_card = types.InlineKeyboardMarkup()
+        wa_url = make_whatsapp_url(
+            r.get("phone"), "Salam, müştəri sorğunuz ilə maraqlanıram."
+        )
+        if wa_url:
+            mk_card.add(types.InlineKeyboardButton("💬 WhatsApp yaz", url=wa_url))
+        mk_card.add(
+            types.InlineKeyboardButton(
+                "✅ Maraqlanıram", callback_data=f"agt_int:{r.get('request_id')}"
+            )
+        )
+        try:
+            bot.send_message(chat_id, card, reply_markup=mk_card)
+        except Exception:
+            continue
 
 
 def send_criteria_list(chat_id: int, message=None):
@@ -4730,6 +5061,30 @@ def cb_open_notifications(c):
     except Exception:
         page = 1
     show_notifications_inbox(c.message.chat.id, page=page, message=c.message)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("agent_notif:"))
+def cb_agent_notifications(c):
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id
+    if not (is_admin(chat_id) or is_agent_user(chat_id)):
+        try:
+            bot.answer_callback_query(
+                c.id, "❌ Bu bölmə yalnız BestHome agentləri üçündür.", show_alert=True
+            )
+        except Exception:
+            pass
+        return
+    try:
+        page = int(c.data.split(":", 1)[1])
+    except Exception:
+        page = 1
+    show_agent_notifications_inbox(chat_id, page=page, message=c.message)
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -9450,12 +9805,18 @@ def agents_button(message):
             callback_data="pub_agents_kw",
         )
     )
-    mk.add(
-        types.InlineKeyboardButton(
-            "🎯 Bu ərazidən maraqlanan müştərilər",
-            callback_data="agent_requests",
+    if is_admin(message.chat.id) or is_agent_user(message.chat.id):
+        mk.add(
+            types.InlineKeyboardButton(
+                "🎯 Bu ərazidən maraqlanan müştərilər",
+                callback_data="agent_requests",
+            )
         )
-    )
+        mk.add(
+            types.InlineKeyboardButton(
+                "👥 Mənim müştərilərim", callback_data="agt_my:1"
+            )
+        )
     bot.send_message(
         message.chat.id,
         "🧑‍💼 Vasitəçi elanları bölməsi:",
@@ -9474,6 +9835,24 @@ def cb_pub_agents_kw(c):
     bot.register_next_step_handler(msg, pub_agent_search_by_keyword)
 
 
+def build_agent_request_rayon_markup():
+    mk = types.InlineKeyboardMarkup()
+    row = []
+    for rayon in REQUEST_RAYONS:
+        row.append(
+            types.InlineKeyboardButton(
+                rayon, callback_data=f"agt_req:{quote(rayon)}:1"
+            )
+        )
+        if len(row) == 3:
+            mk.row(*row)
+            row = []
+    if row:
+        mk.row(*row)
+    mk.add(types.InlineKeyboardButton("👥 Mənim müştərilərim", callback_data="agt_my:1"))
+    return mk
+
+
 @bot.callback_query_handler(func=lambda c: c.data == "agent_requests")
 def cb_agent_requests(c):
     if not ensure_allowed_cb(c):
@@ -9487,16 +9866,307 @@ def cb_agent_requests(c):
         except Exception:
             pass
         return
-    agent_request_lookup_state[chat_id] = {"step": "rayon"}
     try:
         bot.answer_callback_query(c.id)
     except Exception:
         pass
     bot.send_message(
         chat_id,
-        "📍 Rayon seçin və ya yazın:",
-        reply_markup=build_request_rayon_keyboard(),
+        "📍 Rayon seçin:",
+        reply_markup=build_agent_request_rayon_markup(),
     )
+
+
+def show_agent_requests_by_rayon(
+    chat_id: int, rayon: str, page: int = 1, message: Optional[types.Message] = None
+):
+    rows, total, total_pages, current_page = fetch_agent_requests_page(rayon, page)
+    header = (
+        f"🎯 {rayon} üzrə aktiv müştəri istəkləri\n"
+        f"Səhifə: {current_page} / {total_pages}\n"
+        f"Cəmi: {total}"
+    )
+    mk = types.InlineKeyboardMarkup()
+    nav_buttons = [
+        types.InlineKeyboardButton(
+            "⏮ İlk", callback_data=f"agt_req:{quote(rayon)}:1"
+        ),
+        types.InlineKeyboardButton(
+            "◀️ Geri",
+            callback_data=f"agt_req:{quote(rayon)}:{max(1, current_page - 1)}",
+        ),
+        types.InlineKeyboardButton(
+            f"📄 {current_page} / {total_pages}",
+            callback_data=f"agt_req:{quote(rayon)}:{current_page}",
+        ),
+        types.InlineKeyboardButton(
+            "▶️ İrəli",
+            callback_data=f"agt_req:{quote(rayon)}:{min(total_pages, current_page + 1)}",
+        ),
+        types.InlineKeyboardButton(
+            "⏭ Son", callback_data=f"agt_req:{quote(rayon)}:{total_pages}"
+        ),
+    ]
+    mk.row(*nav_buttons)
+    mk.add(types.InlineKeyboardButton("👥 Mənim müştərilərim", callback_data="agt_my:1"))
+
+    try:
+        if message:
+            bot.edit_message_text(
+                header,
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=mk,
+            )
+        else:
+            bot.send_message(chat_id, header, reply_markup=mk)
+    except Exception:
+        pass
+
+    if not rows:
+        try:
+            bot.send_message(chat_id, "😕 Bu rayonda aktiv müştəri sorğusu yoxdur.")
+        except Exception:
+            pass
+        return
+
+    for row in rows:
+        card = format_agent_request_card(row)
+        mk_card = types.InlineKeyboardMarkup()
+        wa_url = make_whatsapp_url(
+            row.get("phone"),
+            "Salam, yerləşdirdiyiniz müştəri sorğusu ilə maraqlanıram.",
+        )
+        if wa_url:
+            mk_card.add(types.InlineKeyboardButton("💬 WhatsApp yaz", url=wa_url))
+        mk_card.add(
+            types.InlineKeyboardButton(
+                "✅ Maraqlanıram", callback_data=f"agt_int:{row.get('id')}"
+            )
+        )
+        try:
+            bot.send_message(chat_id, card, reply_markup=mk_card)
+        except Exception:
+            continue
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("agt_req:"))
+def cb_agent_request_page(c):
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id
+    if not (is_admin(chat_id) or is_agent_user(chat_id)):
+        try:
+            bot.answer_callback_query(
+                c.id, "❌ Bu bölmə yalnız BestHome agentləri üçündür.", show_alert=True
+            )
+        except Exception:
+            pass
+        return
+    try:
+        _, rayon_enc, page_raw = c.data.split(":", 2)
+    except ValueError:
+        return
+    rayon = unquote(rayon_enc)
+    try:
+        page = int(page_raw)
+    except Exception:
+        page = 1
+    show_agent_requests_by_rayon(chat_id, rayon, page=page, message=c.message)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+def show_agent_my_customers(
+    chat_id: int, page: int = 1, message: Optional[types.Message] = None
+):
+    page = max(1, int(page or 1))
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT COUNT(*)
+        FROM agent_interests ai
+        JOIN customer_requests cr ON cr.id = ai.request_id
+        WHERE ai.agent_chat_id=? AND cr.status='active'
+        """,
+        (chat_id,),
+    )
+    total = cur.fetchone()[0] or 0
+    if total == 0:
+        conn.close()
+        mk_empty = types.InlineKeyboardMarkup()
+        mk_empty.add(
+            types.InlineKeyboardButton(
+                "🎯 Müştəri istəkləri", callback_data="agent_requests"
+            )
+        )
+        try:
+            if message:
+                bot.edit_message_text(
+                    "👥 Hələ müştəri seçməmisiniz.",
+                    chat_id=message.chat.id,
+                    message_id=message.message_id,
+                    reply_markup=mk_empty,
+                )
+            else:
+                bot.send_message(
+                    chat_id, "👥 Hələ müştəri seçməmisiniz.", reply_markup=mk_empty
+                )
+        except Exception:
+            pass
+        return
+
+    total_pages = max(1, math.ceil(total / PAGE_SIZE_REQ))
+    if page > total_pages:
+        page = total_pages
+    offset = (page - 1) * PAGE_SIZE_REQ
+    cur.execute(
+        """
+        SELECT cr.*, ai.created_at as interest_created_at
+        FROM agent_interests ai
+        JOIN customer_requests cr ON cr.id = ai.request_id
+        WHERE ai.agent_chat_id=? AND cr.status='active'
+        ORDER BY datetime(ai.created_at) DESC
+        LIMIT ? OFFSET ?
+        """,
+        (chat_id, PAGE_SIZE_REQ, offset),
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+
+    header = (
+        "👥 Mənim müştərilərim\n"
+        f"Səhifə: {page} / {total_pages}\n"
+        f"Cəmi: {total}"
+    )
+    mk = types.InlineKeyboardMarkup()
+    nav_buttons = [
+        types.InlineKeyboardButton("⏮ İlk", callback_data="agt_my:1"),
+        types.InlineKeyboardButton(
+            "◀️ Geri", callback_data=f"agt_my:{max(1, page - 1)}"
+        ),
+        types.InlineKeyboardButton(
+            f"📄 {page} / {total_pages}", callback_data=f"agt_my:{page}"
+        ),
+        types.InlineKeyboardButton(
+            "▶️ İrəli", callback_data=f"agt_my:{min(total_pages, page + 1)}"
+        ),
+        types.InlineKeyboardButton(
+            "⏭ Son", callback_data=f"agt_my:{total_pages}"
+        ),
+    ]
+    mk.row(*nav_buttons)
+    mk.add(types.InlineKeyboardButton("🎯 Rayon seç", callback_data="agent_requests"))
+    mk.add(types.InlineKeyboardButton("👥 Müştəri istəkləri", callback_data="agent_notif:1"))
+
+    try:
+        if message:
+            bot.edit_message_text(
+                header,
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=mk,
+            )
+        else:
+            bot.send_message(chat_id, header, reply_markup=mk)
+    except Exception:
+        pass
+
+    for row in rows:
+        card = format_agent_request_card(row)
+        mk_card = types.InlineKeyboardMarkup()
+        wa_url = make_whatsapp_url(
+            row.get("phone"),
+            "Salam, müştəri sorğunuz ilə maraqlanıram.",
+        )
+        if wa_url:
+            mk_card.add(types.InlineKeyboardButton("💬 WhatsApp yaz", url=wa_url))
+        try:
+            bot.send_message(chat_id, card, reply_markup=mk_card)
+        except Exception:
+            continue
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("agt_my:"))
+def cb_agent_my_customers(c):
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id
+    if not (is_admin(chat_id) or is_agent_user(chat_id)):
+        try:
+            bot.answer_callback_query(
+                c.id, "❌ Bu bölmə yalnız BestHome agentləri üçündür.", show_alert=True
+            )
+        except Exception:
+            pass
+        return
+    try:
+        page = int(c.data.split(":", 1)[1])
+    except Exception:
+        page = 1
+    show_agent_my_customers(chat_id, page=page, message=c.message)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("agt_int:"))
+def cb_agent_interest(c):
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id
+    if not (is_admin(chat_id) or is_agent_user(chat_id)):
+        try:
+            bot.answer_callback_query(
+                c.id, "❌ Bu bölmə yalnız BestHome agentləri üçündür.", show_alert=True
+            )
+        except Exception:
+            pass
+        return
+    try:
+        req_id = int(c.data.split(":", 1)[1])
+    except Exception:
+        return
+    if agent_has_interest(chat_id, req_id):
+        try:
+            bot.answer_callback_query(c.id, "✅ Artıq siyahıya əlavə olunub", show_alert=True)
+        except Exception:
+            pass
+        return
+    req_row = fetch_customer_request_by_id(req_id)
+    if not req_row or req_row.get("status") not in {None, "active"}:
+        try:
+            bot.answer_callback_query(c.id, "⚠️ Sorğu tapılmadı və ya aktiv deyil")
+        except Exception:
+            pass
+        return
+    if store_agent_interest(chat_id, req_id):
+        try:
+            bot.answer_callback_query(c.id, "✅ Müştəri siyahınıza əlavə olundu")
+        except Exception:
+            pass
+        try:
+            bot.send_message(chat_id, "👥 Yeni müştəri siyahıya əlavə edildi:")
+            mk_card = types.InlineKeyboardMarkup()
+            wa_url = make_whatsapp_url(
+                req_row.get("phone"), "Salam, müştəri sorğunuz ilə maraqlanıram."
+            )
+            if wa_url:
+                mk_card.add(types.InlineKeyboardButton("💬 WhatsApp yaz", url=wa_url))
+            bot.send_message(
+                chat_id, format_agent_request_card(req_row), reply_markup=mk_card
+            )
+        except Exception:
+            pass
+    else:
+        try:
+            bot.answer_callback_query(c.id, "⚠️ Əlavə etmək alınmadı")
+        except Exception:
+            pass
 
 
 def pub_agent_search_by_keyword(message):
