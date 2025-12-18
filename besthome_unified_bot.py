@@ -91,6 +91,7 @@ agent_request_lookup_state = {}
 CUSTOMER_REQUEST_COOLDOWN_SECONDS = 300
 ui_state = defaultdict(list)
 active_user_flow = {}
+main_menu_message_id = {}
 
 bot = telebot.TeleBot(BOT_TOKEN)
 BOT_USERNAME = bot.get_me().username
@@ -2667,20 +2668,83 @@ def main_menu_keyboard(chat_id: int = None) -> types.ReplyKeyboardMarkup:
     return kb
 
 
+def main_menu_inline_keyboard():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("📄 Elanlar", callback_data="menu_listings"),
+        types.InlineKeyboardButton("📝 Ev axtarıram", callback_data="menu_request"),
+        types.InlineKeyboardButton("⭐ Favorilər", callback_data="menu_favorites"),
+        types.InlineKeyboardButton("⚙️ Profil", callback_data="menu_profile"),
+    )
+    return markup
+
+
+def render_main_menu(chat_id):
+    text = "🏠 Əsas menyu"
+    markup = main_menu_inline_keyboard()
+
+    if chat_id in main_menu_message_id:
+        try:
+            bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=main_menu_message_id[chat_id],
+                text=text,
+                reply_markup=markup,
+            )
+            return
+        except Exception:
+            pass
+
+    msg = bot.send_message(chat_id, text, reply_markup=markup)
+    main_menu_message_id[chat_id] = msg.message_id
+
+
 def send_main_menu(bot_instance, chat_id=None):
     try:
         if chat_id is None:
             chat_id = bot_instance
-            bot_instance = bot
         USER_ACTIVE_STATE[chat_id] = "main_menu"
-        bot_instance.send_message(
-            chat_id,
-            "🏠 Əsas menyu",
-            reply_markup=main_menu_keyboard(chat_id),
-        )
+        render_main_menu(chat_id)
         active_user_flow.pop(chat_id, None)
     except Exception:
         pass
+
+
+@bot.callback_query_handler(
+    func=lambda c: c.data
+    in {"menu_listings", "menu_request", "menu_favorites", "menu_profile"}
+)
+def handle_main_menu_inline(c):
+    if not ensure_allowed_cb(c):
+        bot.answer_callback_query(c.id)
+        return
+
+    chat_id = c.message.chat.id
+    data = c.data
+
+    if data == "menu_listings":
+        safe_clear_ui(bot, chat_id, ui_state[chat_id])
+        ui_state[chat_id].clear()
+        active_user_flow[chat_id] = True
+        send_search_menu(chat_id)
+    elif data == "menu_request":
+        if not is_user_allowed(chat_id):
+            msg = bot.send_message(chat_id, "🛑 Sorğu göndərmək üçün hesabınız təsdiqlənməlidir.")
+            ui_state[chat_id].append(msg.message_id)
+        else:
+            reset_customer_request(chat_id)
+            show_request_type_menu(chat_id)
+    elif data == "menu_favorites":
+        reset_search_state(chat_id)
+        send_paginated_results(chat_id, "favorites", params={}, page=1)
+    elif data == "menu_profile":
+        bot.send_message(
+            chat_id,
+            "📂 Elan statuslarını seçin:",
+            reply_markup=status_menu_keyboard(),
+        )
+
+    bot.answer_callback_query(c.id)
 
 
 def build_search_menu_keyboard():
@@ -4820,10 +4884,7 @@ def return_to_main_menu(chat_id: int):
     search_state.pop(chat_id, None)
     admin_panel_page_state.pop(chat_id, None)
     active_user_flow.pop(chat_id, None)
-    if is_admin(chat_id):
-        send_main_menu(chat_id)
-    else:
-        main_menu(chat_id)
+    render_main_menu(chat_id)
 
 
 def format_saved_search_entry(row: dict) -> str:
@@ -11566,9 +11627,7 @@ def run_bot():
 
 
 def main_menu(chat_id):
-    mk = main_menu_keyboard(chat_id)
-    msg = bot.send_message(chat_id, "📋 Əsas menyudan seçim et:", reply_markup=mk)
-    ui_state[chat_id].append(msg.message_id)
+    render_main_menu(chat_id)
 
 
 if __name__ == "__main__":
