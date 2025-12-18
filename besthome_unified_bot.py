@@ -88,6 +88,7 @@ bot = telebot.TeleBot(BOT_TOKEN)
 BOT_USERNAME = bot.get_me().username
 user_state = {}  # Yeni elan proses state
 search_state = {}  # Açar sözlə axtarış paging state
+today_flow_state = {}
 search_reminder_shown = set()  # Session-level reminder flag
 session_interactions = {}
 db_update_lock = threading.Lock()
@@ -1902,6 +1903,44 @@ def compute_total_pages(total_count: int) -> int:
     return max(1, math.ceil(total_count / PAGE_SIZE))
 
 
+def get_today_bounds():
+    now = datetime.now()
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start.replace(hour=23, minute=59, second=59, microsecond=999999)
+    return start, end
+
+
+def format_sqlite_datetime(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def get_table_columns(cur, table: str):
+    try:
+        cur.execute(f"PRAGMA table_info({table})")
+        return {row[1].lower(): row[1] for row in cur.fetchall()}
+    except Exception:
+        return {}
+
+
+def detect_table_date_column(cur, table: str) -> Optional[str]:
+    cols = get_table_columns(cur, table)
+    for key in ("created_at", "date_added", "date_read", "added_at"):
+        if key in cols:
+            return cols[key]
+    return None
+
+
+def build_today_clause(column: Optional[str]):
+    if not column:
+        return "", []
+    start, end = get_today_bounds()
+    return (
+        " AND ((typeof({col})='integer' AND {col} BETWEEN ? AND ?) "
+        "OR datetime({col}) BETWEEN datetime(?) AND datetime(?))".format(col=column),
+        [int(start.timestamp()), int(end.timestamp()), format_sqlite_datetime(start), format_sqlite_datetime(end)],
+    )
+
+
 def build_pagination_keyboard(page: int, total_pages: int):
     mk = types.InlineKeyboardMarkup()
     mk.add(
@@ -2565,6 +2604,7 @@ def send_main_menu(chat_id: int):
     buttons = [
         "📝 Yeni elan əlavə et",
         "🔎 Axtarış sistemi",
+        "🆕 Bu gün daxil olan elanlar",
         "📝 Ev axtarıram",
         "📂 Elan statusları",
         "⭐ Favorilərim",
@@ -2578,11 +2618,9 @@ def send_main_menu(chat_id: int):
     if is_admin(chat_id):
         buttons.append("📊 Admin Panel")
 
-    kb.row(buttons[0], buttons[5])
-    kb.row(buttons[1], buttons[6])
-    kb.row(buttons[2], buttons[7])
-    kb.row(buttons[3], buttons[8])
-    kb.row(buttons[4], buttons[9])
+    for i in range(0, len(buttons), 2):
+        row = buttons[i : i + 2]
+        kb.row(*row)
     kb.row("🔄 Botu yenilə")
     bot.send_message(chat_id, "🏠 Əsas menyu:", reply_markup=kb)
 
@@ -4552,6 +4590,104 @@ def search_system_menu(message):
     send_search_menu(message.chat.id)
 
 
+def prompt_today_operation(chat_id: int):
+    mk = types.InlineKeyboardMarkup()
+    mk.add(
+        types.InlineKeyboardButton("💸 Satılır", callback_data="td|op|sat"),
+        types.InlineKeyboardButton("🏢 Kirayə", callback_data="td|op|kir"),
+    )
+    mk.add(types.InlineKeyboardButton("🌐 Hamısı", callback_data="td|op|all"))
+    bot.send_message(chat_id, "Əməliyyat növünü seç:", reply_markup=mk)
+
+
+def prompt_today_property(chat_id: int):
+    mk = types.InlineKeyboardMarkup()
+    mk.add(
+        types.InlineKeyboardButton("Mənzil", callback_data="td|tp|m"),
+        types.InlineKeyboardButton("Həyət evi", callback_data="td|tp|f"),
+    )
+    mk.add(
+        types.InlineKeyboardButton("Obyekt", callback_data="td|tp|q"),
+        types.InlineKeyboardButton("Bağ evi", callback_data="td|tp|b"),
+    )
+    mk.add(
+        types.InlineKeyboardButton("Torpaq", callback_data="td|tp|t"),
+        types.InlineKeyboardButton("Hamısı", callback_data="td|tp|all"),
+    )
+    bot.send_message(chat_id, "🏠 Əmlak tipini seç:", reply_markup=mk)
+
+
+def send_today_results(chat_id: int, filters: dict, message=None):
+    loading_ref = show_loading_message(chat_id, message)
+    _, total = query_today_results(filters, offset=0, limit=PAGE_SIZE)
+    if not total:
+        if not replace_loading_message(loading_ref, "Bu gün üçün uyğun elan yoxdur."):
+            bot.send_message(chat_id, "Bu gün üçün uyğun elan yoxdur.")
+        return
+
+    log_search_event(
+        chat_id,
+        "today",
+        operation=normalize_operation_value(filters.get("op")) or filters.get("op"),
+        query_text=str(filters),
+    )
+    send_paginated_results(
+        chat_id,
+        mode="today",
+        params={"filters": dict(filters)},
+        page=1,
+        loading_ref=loading_ref,
+    )
+
+
+def start_today_flow(chat_id: int):
+    reset_search_state(chat_id)
+    today_flow_state[chat_id] = {"op": "all", "prop": "all"}
+    total_today = count_today_filtered(today_flow_state[chat_id])
+    bot.send_message(chat_id, f"📈 Bu gün daxil olan elanlar: {total_today}")
+    prompt_today_operation(chat_id)
+
+
+@bot.message_handler(func=lambda m: m.text == "🆕 Bu gün daxil olan elanlar")
+def handle_today_menu(message):
+    if not ensure_allowed(message):
+        return
+    start_today_flow(message.chat.id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("td|"))
+def handle_today_callbacks(c):
+    if not ensure_allowed_cb(c):
+        return
+    parts = c.data.split("|")
+    if len(parts) < 3:
+        try:
+            bot.answer_callback_query(c.id)
+        except Exception:
+            pass
+        return
+
+    chat_id = c.message.chat.id
+    st = today_flow_state.setdefault(chat_id, {"op": "all", "prop": "all"})
+    action, value = parts[1], parts[2]
+
+    if action == "op":
+        st["op"] = value
+        op_count = count_today_filtered(st)
+        bot.send_message(chat_id, f"Filtrdən sonra qalan elanlar: {op_count}")
+        prompt_today_property(chat_id)
+    elif action == "tp":
+        st["prop"] = value
+        final_count = count_today_filtered(st)
+        bot.send_message(chat_id, f"Seçilmiş kriteriyaya uyğun bu gün {final_count} elan var.")
+        send_today_results(chat_id, st, message=(c.message.chat.id, c.message.message_id))
+
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
 def start_structured_search_from_menu(chat_id: int, op_code: str):
     reset_search_state(chat_id)
     search_state[chat_id] = {
@@ -5813,6 +5949,71 @@ def query_structured_results(filters: dict, offset: int = 0, limit: int = None):
     return filtered, total
 
 
+def query_today_results(filters: dict, offset: int = 0, limit: int = None):
+    op_code = filters.get("op", "all")
+    prop_code = filters.get("prop", "all")
+    results = []
+
+    if os.path.exists(MAIN_DB):
+        conn = get_main_conn()
+        cur = conn.cursor()
+        base = "SELECT * FROM listings"
+        flt, params = build_filters_sql(op_code, prop_code, None, mode="main")
+        date_col = detect_table_date_column(cur, "listings")
+        date_sql, date_params = build_today_clause(date_col)
+        order_col = date_col or "date_read"
+        cur.execute(
+            base + flt + date_sql + f" ORDER BY {order_col} DESC, id DESC",
+            params + date_params,
+        )
+        for r in cur.fetchall():
+            d = dict(r)
+            d["__source"] = "main"
+            results.append(d)
+        close_main_conn(conn)
+
+    conn = get_local_conn()
+    cur = conn.cursor()
+    base = "SELECT * FROM listings_approved"
+    flt, params = build_filters_sql(op_code, prop_code, None, mode="local")
+    date_col = detect_table_date_column(cur, "listings_approved")
+    date_sql, date_params = build_today_clause(date_col)
+    order_col = date_col or "date_added"
+    cur.execute(
+        base + flt + date_sql + f" ORDER BY {order_col} DESC, id DESC",
+        params + date_params,
+    )
+    for r in cur.fetchall():
+        d = dict(r)
+        d["__source"] = "local"
+        results.append(d)
+    conn.close()
+
+    status_map = get_status_map()
+    start, end = get_today_bounds()
+    filtered = []
+    for ev in results:
+        if not is_listing_active(ev, status_map):
+            continue
+        ev_dt = safe_date(ev)
+        if ev_dt == datetime.min:
+            continue
+        if not (start <= ev_dt <= end):
+            continue
+        filtered.append(ev)
+
+    filtered.sort(key=safe_date, reverse=True)
+    total = len(filtered)
+    if limit is not None:
+        filtered = filtered[offset : offset + limit]
+    return filtered, total
+
+
+def count_today_filtered(filters: dict) -> int:
+    _, total = query_today_results(filters, offset=0, limit=None)
+    return total
+
+
 def is_fts_ready(conn, table_name: str) -> bool:
     try:
         cur = conn.cursor()
@@ -6270,6 +6471,8 @@ def fetch_page_results(chat_id: int, mode: str, params: dict, page: int):
         return query_top_viewed_listings(
             days=params.get("days", 7), offset=offset, limit=PAGE_SIZE
         )
+    if mode == "today":
+        return query_today_results(params.get("filters", {}), offset=offset, limit=PAGE_SIZE)
     return [], 0
 
 
@@ -6305,6 +6508,7 @@ def send_paginated_results(
         "favorites": "⭐ Favorilər",
         "statuslist": params.get("title", "📂 Siyahı"),
         "topviews": "🔥 Ən çox baxılanlar",
+        "today": "🆕 Bu gün",
     }
 
     if show_summary:
@@ -10445,8 +10649,9 @@ def show_admin_stats(chat_id, period: Optional[str] = None, message_id: Optional
     selected_period = period or admin_stats_period.get(chat_id, "day")
     admin_stats_period[chat_id] = selected_period
     start_date, end_date, period_label = stats_period_range(selected_period)
-    today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    today_end = today_start + timedelta(days=1)
+    today_start, today_end = get_today_bounds()
+    today_start_str = format_sqlite_datetime(today_start)
+    today_end_str = format_sqlite_datetime(today_end)
 
     def table_exists(cur, name: str) -> bool:
         try:
@@ -10481,11 +10686,7 @@ def show_admin_stats(chat_id, period: Optional[str] = None, message_id: Optional
         return None
 
     def detect_date_column(cur, table: str) -> Optional[str]:
-        cols = column_lookup(cur, table)
-        for key in ("date_added", "date_read", "created_at", "added_at"):
-            if key in cols:
-                return cols[key]
-        return None
+        return detect_table_date_column(cur, table)
 
     def count_today_new(cur, table: str) -> int:
         col = detect_date_column(cur, table)
@@ -10493,8 +10694,11 @@ def show_admin_stats(chat_id, period: Optional[str] = None, message_id: Optional
             return 0
         return safe_count(
             cur,
-            f"SELECT COUNT(*) FROM {table} WHERE datetime({col}) >= datetime(?) AND datetime({col}) < datetime(?)",
-            (today_start.isoformat(), today_end.isoformat()),
+            (
+                f"SELECT COUNT(*) FROM {table} WHERE ((typeof({col})='integer' AND {col} BETWEEN ? AND ?) "
+                f"OR datetime({col}) BETWEEN datetime(?) AND datetime(?))"
+            ),
+            (int(today_start.timestamp()), int(today_end.timestamp()), today_start_str, today_end_str),
         )
 
     def op_counts(cur, table: str):
