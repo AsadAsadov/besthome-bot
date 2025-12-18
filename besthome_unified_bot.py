@@ -3697,6 +3697,8 @@ def about(message):
 
 @bot.message_handler(func=lambda m: m.text == "💳 Ödəniş")
 def payment_menu_entry(message):
+    safe_clear_ui(bot, message.chat.id, ui_state[message.chat.id])
+    ui_state[message.chat.id].clear()
     send_payment_menu(message.chat.id)
 
 
@@ -4653,6 +4655,8 @@ def show_top_viewed(message):
 
 @bot.message_handler(func=lambda m: m.text == "🔎 Axtarış sistemi")
 def search_system_menu(message):
+    safe_clear_ui(bot, message.chat.id, ui_state[message.chat.id])
+    ui_state[message.chat.id].clear()
     if not ensure_allowed(message):
         return
     send_search_menu(message.chat.id)
@@ -4674,6 +4678,8 @@ def start_structured_search_from_menu(chat_id: int, op_code: str):
 
 @bot.message_handler(func=lambda m: m.text in ["🏠 Satılır", "🏢 Kirayə verilir"])
 def structured_search_from_menu(message):
+    safe_clear_ui(bot, message.chat.id, ui_state[message.chat.id])
+    ui_state[message.chat.id].clear()
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -4686,6 +4692,8 @@ def structured_search_from_menu(message):
 
 @bot.message_handler(func=lambda m: m.text == "🔍 Açar sözlə axtar")
 def keyword_search_from_menu(message):
+    safe_clear_ui(bot, message.chat.id, ui_state[message.chat.id])
+    ui_state[message.chat.id].clear()
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -4698,6 +4706,8 @@ def keyword_search_from_menu(message):
 
 @bot.message_handler(func=lambda m: m.text == "📞 Nömrə ilə axtar")
 def phone_search_from_menu(message):
+    safe_clear_ui(bot, message.chat.id, ui_state[message.chat.id])
+    ui_state[message.chat.id].clear()
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -7326,6 +7336,8 @@ def admin_panel_back_to_main(message):
 
 @bot.message_handler(func=lambda m: is_admin(m.chat.id) and m.text in ADMIN_PANEL_ACTIONS)
 def handle_admin_panel_action(message):
+    safe_clear_ui(bot, message.chat.id, ui_state[message.chat.id])
+    ui_state[message.chat.id].clear()
     chat_id = message.chat.id
     txt = message.text
 
