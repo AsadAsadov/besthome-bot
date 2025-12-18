@@ -10419,24 +10419,21 @@ def format_active_user_stats(users):
         if len(label_name) > 30:
             label_name = label_name[:27] + "..."
 
-        blocks.append(
-            "\n".join(
-                [
-                    f"👤 {display_name}",
-                    f"🆔 {chat_id}",
-                    f"🔍 Axtarış sayı: {cnt}",
-                ]
-            )
-        )
-
         try:
             profile_url = build_profile_url(chat_id, username)
-            button_label = f"👤 Profilə bax — {label_name if label_name != '—' else chat_id}"
-            if len(button_label) > 64:
-                button_label = "👤 Profilə bax"
-            buttons.append(types.InlineKeyboardButton(button_label, url=profile_url))
         except Exception:
-            continue
+            profile_url = None
+
+        block_lines = []
+        if display_name != "—":
+            block_lines.append(f"👤 {display_name}")
+        if profile_url:
+            block_lines.append(f"🆔 <a href=\"{profile_url}\">ID: {chat_id}</a>")
+        else:
+            block_lines.append(f"🆔 ID: {chat_id}")
+        block_lines.append(f"🔍 Axtarış sayı: {cnt}")
+
+        blocks.append("\n".join(block_lines))
 
     return blocks, buttons
 
@@ -10448,6 +10445,8 @@ def show_admin_stats(chat_id, period: Optional[str] = None, message_id: Optional
     selected_period = period or admin_stats_period.get(chat_id, "day")
     admin_stats_period[chat_id] = selected_period
     start_date, end_date, period_label = stats_period_range(selected_period)
+    today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_end = today_start + timedelta(days=1)
 
     def table_exists(cur, name: str) -> bool:
         try:
@@ -10480,6 +10479,23 @@ def show_admin_stats(chat_id, period: Optional[str] = None, message_id: Optional
             if key in cols:
                 return cols[key]
         return None
+
+    def detect_date_column(cur, table: str) -> Optional[str]:
+        cols = column_lookup(cur, table)
+        for key in ("date_added", "date_read", "created_at", "added_at"):
+            if key in cols:
+                return cols[key]
+        return None
+
+    def count_today_new(cur, table: str) -> int:
+        col = detect_date_column(cur, table)
+        if not col:
+            return 0
+        return safe_count(
+            cur,
+            f"SELECT COUNT(*) FROM {table} WHERE datetime({col}) >= datetime(?) AND datetime({col}) < datetime(?)",
+            (today_start.isoformat(), today_end.isoformat()),
+        )
 
     def op_counts(cur, table: str):
         total = safe_count(cur, f"SELECT COUNT(*) FROM {table}") if table_exists(cur, table) else 0
@@ -10590,6 +10606,7 @@ def show_admin_stats(chat_id, period: Optional[str] = None, message_id: Optional
             pass
 
     main_total = main_sale = main_rent = 0
+    today_new_main = 0
     conn_main = None
     if os.path.exists(MAIN_DB):
         try:
@@ -10608,6 +10625,7 @@ def show_admin_stats(chat_id, period: Optional[str] = None, message_id: Optional
                         break
             if main_table:
                 main_total, main_sale, main_rent = op_counts(cur_main, main_table)
+                today_new_main = count_today_new(cur_main, main_table)
         except Exception:
             pass
         finally:
@@ -10617,12 +10635,14 @@ def show_admin_stats(chat_id, period: Optional[str] = None, message_id: Optional
                 pass
 
     local_total = local_sale = local_rent = 0
+    today_new_local = 0
     conn_local_counts = None
     try:
         conn_local_counts = get_local_conn()
         cur_local_counts = conn_local_counts.cursor()
         if table_exists(cur_local_counts, "listings_approved"):
             local_total, local_sale, local_rent = op_counts(cur_local_counts, "listings_approved")
+            today_new_local = count_today_new(cur_local_counts, "listings_approved")
     finally:
         try:
             conn_local_counts.close()
@@ -10632,6 +10652,7 @@ def show_admin_stats(chat_id, period: Optional[str] = None, message_id: Optional
     total_listings = main_total + local_total
     sale_total = main_sale + local_sale
     rent_total = main_rent + local_rent
+    today_new_listings = today_new_main + today_new_local
 
     lines = [f"📊 BestHome Statistikalar — {period_label}", ""]
     lines.append("👥 İstifadəçilər:")
@@ -10645,6 +10666,7 @@ def show_admin_stats(chat_id, period: Optional[str] = None, message_id: Optional
     lines.append(f"• Ümumi: {total_listings}")
     lines.append(f"• Satılır: {sale_total}")
     lines.append(f"• Kirayə: {rent_total}")
+    lines.append(f"📈 Bu gün əlavə olunan yeni elanlar: {today_new_listings}")
     lines.append("")
 
     lines.append(f"📍 Rayonlar üzrə axtarışlar ({period_label}):")
