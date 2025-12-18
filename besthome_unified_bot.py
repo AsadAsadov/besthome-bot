@@ -2562,27 +2562,36 @@ def send_refresh_button(chat_id: int):
 
 def send_main_menu(chat_id: int):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row("📝 Yeni elan əlavə et")
-    kb.row("🔎 Axtarış sistemi")
-    kb.row("📝 Ev axtarıram")
-    kb.row("📂 Elan statusları")
-    kb.row("⭐ Favorilərim", "📋 Elanlarım")
-    kb.row("💳 Ödəniş", "ℹ️ Haqqında")
-    kb.row("📩 Şikayət və təkliflər")
-    kb.row("🔄 Botu yenilə")
+    buttons = [
+        "📝 Yeni elan əlavə et",
+        "🔎 Axtarış sistemi",
+        "📝 Ev axtarıram",
+        "📂 Elan statusları",
+        "⭐ Favorilərim",
+        "📋 Elanlarım",
+        "💳 Ödəniş",
+        "ℹ️ Haqqında",
+        "📩 Şikayət və təkliflər",
+    ]
+    if not is_admin(chat_id):
+        buttons.append("🤝 Dostunu dəvət et")
     if is_admin(chat_id):
-        kb.row("📊 Admin Panel")
+        buttons.append("📊 Admin Panel")
+
+    kb.row(buttons[0], buttons[5])
+    kb.row(buttons[1], buttons[6])
+    kb.row(buttons[2], buttons[7])
+    kb.row(buttons[3], buttons[8])
+    kb.row(buttons[4], buttons[9])
+    kb.row("🔄 Botu yenilə")
     bot.send_message(chat_id, "🏠 Əsas menyu:", reply_markup=kb)
 
 
 def build_search_menu_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row("🏠 Satılır")
-    kb.row("🏢 Kirayə verilir")
-    kb.row("🔍 Açar sözlə axtar")
-    kb.row("📞 Nömrə ilə axtar")
-    kb.row("⭐ Favorilərim")
-    kb.row("🔔 Bildirişlərim")
+    kb.row("🏠 Satılır", "🏢 Kirayə verilir")
+    kb.row("🔍 Açar sözlə axtar", "📞 Nömrə ilə axtar")
+    kb.row("⭐ Favorilərim", "🔔 Bildirişlərim")
     kb.row("⬅️ Əsas menyuya qayıt")
     return kb
 
@@ -11140,20 +11149,30 @@ def run_bot():
 
 def main_menu(chat_id):
     mk = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    mk.add("📝 Yeni elan əlavə et")
-    mk.add("🔎 Axtarış sistemi")
-    mk.add("📝 Ev axtarıram")
-    mk.add("📂 Elan statusları")
-    mk.add("⭐ Favorilərim", "📋 Elanlarım")
-    mk.add("💳 Ödəniş", "ℹ️ Haqqında")
-    mk.add("📩 Şikayət və təkliflər")
-    mk.add("🔄 Botu yenilə")
+    buttons = [
+        "📝 Yeni elan əlavə et",
+        "🔎 Axtarış sistemi",
+        "📝 Ev axtarıram",
+        "📂 Elan statusları",
+        "⭐ Favorilərim",
+        "📋 Elanlarım",
+        "💳 Ödəniş",
+        "ℹ️ Haqqında",
+        "📩 Şikayət və təkliflər",
+    ]
 
     if not is_admin(chat_id):
-        mk.add("🤝 Dostunu dəvət et")
+        buttons.append("🤝 Dostunu dəvət et")
 
     if is_admin(chat_id):
-        mk.add("📊 Admin Panel")
+        buttons.append("📊 Admin Panel")
+
+    mk.add(buttons[0], buttons[5])
+    mk.add(buttons[1], buttons[6])
+    mk.add(buttons[2], buttons[7])
+    mk.add(buttons[3], buttons[8])
+    mk.add(buttons[4], buttons[9])
+    mk.add("🔄 Botu yenilə")
 
     bot.send_message(chat_id, "📋 Əsas menyudan seçim et:", reply_markup=mk)
 
