@@ -3517,6 +3517,8 @@ def complaint_entry(message):
 
 @bot.callback_query_handler(func=lambda c: c.data == "open_complaint")
 def cb_open_complaint(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_complaint_access_allowed(c.message.chat.id):
         return
     try:
@@ -3584,6 +3586,8 @@ def complaint_message_handler(message):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("complaint_reply:"))
 def complaint_reply_callback(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.from_user.id):
         try:
             bot.answer_callback_query(c.id)
@@ -3698,6 +3702,8 @@ def payment_menu_entry(message):
 
 @bot.callback_query_handler(func=lambda c: c.data == "payinfo")
 def cb_payinfo(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     about(c.message)
     try:
         bot.answer_callback_query(c.id)
@@ -3718,6 +3724,8 @@ def send_active_promo_info(chat_id: int):
 
 @bot.callback_query_handler(func=lambda c: c.data in ("promoenter", "promo_enter"))
 def cb_promo_enter(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     chat_id = c.message.chat.id
     status = get_user_promo_status(chat_id)
     if status.get("active"):
@@ -3739,6 +3747,8 @@ def cb_promo_enter(c):
 
 @bot.callback_query_handler(func=lambda c: c.data == "promo_active_info")
 def cb_promo_active_info(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     chat_id = c.message.chat.id
     send_active_promo_info(chat_id)
     try:
@@ -3758,6 +3768,8 @@ def promo_code_entry_step(message):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("payplan|"))
 def cb_payplan(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     chat_id = c.message.chat.id
     plan_key = c.data.split("|")[1]
     plan = SUBSCRIPTION_PLANS.get(plan_key)
@@ -3785,6 +3797,8 @@ def cb_payplan(c):
 
 @bot.callback_query_handler(func=lambda c: c.data == "demo3")
 def cb_demo_activate(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     chat_id = c.message.chat.id
     if not is_demo_available(chat_id):
         try:
@@ -3837,6 +3851,8 @@ def cb_demo_activate(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("paydone|"))
 def cb_paydone(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     chat_id = c.message.chat.id
     plan_key = c.data.split("|")[1]
     plan = SUBSCRIPTION_PLANS.get(plan_key)
@@ -3873,6 +3889,8 @@ def cb_paydone(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("payadm|"))
 def cb_pay_admin(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.message.chat.id):
         return
     parts = c.data.split("|")
@@ -4403,6 +4421,8 @@ def show_favorites(message):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("fav|"))
 def cb_add_favorite(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not ensure_allowed_cb(c):
         return
     chat_id = c.message.chat.id
@@ -4429,6 +4449,8 @@ def cb_add_favorite(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("wa|"))
 def cb_whatsapp_click(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not ensure_allowed_cb(c):
         return
     parts = c.data.split("|")
@@ -4459,6 +4481,8 @@ def cb_whatsapp_click(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("favdel|"))
 def cb_remove_favorite(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not ensure_allowed_cb(c):
         return
     chat_id = c.message.chat.id
@@ -4513,6 +4537,8 @@ def status_label(code: str) -> str:
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("st|"))
 def cb_listing_status(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not ensure_allowed_cb(c):
         return
     parts = c.data.split("|")
@@ -5066,6 +5092,8 @@ def show_saved_notifications(message):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ss|"))
 def cb_search_select(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not ensure_allowed_cb(c):
         return
     mode = c.data.split("|")[1]
@@ -5119,6 +5147,8 @@ def cb_search_select(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("save_search|"))
 def cb_save_search(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not ensure_allowed_cb(c):
         return
     action = c.data.split("|", 1)[1]
@@ -5143,6 +5173,8 @@ def cb_save_search(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_open:"))
 def cb_open_notifications(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not ensure_allowed_cb(c):
         return
     try:
@@ -5158,6 +5190,8 @@ def cb_open_notifications(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("agent_notif:"))
 def cb_agent_notifications(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not ensure_allowed_cb(c):
         return
     chat_id = c.message.chat.id
@@ -5182,6 +5216,8 @@ def cb_agent_notifications(c):
 
 @bot.callback_query_handler(func=lambda c: c.data == "notif_crit")
 def cb_notif_criteria(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not ensure_allowed_cb(c):
         return
     send_criteria_list(c.message.chat.id, message=c.message)
@@ -5193,6 +5229,8 @@ def cb_notif_criteria(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_stopcrit:"))
 def cb_stop_criteria(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not ensure_allowed_cb(c):
         return
     try:
@@ -5214,6 +5252,8 @@ def cb_stop_criteria(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("crit_toggle:"))
 def cb_toggle_criteria(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not ensure_allowed_cb(c):
         return
     try:
@@ -5242,6 +5282,8 @@ def cb_toggle_criteria(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("crit_del:"))
 def cb_delete_criteria(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not ensure_allowed_cb(c):
         return
     try:
@@ -5273,6 +5315,8 @@ def send_keyword_operation_prompt(chat_id: int):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("kwop|"))
 def cb_keyword_operation(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not ensure_allowed_cb(c):
         return
     action = c.data.split("|")[1]
@@ -6447,6 +6491,8 @@ def send_paginated_results(
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("pg:"))
 def cb_pagination(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not ensure_allowed_cb(c):
         return
     chat_id = c.message.chat.id
@@ -6670,6 +6716,8 @@ def structured_go_back(chat_id, message=None):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("fs|"))
 def cb_structured(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not ensure_allowed_cb(c):
         return
     parts = c.data.split("|")
@@ -7024,6 +7072,8 @@ def send_agents_panel_message(chat_id: int):
 
 @bot.callback_query_handler(func=lambda c: c.data == "agent_search|filter")
 def cb_agent_filter(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     chat_id = c.message.chat.id
 
     if not is_admin(chat_id):
@@ -7055,6 +7105,8 @@ def cb_agent_filter(c):
 
 @bot.callback_query_handler(func=lambda c: c.data == "agent_filter|rayon")
 def cb_agent_filter_rayon(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     chat_id = c.message.chat.id
     if not is_admin(chat_id):
         return
@@ -7102,6 +7154,8 @@ def agent_search_by_rayon(message):
 
 @bot.callback_query_handler(func=lambda c: c.data == "agent_search|keyword")
 def cb_agent_keyword(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     chat_id = c.message.chat.id
     if not is_admin(chat_id):
         return
@@ -7152,6 +7206,8 @@ def agent_search_by_keyword(message):
 
 @bot.callback_query_handler(func=lambda c: c.data == "agent_search|phone")
 def cb_agent_phone(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     chat_id = c.message.chat.id
     if not is_admin(chat_id):
         return
@@ -7624,6 +7680,8 @@ def handle_financial_reports_menu(message):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_period:"))
 def cb_admin_request_period(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.from_user.id):
         return
     try:
@@ -7636,6 +7694,8 @@ def cb_admin_request_period(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req:"))
 def cb_admin_request_rayon(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.from_user.id):
         return
     try:
@@ -7661,6 +7721,8 @@ def cb_admin_request_rayon(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_flag:"))
 def cb_admin_request_flag(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.from_user.id):
         return
     try:
@@ -7681,6 +7743,8 @@ def cb_admin_request_flag(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_arch:"))
 def cb_admin_request_archive(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.from_user.id):
         return
     try:
@@ -7701,6 +7765,8 @@ def cb_admin_request_archive(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_viewflag:"))
 def cb_admin_request_view_flagged(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.from_user.id):
         return
     try:
@@ -7717,6 +7783,8 @@ def cb_admin_request_view_flagged(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_nop"))
 def cb_admin_request_noop(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.from_user.id):
         return
     try:
@@ -7932,6 +8000,8 @@ def start_admin_update_db(chat_id: int, callback_id: Optional[str] = None):
 
 @bot.callback_query_handler(func=lambda c: c.data == "admin_update_db")
 def cb_admin_update_db(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     start_admin_update_db(c.message.chat.id, callback_id=c.id)
 
 
@@ -8022,6 +8092,8 @@ def handle_admin_db_upload(message):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm|"))
 def cb_admin(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.message.chat.id):
         return
 
@@ -8332,6 +8404,8 @@ def show_admin_promo_stats(chat_id: int, page: int = 1):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("prm|"))
 def cb_admin_promo(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.message.chat.id):
         return
 
@@ -8639,6 +8713,8 @@ def show_user_payment_details(admin_chat_id: int, target_id: int, page: int = 1,
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("payhist|"))
 def cb_pay_history_list(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.message.chat.id):
         return
     parts = c.data.split("|")
@@ -8657,6 +8733,8 @@ def cb_pay_history_list(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("paydetail|"))
 def cb_pay_user_detail(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.message.chat.id):
         return
     parts = c.data.split("|")
@@ -8684,6 +8762,8 @@ def cb_pay_user_detail(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("subctl|"))
 def cb_subscription_control(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.message.chat.id):
         return
     parts = c.data.split("|")
@@ -8780,6 +8860,8 @@ def show_users_menu(chat_id):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("userlist|"))
 def cb_userlist(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.message.chat.id):
         return
     status = c.data.split("|")[1]
@@ -8792,6 +8874,8 @@ def cb_userlist(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_u:"))
 def cb_admin_user_pagination(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.message.chat.id):
         return
     try:
@@ -8809,6 +8893,8 @@ def cb_admin_user_pagination(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_search|"))
 def cb_user_search(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.message.chat.id):
         return
     try:
@@ -9228,6 +9314,8 @@ def build_admin_msg_back_markup(list_type: str, page: int) -> types.InlineKeyboa
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_msg:"))
 def cb_admin_start_user_message(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.message.chat.id):
         return
 
@@ -9282,6 +9370,8 @@ def cb_admin_start_user_message(c):
     or c.data.startswith("adm_msg_cancel:")
 )
 def cb_admin_cancel_user_message(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.message.chat.id):
         return
 
@@ -9376,6 +9466,8 @@ def handle_admin_user_message_text(message):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_stop:"))
 def cb_admin_stop_user(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.message.chat.id):
         return
     try:
@@ -9417,6 +9509,8 @@ def cb_admin_stop_user(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_block|"))
 def cb_user_block_action(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.message.chat.id):
         return
     parts = c.data.split("|")
@@ -9453,6 +9547,8 @@ def cb_user_block_action(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_approve|"))
 def cb_user_approve_action(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.message.chat.id):
         return
     parts = c.data.split("|")
@@ -9499,6 +9595,8 @@ def cb_user_approve_action(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_demo|"))
 def cb_user_demo_action(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.message.chat.id):
         return
     parts = c.data.split("|")
@@ -9529,6 +9627,8 @@ def cb_user_demo_action(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_free|"))
 def cb_user_set_free(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.message.chat.id):
         return
     parts = c.data.split("|")
@@ -9553,6 +9653,8 @@ def cb_user_set_free(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_to_paid|"))
 def cb_user_to_paid(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.message.chat.id):
         return
     parts = c.data.split("|")
@@ -9577,6 +9679,8 @@ def cb_user_to_paid(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_reject|"))
 def cb_user_reject(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.message.chat.id):
         return
     parts = c.data.split("|")
@@ -9597,6 +9701,8 @@ def cb_user_reject(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_restore|"))
 def cb_user_restore_action(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.message.chat.id):
         return
     parts = c.data.split("|")
@@ -9616,6 +9722,8 @@ def cb_user_restore_action(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_delete|"))
 def cb_user_delete_action(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.message.chat.id):
         return
     parts = c.data.split("|")
@@ -9754,6 +9862,8 @@ def show_pending_users(chat_id):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("uappr|"))
 def cb_user_approve(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.message.chat.id):
         return
     uid = int(c.data.split("|")[1])
@@ -9789,6 +9899,8 @@ def cb_user_approve(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ublock|"))
 def cb_user_block_pending(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not is_admin(c.message.chat.id):
         return
     uid = int(c.data.split("|")[1])
@@ -9863,6 +9975,8 @@ def refresh_button_message(message):
 
 @bot.callback_query_handler(func=lambda c: c.data == "bot_refresh")
 def cb_bot_refresh(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     try:
         bot.answer_callback_query(c.id, "✅ Yeniləndi.")
     except:
@@ -9872,6 +9986,8 @@ def cb_bot_refresh(c):
 
 @bot.callback_query_handler(func=lambda c: c.data == "refresh_bot")
 def cb_refresh_bot(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     """İstifadəçi 'Botu yenilə' düyməsinə basanda /start işə düşür."""
     try:
         bot.answer_callback_query(c.id, "✅ Yeniləndi.")
@@ -9916,6 +10032,8 @@ def agents_button(message):
 
 @bot.callback_query_handler(func=lambda c: c.data == "pub_agents_kw")
 def cb_pub_agents_kw(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not ensure_allowed_cb(c):
         return
     msg = bot.send_message(
@@ -9945,6 +10063,8 @@ def build_agent_request_rayon_markup():
 
 @bot.callback_query_handler(func=lambda c: c.data == "agent_requests")
 def cb_agent_requests(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not ensure_allowed_cb(c):
         return
     chat_id = c.message.chat.id
@@ -10042,6 +10162,8 @@ def show_agent_requests_by_rayon(
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("agt_req:"))
 def cb_agent_request_page(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not ensure_allowed_cb(c):
         return
     chat_id = c.message.chat.id
@@ -10182,6 +10304,8 @@ def show_agent_my_customers(
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("agt_my:"))
 def cb_agent_my_customers(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not ensure_allowed_cb(c):
         return
     chat_id = c.message.chat.id
@@ -10206,6 +10330,8 @@ def cb_agent_my_customers(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("agt_int:"))
 def cb_agent_interest(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     if not ensure_allowed_cb(c):
         return
     chat_id = c.message.chat.id
@@ -10777,6 +10903,8 @@ def show_admin_stats(chat_id, period: Optional[str] = None, message_id: Optional
 
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("stats_period:"))
 def handle_stats_period_callback(c):
+    safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+    ui_state[c.message.chat.id].clear()
     period = c.data.split(":", 1)[1] if c.data else "day"
     if period not in STATS_PERIOD_MAP:
         period = "day"
