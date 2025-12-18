@@ -103,6 +103,10 @@ BLOCKED_MESSAGE_TEXT = (
     "• 🎁 Əgər mümkündürsə, 3 günlük demo istifadə edin\n\n"
     "Sorğu göndərdikdən sonra admin tərəfindən yenidən yoxlanılacaq."
 )
+STATUS_PENDING = "pending"
+STATUS_DEMO = "demo"
+STATUS_ACTIVE = "active"
+STATUS_BLOCKED = "blocked"
 FINANCIAL_REPORTS_BUTTON = "💰 Maliyyə hesabatları"
 FINANCIAL_REPORTS_BACK = "⬅️ Geri (Admin Panel)"
 FINANCIAL_REPORTS_MENU = [
@@ -419,48 +423,38 @@ def init_local_db():
             date_joined TEXT,
             approved INTEGER DEFAULT 0,
             blocked INTEGER DEFAULT 0,
-            blocked_at TEXT
+            blocked_at TEXT,
+            status TEXT,
+            joined_at TEXT,
+            demo_start_at TEXT,
+            demo_end_at TEXT,
+            paid_until TEXT,
+            last_status_change_at TEXT
         )
         """
     )
 
     # Promo sahələri (mövcud deyilsə əlavə et)
-    try:
-        cur.execute("ALTER TABLE users ADD COLUMN promo_active INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE users ADD COLUMN promo_expires_at TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute(
-            "ALTER TABLE users ADD COLUMN referral_bonus_used INTEGER DEFAULT 0"
-        )
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute(
-            "ALTER TABLE users ADD COLUMN referral_milestone_used INTEGER DEFAULT 0"
-        )
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE users ADD COLUMN demo_used INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE users ADD COLUMN demo_expires_at TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE users ADD COLUMN blocked_at TEXT")
-    except sqlite3.OperationalError:
-        pass
+    for alter_stmt in [
+        "ALTER TABLE users ADD COLUMN promo_active INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN promo_expires_at TEXT",
+        "ALTER TABLE users ADD COLUMN referred_by INTEGER",
+        "ALTER TABLE users ADD COLUMN referral_bonus_used INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN referral_milestone_used INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN demo_used INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN demo_expires_at TEXT",
+        "ALTER TABLE users ADD COLUMN blocked_at TEXT",
+        "ALTER TABLE users ADD COLUMN status TEXT",
+        "ALTER TABLE users ADD COLUMN joined_at TEXT",
+        "ALTER TABLE users ADD COLUMN demo_start_at TEXT",
+        "ALTER TABLE users ADD COLUMN demo_end_at TEXT",
+        "ALTER TABLE users ADD COLUMN paid_until TEXT",
+        "ALTER TABLE users ADD COLUMN last_status_change_at TEXT",
+    ]:
+        try:
+            cur.execute(alter_stmt)
+        except sqlite3.OperationalError:
+            pass
 
     # Abunəliklər
     cur.execute(
@@ -835,6 +829,127 @@ def safe_date(row: dict):
     return datetime.min
 
 
+def parse_dt_safe(raw: Optional[str]) -> Optional[datetime]:
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw))
+    except Exception:
+        try:
+            return datetime.fromisoformat(str(raw).replace(" ", "T"))
+        except Exception:
+            return None
+
+
+def derive_status_from_legacy(row: sqlite3.Row, now: datetime) -> str:
+    status = (row.get("status") if isinstance(row, dict) else row["status"]) if row else None
+    if status in {STATUS_PENDING, STATUS_DEMO, STATUS_ACTIVE, STATUS_BLOCKED}:
+        return status
+    if row:
+        if row["blocked"]:
+            return STATUS_BLOCKED
+        if row["approved"]:
+            return STATUS_ACTIVE
+        demo_exp = parse_dt_safe(row["demo_expires_at"])
+        if row["demo_used"] and demo_exp and demo_exp > now:
+            return STATUS_DEMO
+    return STATUS_PENDING
+
+
+def migrate_user_statuses():
+    now = datetime.utcnow()
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT chat_id, status, approved, blocked, demo_used, demo_expires_at,
+               date_joined, joined_at, last_status_change_at, demo_start_at,
+               demo_end_at, paid_until
+        FROM users
+        """
+    )
+    rows = cur.fetchall()
+    for row in rows:
+        joined_at = row["joined_at"] or row["date_joined"] or datetime.utcnow().isoformat()
+        status = derive_status_from_legacy(row, now)
+        last_change = row["last_status_change_at"] or joined_at
+        cur.execute(
+            """
+            UPDATE users
+            SET status=?, joined_at=?, last_status_change_at=COALESCE(last_status_change_at, ?)
+            WHERE chat_id=?
+            """,
+            (status, joined_at, last_change, row["chat_id"]),
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_user_record(chat_id: int) -> Optional[dict]:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT chat_id, full_name, username, status, joined_at, demo_start_at,
+               demo_end_at, paid_until, last_status_change_at, approved, blocked,
+               promo_active, promo_expires_at, referred_by, referral_bonus_used,
+               referral_milestone_used, demo_used, demo_expires_at, blocked_at
+        FROM users WHERE chat_id=?
+        """,
+        (chat_id,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    data = dict(row)
+    data["status"] = derive_status_from_legacy(row, datetime.utcnow())
+    return data
+
+
+def update_user_status(
+    chat_id: int,
+    status: str,
+    *,
+    demo_start_at: Optional[datetime] = None,
+    demo_end_at: Optional[datetime] = None,
+    paid_until: Optional[datetime] = None,
+    blocked_at: Optional[datetime] = None,
+):
+    now = datetime.utcnow().isoformat()
+    conn = get_local_conn()
+    cur = conn.cursor()
+    approved_val = 1 if status in {STATUS_ACTIVE, STATUS_DEMO} else 0
+    blocked_val = 1 if status == STATUS_BLOCKED else 0
+    cur.execute(
+        """
+        UPDATE users
+        SET status=?, demo_start_at=?, demo_end_at=?, paid_until=?,
+            last_status_change_at=?, approved=?, blocked=?, blocked_at=?,
+            demo_used=CASE WHEN ? THEN 1 ELSE demo_used END,
+            demo_expires_at=COALESCE(?, demo_expires_at),
+            joined_at=COALESCE(joined_at, ?)
+        WHERE chat_id=?
+        """,
+        (
+            status,
+            demo_start_at.isoformat() if demo_start_at else None,
+            demo_end_at.isoformat() if demo_end_at else None,
+            paid_until.isoformat() if paid_until else None,
+            now,
+            approved_val,
+            blocked_val,
+            blocked_at.isoformat() if blocked_at else None,
+            1 if status == STATUS_DEMO else 0,
+            demo_end_at.isoformat() if demo_end_at else None,
+            datetime.utcnow().isoformat(),
+            chat_id,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
 def register_user(message):
     chat = message.chat
     uid = chat.id
@@ -846,28 +961,40 @@ def register_user(message):
     conn = get_local_conn()
     cur = conn.cursor()
 
+    joined_at = datetime.utcnow().isoformat()
     # Admin avtomatik approved
     if is_admin(uid):
         cur.execute(
             """
-            INSERT INTO users (chat_id, full_name, username, date_joined, approved, blocked)
-            VALUES (?, ?, ?, ?, 1, 0)
+            INSERT INTO users (
+                chat_id, full_name, username, date_joined, joined_at,
+                approved, blocked, status, last_status_change_at
+            )
+            VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?)
             ON CONFLICT(chat_id) DO UPDATE SET
                 full_name=excluded.full_name,
                 username=excluded.username
         """,
-            (uid, full_name, username or "", datetime.utcnow().isoformat()),
+            (
+                uid,
+                full_name,
+                username or "",
+                joined_at,
+                joined_at,
+                STATUS_ACTIVE,
+                joined_at,
+            ),
         )
     else:
         cur.execute(
             """
-            INSERT INTO users (chat_id, full_name, username, date_joined)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO users (chat_id, full_name, username, date_joined, joined_at, status, last_status_change_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(chat_id) DO UPDATE SET
                 full_name=excluded.full_name,
                 username=excluded.username
         """,
-            (uid, full_name, username or "", datetime.utcnow().isoformat()),
+            (uid, full_name, username or "", joined_at, joined_at, STATUS_PENDING, joined_at),
         )
     conn.commit()
     conn.close()
@@ -878,6 +1005,7 @@ def register_user(message):
 # ==============================
 
 subscription_warn_cache = set()
+demo_warn_cache = set()
 
 
 def ensure_subscription_record(chat_id: int):
@@ -946,28 +1074,22 @@ def set_subscription(
 
 
 def get_user_demo_status(chat_id: int) -> dict:
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT demo_used, demo_expires_at FROM users WHERE chat_id=?", (chat_id,)
-    )
-    row = cur.fetchone()
-    conn.close()
+    record = get_user_record(chat_id)
+    if not record:
+        return {"demo_used": 0, "demo_expires_at": None}
     return {
-        "demo_used": row[0] if row else 0,
-        "demo_expires_at": row[1] if row else None,
+        "demo_used": record.get("demo_used", 0),
+        "demo_expires_at": record.get("demo_end_at") or record.get("demo_expires_at"),
     }
 
 
 def mark_demo_used(chat_id: int, expires_at: datetime):
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE users SET demo_used=1, demo_expires_at=?, approved=1 WHERE chat_id=?",
-        (expires_at.isoformat(), chat_id),
+    update_user_status(
+        chat_id,
+        STATUS_DEMO,
+        demo_start_at=datetime.utcnow(),
+        demo_end_at=expires_at,
     )
-    conn.commit()
-    conn.close()
 
 
 def set_payment_note(chat_id: int, note: str):
@@ -1490,7 +1612,11 @@ def subscription_payment_code(chat_id: int) -> str:
 
 
 def is_demo_available(chat_id: int) -> bool:
+    record = get_user_record(chat_id)
     status = get_user_demo_status(chat_id)
+    lifecycle_status = record.get("status") if record else STATUS_PENDING
+    if lifecycle_status in {STATUS_ACTIVE, STATUS_DEMO, STATUS_BLOCKED}:
+        return False
     if status.get("demo_used"):
         return False
     sub = get_subscription(chat_id)
@@ -1534,79 +1660,82 @@ def check_subscription(chat_id: int, silent: bool = False) -> bool:
     if is_admin(chat_id):
         return True
 
-    sub = get_subscription(chat_id)
-    now = datetime.utcnow()
-    demo_status = get_user_demo_status(chat_id)
-    demo_expired = False
-    if demo_status.get("demo_expires_at"):
-        try:
-            demo_dt = datetime.fromisoformat(str(demo_status["demo_expires_at"]))
-            if demo_dt < now:
-                demo_expired = True
-        except Exception:
-            pass
-    expired = False
-    if sub and sub.get("expires_at"):
-        try:
-            exp_dt = datetime.fromisoformat(str(sub["expires_at"]))
-            if exp_dt < now:
-                expired = True
-        except Exception:
-            expired = True
-    if demo_expired:
-        expired = True
-
-    if sub and expired and sub.get("is_active"):
-        conn = get_local_conn()
-        cur = conn.cursor()
-        cur.execute(
-            "UPDATE subscriptions SET is_active=0 WHERE chat_id=?",
-            (chat_id,),
-        )
-        conn.commit()
-        conn.close()
-
-    if not sub or expired or not sub.get("is_active"):
+    record = get_user_record(chat_id)
+    if not record:
         if not silent:
-            try:
-                bot.send_message(
-                    chat_id,
-                    "⛔ Abunəniz aktiv deyil. Botdan istifadə üçün ödəniş edin.",
-                )
-            except Exception:
-                pass
             send_payment_menu(chat_id)
         return False
 
-    return True
+    status = record.get("status", STATUS_PENDING)
+    if status == STATUS_BLOCKED:
+        if not silent:
+            try:
+                bot.send_message(chat_id, "❌ Hesabınız deaktiv edilib. Dəstək ilə əlaqə saxlayın.")
+            except Exception:
+                pass
+        return False
+
+    now = datetime.utcnow()
+    sub = get_subscription(chat_id)
+    paid_until = parse_dt_safe(record.get("paid_until"))
+    if not paid_until and sub and sub.get("expires_at"):
+        paid_until = parse_dt_safe(sub.get("expires_at"))
+    demo_end = parse_dt_safe(record.get("demo_end_at") or record.get("demo_expires_at"))
+
+    if status == STATUS_DEMO:
+        if demo_end and demo_end <= now:
+            update_user_status(chat_id, STATUS_PENDING)
+            if not silent:
+                try:
+                    bot.send_message(
+                        chat_id,
+                        "💳 Demo bitdi. Ödəniş edərək botdan istifadəni davam etdirə bilərsiniz.",
+                    )
+                except Exception:
+                    pass
+                send_payment_menu(chat_id)
+            return False
+        return True
+
+    if status == STATUS_ACTIVE:
+        if paid_until and paid_until <= now:
+            update_user_status(chat_id, STATUS_PENDING)
+            if sub:
+                conn = get_local_conn()
+                cur = conn.cursor()
+                cur.execute("UPDATE subscriptions SET is_active=0 WHERE chat_id=?", (chat_id,))
+                conn.commit()
+                conn.close()
+            if not silent:
+                try:
+                    bot.send_message(chat_id, "⛔ Abunəlik müddəti bitib. Yeniləmək üçün ödəniş edin.")
+                except Exception:
+                    pass
+                send_payment_menu(chat_id)
+            return False
+        if paid_until:
+            return True
+        update_user_status(chat_id, STATUS_PENDING)
+
+    if not silent:
+        send_payment_menu(chat_id)
+    return False
 
 
 def is_user_allowed(chat_id: int) -> bool:
     if is_admin(chat_id):
         return True
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT approved, blocked FROM users WHERE chat_id=?", (chat_id,))
-    row = cur.fetchone()
-    conn.close()
-    if not row:
+    record = get_user_record(chat_id)
+    if not record:
         return False
-    approved, blocked = row
-    return approved == 1 and blocked == 0
+    status = record.get("status", STATUS_PENDING)
+    return status in {STATUS_ACTIVE, STATUS_DEMO}
 
 
 def ensure_allowed(message) -> bool:
     chat_id = message.chat.id
     if is_admin(chat_id):
         return True
-    if not is_user_allowed(chat_id):
-        bot.send_message(
-            chat_id,
-            "🛑 Botdan istifadə üçün admin təsdiqi tələb olunur.\n"
-            "Zəhmət olmasa icazə verilməsini gözləyin.",
-        )
-
-        return False
     if not check_subscription(chat_id):
         return False
     return True
@@ -1616,16 +1745,6 @@ def ensure_allowed_cb(c) -> bool:
     chat_id = c.message.chat.id
     if is_admin(chat_id):
         return True
-    if not is_user_allowed(chat_id):
-        try:
-            bot.answer_callback_query(
-                c.id,
-                "🛑 Botdan istifadə üçün admin təsdiqi tələb olunur.",
-                show_alert=True,
-            )
-        except:
-            pass
-        return False
     if not check_subscription(chat_id):
         return False
     return True
@@ -2516,6 +2635,13 @@ def start_cmd(message):
         if referred_by_value:
             save_referral(referred_by_value, chat_id, is_new_user=True)
 
+        update_user_status(chat_id, STATUS_PENDING)
+    else:
+        record = get_user_record(chat_id)
+        existing_status = record.get("status") if record else STATUS_PENDING
+        if existing_status not in {STATUS_ACTIVE, STATUS_DEMO, STATUS_BLOCKED}:
+            update_user_status(chat_id, STATUS_PENDING)
+
     ensure_subscription_record(chat_id)
     if is_first_time:
         send_payment_menu(chat_id)
@@ -2526,23 +2652,22 @@ def start_cmd(message):
             "UPDATE users SET approved=1, is_admin=1 WHERE chat_id=?", (chat_id,)
         )
         conn.commit()
+        update_user_status(chat_id, STATUS_ACTIVE)
         conn.close()
         main_menu(chat_id)
         return
 
-    # 🧩 İstifadəçi təsdiqlənməyibsə
-    cur.execute("SELECT approved FROM users WHERE chat_id=?", (chat_id,))
-    approved = cur.fetchone()[0]
     conn.close()
 
-    if not approved:
-        bot.send_message(
-            chat_id, "❌ Admin icazə verməyib. Zəhmət olmasa təsdiq gözləyin."
-        )
+    user_record = get_user_record(chat_id)
+    if user_record and user_record.get("status") == STATUS_BLOCKED:
+        bot.send_message(chat_id, "❌ Hesabınız deaktiv edilib. Dəstək ilə əlaqə saxlayın.")
         return
 
-    # 🧩 Təsdiqlənmiş istifadəçi üçün menyunu aç
-    check_subscription(chat_id, silent=True)
+    if not check_subscription(chat_id, silent=True):
+        send_payment_menu(chat_id)
+        return
+
     main_menu(chat_id)
 
 
@@ -3017,6 +3142,7 @@ def cb_pay_admin(c):
         if amount_val > 0:
             log_approved_payment(uid, plan["title"], amount_val)
         process_referral_on_payment(uid, sub, amount_val)
+        update_user_status(uid, STATUS_ACTIVE, paid_until=expires)
         try:
             bot.send_message(
                 uid,
@@ -7038,6 +7164,7 @@ def show_users_menu(chat_id):
     mk = types.InlineKeyboardMarkup()
     mk.add(
         types.InlineKeyboardButton("✅ Aktiv", callback_data="userlist|active"),
+        types.InlineKeyboardButton("🎁 Demo", callback_data="userlist|demo"),
         types.InlineKeyboardButton("🚫 Bloklanmış", callback_data="userlist|blocked"),
     )
     mk.add(
@@ -7058,6 +7185,21 @@ def cb_userlist(c):
         return
     status = c.data.split("|")[1]
     show_all_users(c.message.chat.id, status)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("user_search|"))
+def cb_user_search(c):
+    if not is_admin(c.message.chat.id):
+        return
+    try:
+        uid = int(c.data.split("|")[1])
+    except Exception:
+        return
+    admin_show_subscription_info(c.message.chat.id, uid)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
 
 
 def parse_join_datetime(dt_raw: Optional[str]) -> Tuple[str, str]:
@@ -7085,12 +7227,8 @@ def block_user(chat_id: int) -> bool:
         return False
 
     blocked_at = datetime.now().isoformat(sep=" ", timespec="seconds")
-    cur.execute(
-        "UPDATE users SET approved=0, blocked=1, blocked_at=? WHERE chat_id=?",
-        (blocked_at, chat_id),
-    )
-    conn.commit()
     conn.close()
+    update_user_status(chat_id, STATUS_BLOCKED, blocked_at=datetime.fromisoformat(blocked_at))
 
     try:
         bot.send_message(chat_id, BLOCKED_MESSAGE_TEXT)
@@ -7101,14 +7239,7 @@ def block_user(chat_id: int) -> bool:
 
 
 def restore_user_to_pending(chat_id: int):
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE users SET approved=0, blocked=0, blocked_at=NULL WHERE chat_id=?",
-        (chat_id,),
-    )
-    conn.commit()
-    conn.close()
+    update_user_status(chat_id, STATUS_PENDING)
 
 
 def delete_user_fully(chat_id: int):
@@ -7127,26 +7258,25 @@ def show_all_users(chat_id, status="active"):
     cur = conn.cursor()
 
     base_query = (
-        "SELECT chat_id, full_name, username, date_joined, approved, blocked, blocked_at FROM users"
+        "SELECT chat_id, full_name, username, joined_at, status, demo_start_at, demo_end_at, paid_until, last_status_change_at, blocked_at FROM users"
     )
 
+    status_filter = ""
+    title = "👥 Bütün istifadəçilər"
     if status == "active":
-        cur.execute(
-            base_query + " WHERE approved=1 AND blocked=0 ORDER BY date_joined DESC"
-        )
+        status_filter = f" WHERE status='{STATUS_ACTIVE}'"
         title = "✅ Aktiv istifadəçilər"
     elif status == "blocked":
-        cur.execute(base_query + " WHERE blocked=1 ORDER BY blocked_at DESC")
+        status_filter = f" WHERE status='{STATUS_BLOCKED}'"
         title = "🚫 Bloklanmış istifadəçilər"
     elif status == "pending":
-        cur.execute(
-            base_query + " WHERE approved=0 AND blocked=0 ORDER BY date_joined DESC"
-        )
+        status_filter = f" WHERE status='{STATUS_PENDING}'"
         title = "⏳ Təsdiqlənməmiş istifadəçilər"
-    else:
-        cur.execute(base_query + " ORDER BY date_joined DESC")
-        title = "👥 Bütün istifadəçilər"
+    elif status == "demo":
+        status_filter = f" WHERE status='{STATUS_DEMO}'"
+        title = "🎁 Demo istifadəçilər"
 
+    cur.execute(base_query + status_filter + " ORDER BY joined_at DESC")
     rows = cur.fetchall()
     conn.close()
 
@@ -7155,77 +7285,106 @@ def show_all_users(chat_id, status="active"):
         return
 
     bot.send_message(chat_id, f"{title} ({len(rows)} nəfər):")
+    now = datetime.utcnow()
+
+    if status == "demo":
+        active_count = 0
+        expired_count = 0
+        for r in rows:
+            demo_end = parse_dt_safe(r["demo_end_at"])
+            if demo_end and demo_end > now:
+                active_count += 1
+            else:
+                expired_count += 1
+        summary = (
+            f"🟢 Aktiv demo: {active_count}\n"
+            f"🔴 Vaxtı bitmiş demo: {expired_count}"
+        )
+        bot.send_message(chat_id, summary)
 
     for r in rows:
-        chat_id_u, full_name, username, date_joined, approved, blocked, blocked_at = r
-        username_value = f"@{username}" if username else "yoxdur"
-        status_text = (
-            "✅ Aktiv"
-            if approved and not blocked
-            else "🚫 Bloklanıb" if blocked else "⏳ Təsdiqlənməyib"
+        chat_id_u = r["chat_id"]
+        full_name = r["full_name"] or "Ad yoxdur"
+        username_value = f"@{r['username']}" if r["username"] else "yoxdur"
+        joined_at = parse_dt_safe(r["joined_at"])
+        joined_txt = joined_at.strftime("%Y-%m-%d") if joined_at else "-"
+        mk = types.InlineKeyboardMarkup()
+        mk.add(
+            types.InlineKeyboardButton(
+                f"🆔 ID: {chat_id_u}", callback_data=f"user_search|{chat_id_u}"
+            )
         )
 
-        join_date, join_time = parse_join_datetime(date_joined)
-
-        if status == "blocked":
-            block_date, block_time = parse_join_datetime(blocked_at)
+        if status == "pending":
+            waiting_days = (now - joined_at).days if joined_at else 0
             txt = (
-                "🚫 Bloklanmış istifadəçi:\n\n"
-                f"• 👤 Ad: {full_name or 'Ad yoxdur'}\n"
-                f"• 🆔 ID: <code>{chat_id_u}</code>\n"
-                f"• 👤 Username: {username_value}\n"
-                f"• 📅 Bloklanma tarixi: {block_date}\n"
-                f"• ⏰ Saat: {block_time or '-'}"
+                f"👤 Ad: {full_name}\n"
+                f"🆔 ID: <code>{chat_id_u}</code>\n"
+                f"👤 Username: {username_value}\n"
+                f"📅 Qoşulma tarixi: {joined_txt}\n"
+                f"⏳ Neçə gündür gözləyir: {waiting_days} gün"
             )
-        elif status == "pending":
+            mk.row(
+                types.InlineKeyboardButton("✅ Aktiv et", callback_data=f"user_approve|{chat_id_u}"),
+                types.InlineKeyboardButton("🎁 Demo ver", callback_data=f"user_demo|{chat_id_u}"),
+            )
+            mk.add(
+                types.InlineKeyboardButton("🚫 Dayandır", callback_data=f"user_block|{chat_id_u}")
+            )
+        elif status == "active":
+            activation_dt = parse_dt_safe(r["last_status_change_at"]) or joined_at
+            activation_txt = activation_dt.strftime("%Y-%m-%d") if activation_dt else "-"
+            paid_until = parse_dt_safe(r["paid_until"])
+            remaining_txt = "-"
+            if paid_until:
+                remaining = paid_until - now
+                if remaining.total_seconds() > 0:
+                    remaining_txt = format_remaining_time(remaining)
+                else:
+                    remaining_txt = "Bitib"
             txt = (
-                "❌ Təsdiqlənməmiş istifadəçilər:\n\n"
-                f"• 👤 Ad: {full_name or 'Ad yoxdur'}\n"
+                f"👤 Ad: {full_name}\n"
+                f"🆔 ID: <code>{chat_id_u}</code>\n"
+                f"📅 Qoşulma tarixi: {joined_txt}\n"
+                f"💳 Aktivləşmə tarixi: {activation_txt}\n"
+                f"⏳ Qalan gün: {remaining_txt}"
+            )
+            mk.add(
+                types.InlineKeyboardButton("🚫 Dayandır", callback_data=f"user_block|{chat_id_u}")
+            )
+        elif status == "demo":
+            demo_end = parse_dt_safe(r["demo_end_at"]) or parse_dt_safe(r["demo_start_at"])
+            remaining_txt = "Bitib"
+            if demo_end:
+                remaining = demo_end - now
+                remaining_txt = format_remaining_time(remaining)
+            txt = (
+                f"👤 Ad: {full_name}\n"
+                f"🆔 ID: <code>{chat_id_u}</code>\n"
+                f"⏱ Qalan vaxt: {remaining_txt}"
+            )
+            mk.add(
+                types.InlineKeyboardButton("🚫 Dayandır", callback_data=f"user_block|{chat_id_u}")
+            )
+        elif status == "blocked":
+            blocked_at = parse_dt_safe(r["blocked_at"] or r["last_status_change_at"])
+            blocked_txt = blocked_at.strftime("%Y-%m-%d") if blocked_at else "-"
+            txt = (
+                f"🚫 Bloklanmış istifadəçi:\n\n"
+                f"• 👤 Ad: {full_name}\n"
                 f"• 🆔 ID: <code>{chat_id_u}</code>\n"
                 f"• 👤 Username: {username_value}\n"
-                f"• 📅 Sorğu tarixi: {join_date}\n"
-                f"• ⏰ Saat: {join_time or '-'}"
+                f"• 📅 Bloklanma tarixi: {blocked_txt}"
+            )
+            mk.add(
+                types.InlineKeyboardButton("🔄 Geri qaytar", callback_data=f"user_restore|{chat_id_u}"),
+                types.InlineKeyboardButton("🗑 Tam sil", callback_data=f"user_delete|{chat_id_u}"),
             )
         else:
             txt = (
-                f"👤 {full_name or 'Ad yoxdur'}\n"
+                f"👤 {full_name}\n"
                 f"💬 Username: {username_value}\n"
-                f"🆔 <code>{chat_id_u}</code>\n"
-                f"📊 Status: {status_text}"
-            )
-
-        mk = types.InlineKeyboardMarkup()
-        if status == "blocked":
-            mk.add(
-                types.InlineKeyboardButton(
-                    "↩️ Geri qaytar", callback_data=f"user_restore|{chat_id_u}"
-                ),
-                types.InlineKeyboardButton(
-                    "🗑 Siyahıdan sil", callback_data=f"user_delete|{chat_id_u}"
-                ),
-            )
-        elif approved == 0:
-            mk.add(
-                types.InlineKeyboardButton(
-                    "✅ Qəbul et", callback_data=f"user_approve|{chat_id_u}"
-                ),
-                types.InlineKeyboardButton(
-                    "❌ Dayandır", callback_data=f"user_block|{chat_id_u}"
-                ),
-            )
-        elif blocked:
-            mk.add(
-                types.InlineKeyboardButton(
-                    "↩️ Geri qaytar",
-                    callback_data=f"user_restore|{chat_id_u}",
-                )
-            )
-        else:
-            mk.add(
-                types.InlineKeyboardButton(
-                    "❌ Dayandır",
-                    callback_data=f"user_block|{chat_id_u}",
-                )
+                f"🆔 <code>{chat_id_u}</code>"
             )
 
         bot.send_message(
@@ -7253,14 +7412,10 @@ def cb_user_approve_action(c):
         return
     uid = int(c.data.split("|")[1])
 
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE users SET approved=1, blocked=0 WHERE chat_id=?",
-        (uid,),
-    )
-    conn.commit()
-    conn.close()
+    ensure_subscription_record(uid)
+    sub = get_subscription(uid)
+    paid_until = parse_subscription_expiry(sub) if sub else None
+    update_user_status(uid, STATUS_ACTIVE, paid_until=paid_until)
 
     apply_referral_bonus(uid)
 
@@ -7272,11 +7427,34 @@ def cb_user_approve_action(c):
     try:
         bot.send_message(
             uid,
-            "🎉 Hesabınız admin tərəfindən təsdiqləndi. Artıq botdan istifadə edə bilərsiniz.",
+            "🎉 Hesabınız admin tərəfindən aktiv edildi. Ödəniş statusunu yoxlayın.",
         )
     except:
         pass
 
+    show_all_users(c.message.chat.id, "pending")
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("user_demo|"))
+def cb_user_demo_action(c):
+    if not is_admin(c.message.chat.id):
+        return
+    uid = int(c.data.split("|")[1])
+    ensure_subscription_record(uid)
+    expires = datetime.utcnow() + timedelta(days=3)
+    set_subscription(uid, "demo", expires, is_active=1, is_demo=1, note="admin_demo")
+    mark_demo_used(uid, expires)
+    try:
+        bot.send_message(
+            uid,
+            "🎉 Admin tərəfindən 3 günlük demo aktiv edildi!\nBotdan tam istifadə edə bilərsiniz.",
+        )
+    except Exception:
+        pass
+    try:
+        bot.answer_callback_query(c.id, "🎁 Demo verildi")
+    except Exception:
+        pass
     show_all_users(c.message.chat.id, "pending")
 
 
@@ -8321,6 +8499,7 @@ def subscription_notifier():
                     )
                     conn2.commit()
                     conn2.close()
+                    update_user_status(chat_id, STATUS_PENDING)
                     try:
                         bot.send_message(chat_id, "⛔ Hesabınızın müddəti bitdi")
                     except Exception:
@@ -8338,6 +8517,45 @@ def subscription_notifier():
                         except Exception:
                             pass
                         subscription_warn_cache.add(key)
+
+            conn_demo = get_local_conn()
+            cur_demo = conn_demo.cursor()
+            cur_demo.execute(
+                "SELECT chat_id, demo_end_at FROM users WHERE status=?",
+                (STATUS_DEMO,),
+            )
+            demo_rows = cur_demo.fetchall()
+            conn_demo.close()
+            for demo_row in demo_rows:
+                demo_chat = demo_row["chat_id"]
+                demo_end_raw = demo_row["demo_end_at"]
+                demo_end = parse_dt_safe(demo_end_raw)
+                if not demo_end:
+                    continue
+                warn_key = (demo_chat, demo_end.date(), "warn")
+                end_key = (demo_chat, demo_end.isoformat(), "end")
+                if demo_end <= now:
+                    if end_key not in demo_warn_cache:
+                        update_user_status(demo_chat, STATUS_PENDING)
+                        try:
+                            bot.send_message(
+                                demo_chat,
+                                "💳 Demo bitdi. Ödəniş edərək botdan istifadəni davam etdirə bilərsiniz.",
+                            )
+                        except Exception:
+                            pass
+                        demo_warn_cache.add(end_key)
+                    continue
+                if timedelta(0) < (demo_end - now) <= timedelta(hours=6):
+                    if warn_key not in demo_warn_cache:
+                        try:
+                            bot.send_message(
+                                demo_chat,
+                                "🔔 Demo bitməsinə 6 saat qalıb. Davam etmək üçün ödəniş edin.",
+                            )
+                        except Exception:
+                            pass
+                        demo_warn_cache.add(warn_key)
         except Exception as e:
             print("Subscription notifier error:", e)
         time.sleep(3600)
@@ -8378,6 +8596,7 @@ def main_menu(chat_id):
 if __name__ == "__main__":
     print("⚙️ BestHome Unified Bot FULL v9 işə düşür...")
     init_local_db()
+    migrate_user_statuses()
     init_agents_db()
     init_main_db_indices()
     ensure_fts_tables()
