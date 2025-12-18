@@ -31,7 +31,10 @@ from urllib.parse import quote, unquote
 import requests
 from flask import Flask
 import telebot
+from telebot import apihelper
 from telebot import types
+
+apihelper.ENABLE_MIDDLEWARE = True
 
 # ==============================
 # 💳 ABUNƏLİK KONFİQURASİYASI
