@@ -97,6 +97,7 @@ admin_reply_state = {}
 last_complaint_time = {}
 admin_stats_period = {}
 admin_direct_message_state = {}
+admin_user_message_state = {}
 BLOCKED_MESSAGE_TEXT = "Hesabınız müvəqqəti olaraq dayandırıldı."
 STATUS_PENDING = "pending"
 STATUS_ACTIVE_PAID = "active_paid"
@@ -7863,6 +7864,13 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
             )
         )
 
+        msg_button = types.InlineKeyboardButton(
+            "💬 Mesaj göndər", callback_data=f"adm_msg:{status}:{uid}:{page}"
+        )
+        stop_button = types.InlineKeyboardButton(
+            "⛔ Dayandır", callback_data=f"adm_stop:{status}:{uid}:{page}"
+        )
+
         if status == "pending":
             mk.row(
                 types.InlineKeyboardButton(
@@ -7877,43 +7885,34 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
                     "♾ Limitsiz et", callback_data=f"user_free|{uid}|{status}|{page}"
                 )
             )
-            mk.row(
+            mk.add(
                 types.InlineKeyboardButton(
                     "❌ Rədd et", callback_data=f"user_reject|{uid}|{status}|{page}"
-                ),
-                types.InlineKeyboardButton(
-                    "⛔ Dayandır", callback_data=f"adm_stop:{status}:{uid}:{page}"
-                ),
+                )
             )
+            mk.row(msg_button, stop_button)
         elif status == "active":
             if row.get("status") == STATUS_ACTIVE_FREE:
-                mk.row(
+                mk.add(
                     types.InlineKeyboardButton(
                         "💳 Ödənişliyə keçir",
                         callback_data=f"user_to_paid|{uid}|{status}|{page}",
-                    ),
-                    types.InlineKeyboardButton(
-                        "⛔ Dayandır", callback_data=f"adm_stop:{status}:{uid}:{page}"
-                    ),
+                    )
                 )
             else:
-                mk.row(
+                mk.add(
                     types.InlineKeyboardButton(
                         "♾ Limitsiz et", callback_data=f"user_free|{uid}|{status}|{page}"
-                    ),
-                    types.InlineKeyboardButton(
-                        "⛔ Dayandır", callback_data=f"adm_stop:{status}:{uid}:{page}"
-                    ),
+                    )
                 )
+            mk.row(msg_button, stop_button)
         elif status == "demo":
-            mk.row(
+            mk.add(
                 types.InlineKeyboardButton(
                     "♾ Limitsiz et", callback_data=f"user_free|{uid}|{status}|{page}"
-                ),
-                types.InlineKeyboardButton(
-                    "⛔ Dayandır", callback_data=f"adm_stop:{status}:{uid}:{page}"
-                ),
+                )
             )
+            mk.row(msg_button, stop_button)
         elif status == "blocked":
             mk.row(
                 types.InlineKeyboardButton(
@@ -7923,6 +7922,7 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
                     "🗑 Tam sil", callback_data=f"user_delete|{uid}|{status}|{page}"
                 ),
             )
+            mk.row(msg_button, stop_button)
         elif status == "rejected":
             mk.row(
                 types.InlineKeyboardButton(
@@ -7932,12 +7932,9 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
                     "🗑 Tam sil", callback_data=f"user_delete|{uid}|{status}|{page}"
                 ),
             )
+            mk.row(msg_button, stop_button)
         else:
-            mk.add(
-                types.InlineKeyboardButton(
-                    "⛔ Dayandır", callback_data=f"adm_stop:{status}:{uid}:{page}"
-                )
-            )
+            mk.row(msg_button, stop_button)
 
     nav_buttons = [
         types.InlineKeyboardButton("⏮ İlk", callback_data=f"adm_u:{status}:1"),
@@ -7981,6 +7978,164 @@ def get_admin_user_page(chat_id: int, list_type: str) -> int:
     except Exception:
         return 1
 
+
+def build_admin_msg_back_markup(list_type: str, page: int) -> types.InlineKeyboardMarkup:
+    mk = types.InlineKeyboardMarkup()
+    mk.add(
+        types.InlineKeyboardButton(
+            "⬅️ Geri", callback_data=f"adm_msg_back:{list_type}:{page}"
+        )
+    )
+    return mk
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_msg:"))
+def cb_admin_start_user_message(c):
+    if not is_admin(c.message.chat.id):
+        return
+
+    try:
+        _, list_type, uid_raw, page_raw = c.data.split(":")
+        target_uid = int(uid_raw)
+        page = int(page_raw)
+    except Exception:
+        list_type = "active"
+        page = get_admin_user_page(c.message.chat.id, list_type)
+        target_uid = None
+
+    if not target_uid:
+        try:
+            bot.answer_callback_query(c.id, "⚠️ İstifadəçi tapılmadı")
+        except Exception:
+            pass
+        show_all_users(
+            c.message.chat.id,
+            list_type,
+            page=page,
+            message=c.message,
+        )
+        return
+
+    admin_user_message_state[c.message.chat.id] = {
+        "mode": "send_user_msg",
+        "target_user_id": target_uid,
+        "return_list": list_type,
+        "return_page": page,
+        "origin_message": c.message,
+    }
+
+    mk = build_admin_msg_back_markup(list_type, page)
+    try:
+        bot.send_message(
+            c.message.chat.id,
+            "✍️ Mesajı yazın. Ləğv üçün ⬅️ Geri",
+            reply_markup=mk,
+        )
+    except Exception:
+        pass
+
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(
+    func=lambda c: c.data.startswith("adm_msg_back:")
+    or c.data.startswith("adm_msg_cancel:")
+)
+def cb_admin_cancel_user_message(c):
+    if not is_admin(c.message.chat.id):
+        return
+
+    parts = c.data.split(":")
+    list_type = parts[1] if len(parts) > 1 else "active"
+    try:
+        page = int(parts[2]) if len(parts) > 2 else get_admin_user_page(c.message.chat.id, list_type)
+    except Exception:
+        page = get_admin_user_page(c.message.chat.id, list_type)
+
+    state = admin_user_message_state.pop(c.message.chat.id, None)
+    origin_message = None
+    if state and state.get("origin_message"):
+        origin_message = state.get("origin_message")
+
+    show_all_users(
+        c.message.chat.id,
+        list_type,
+        page=page,
+        message=origin_message if origin_message else c.message,
+    )
+
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.message_handler(
+    func=lambda m: is_admin(m.chat.id)
+    and admin_user_message_state.get(m.chat.id, {}).get("mode") == "send_user_msg"
+)
+def handle_admin_user_message_text(message):
+    state = admin_user_message_state.pop(message.chat.id, None)
+    if not state:
+        return
+
+    target_uid = state.get("target_user_id")
+    list_type = state.get("return_list") or "active"
+    try:
+        page = int(state.get("return_page") or get_admin_user_page(message.chat.id, list_type))
+    except Exception:
+        page = get_admin_user_page(message.chat.id, list_type)
+    origin_message = state.get("origin_message")
+
+    if not target_uid:
+        show_all_users(message.chat.id, list_type, page=page, message=origin_message)
+        return
+
+    if not message.text or not str(message.text).strip():
+        admin_user_message_state[message.chat.id] = state
+        mk = build_admin_msg_back_markup(list_type, page)
+        try:
+            bot.send_message(
+                message.chat.id,
+                "⚠️ Mesaj boş ola bilməz. Yenidən yaz:",
+                reply_markup=mk,
+            )
+        except Exception:
+            pass
+        return
+
+    text_to_send = str(message.text).strip()
+    error_text = None
+
+    try:
+        bot.send_message(target_uid, text_to_send)
+    except Exception as e:
+        err_low = str(e).lower()
+        if "forbidden" in err_low or "blocked" in err_low or "403" in str(e):
+            error_text = "⚠️ Mesaj göndərilmədi. İstifadəçi botu bloklayıb."
+        else:
+            error_text = "⚠️ Mesaj göndərilə bilmədi. İstifadəçi əlçatmazdır."
+    else:
+        try:
+            bot.send_message(message.chat.id, f"✅ Mesaj göndərildi. 🆔 {target_uid}")
+        except Exception:
+            pass
+
+    if error_text:
+        try:
+            bot.send_message(message.chat.id, error_text)
+        except Exception:
+            pass
+
+    show_all_users(
+        message.chat.id,
+        list_type,
+        page=page,
+        message=origin_message if origin_message else None,
+    )
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_stop:"))
 def cb_admin_stop_user(c):
