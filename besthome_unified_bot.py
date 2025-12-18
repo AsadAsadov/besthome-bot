@@ -23,6 +23,7 @@ import re
 import random
 import shutil
 import tempfile
+from collections import defaultdict
 from datetime import datetime, date, timedelta
 from typing import Optional, Tuple, List
 from urllib.parse import quote, unquote
@@ -85,6 +86,7 @@ search_state = {}  # Axtarış paging və filter state
 customer_request_state = {}
 agent_request_lookup_state = {}
 CUSTOMER_REQUEST_COOLDOWN_SECONDS = 300
+ui_state = defaultdict(list)
 
 bot = telebot.TeleBot(BOT_TOKEN)
 BOT_USERNAME = bot.get_me().username
@@ -187,6 +189,33 @@ def send_or_edit(bot, chat_id, text, reply_markup=None, parse_mode="HTML"):
             parse_mode=parse_mode,
         )
         USER_LAST_MESSAGE[chat_id] = msg.message_id
+
+
+def safe_clear_ui(bot, chat_id, message_ids):
+    try:
+        for mid in message_ids[-5:]:
+            bot.delete_message(chat_id, mid)
+    except:
+        pass
+
+
+_original_send_message = bot.send_message
+
+
+def send_message_tracked(*args, **kwargs):
+    msg = _original_send_message(*args, **kwargs)
+    try:
+        chat_id = kwargs.get("chat_id")
+        if chat_id is None and args:
+            chat_id = args[0]
+        if chat_id is not None and msg and msg.message_id not in ui_state[chat_id]:
+            ui_state[chat_id].append(msg.message_id)
+    except Exception:
+        pass
+    return msg
+
+
+bot.send_message = send_message_tracked
 
 
 def reset_user_state(chat_id):
@@ -1424,7 +1453,7 @@ def maybe_award_milestone_bonus(referrer_chat_id: int):
     )
     record_referral_log(referrer_chat_id, None, REFERRAL_MILESTONE_BONUS_DAYS)
     try:
-        bot.send_message(
+        msg = bot.send_message(
             referrer_chat_id,
             (
                 "🏆 Möhtəşəm!\n\n"
@@ -1467,7 +1496,7 @@ def apply_referral_bonus(referred_chat_id: int):
     record_referral_log(referrer_id, referred_chat_id, REFERRAL_REWARD_DAYS)
     mark_referral_rewarded(referred_chat_id)
     try:
-        bot.send_message(
+        msg = bot.send_message(
             referrer_id,
             (
                 "🎉 Təbriklər!\n\n"
@@ -1783,7 +1812,7 @@ def build_payment_menu_markup(chat_id: int):
 
 def send_payment_menu(chat_id: int):
     mk = build_payment_menu_markup(chat_id)
-    bot.send_message(
+    msg = bot.send_message(
         chat_id,
         "💳 Abunəlik planını seç və ödəniş et:\n\n" "✅ Demo bitibsə, yeniləmək üçün plan seçin.",
         reply_markup=mk,
@@ -1804,14 +1833,19 @@ def check_subscription(chat_id: int, silent: bool = False) -> bool:
     if status == STATUS_BLOCKED:
         if not silent:
             try:
-                bot.send_message(chat_id, "❌ Hesabınız deaktiv edilib. Dəstək ilə əlaqə saxlayın.")
+                msg = bot.send_message(
+                    chat_id, "❌ Hesabınız deaktiv edilib. Dəstək ilə əlaqə saxlayın."
+                )
             except Exception:
                 pass
         return False
     if status == STATUS_REJECTED:
         if not silent:
             try:
-                bot.send_message(chat_id, "❌ Sorğunuz rədd edilib. Daha sonra yenidən müraciət edə bilərsiniz.")
+                msg = bot.send_message(
+                    chat_id,
+                    "❌ Sorğunuz rədd edilib. Daha sonra yenidən müraciət edə bilərsiniz.",
+                )
             except Exception:
                 pass
         return False
