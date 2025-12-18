@@ -24,7 +24,7 @@ import random
 import shutil
 import tempfile
 from datetime import datetime, date, timedelta
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 from urllib.parse import quote
 
 import requests
@@ -153,6 +153,7 @@ COMPLAINT_COOLDOWN_SECONDS = 300
 
 # Admin user lists
 PAGE_SIZE_USERS = 10
+PAGE_SIZE_NOTIFICATIONS = 10
 admin_user_page_state = {}
 
 
@@ -611,9 +612,24 @@ def init_local_db():
             rayon TEXT,
             prop_type TEXT,
             created_at TEXT,
-            last_notified_at TEXT
+            last_notified_at TEXT,
+            is_active INTEGER DEFAULT 1
         )
-    """
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            criteria_id INTEGER,
+            listing_id INTEGER,
+            created_at TEXT,
+            status TEXT DEFAULT 'new',
+            UNIQUE(chat_id, criteria_id, listing_id)
+        )
+        """
     )
 
     cur.execute(
@@ -684,6 +700,10 @@ def init_local_db():
     if "created_at" not in saved_cols:
         cur.execute(
             "ALTER TABLE saved_searches ADD COLUMN created_at TEXT"
+        )
+    if "is_active" not in saved_cols:
+        cur.execute(
+            "ALTER TABLE saved_searches ADD COLUMN is_active INTEGER DEFAULT 1"
         )
 
     conn.commit()
@@ -1977,6 +1997,75 @@ def save_search(chat_id: int, params: dict):
     conn.commit()
     conn.close()
     return True
+
+
+def ensure_notification_records(
+    chat_id: int, criteria_id: Optional[int], listing_ids: List[int]
+) -> int:
+    if not listing_ids:
+        return 0
+
+    now_iso = datetime.utcnow().isoformat()
+    conn = get_local_conn()
+    cur = conn.cursor()
+    inserted = 0
+    for lid in listing_ids:
+        try:
+            lid_int = int(lid)
+        except Exception:
+            continue
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO user_notifications
+            (chat_id, criteria_id, listing_id, created_at, status)
+            VALUES (?, ?, ?, ?, 'new')
+            """,
+            (chat_id, criteria_id, lid_int, now_iso),
+        )
+        if cur.rowcount and cur.rowcount > 0:
+            inserted += 1
+    conn.commit()
+    conn.close()
+    return inserted
+
+
+def fetch_listing_for_notification(listing_id: int):
+    try:
+        lid = int(listing_id)
+    except Exception:
+        return None
+
+    if os.path.exists(MAIN_DB):
+        conn_main = get_main_conn()
+        cur_main = conn_main.cursor()
+        cur_main.execute("SELECT * FROM listings WHERE id=?", (lid,))
+        row_main = cur_main.fetchone()
+        if row_main:
+            d_main = dict(row_main)
+            d_main["__source"] = "main"
+            close_main_conn(conn_main)
+            return d_main
+        close_main_conn(conn_main)
+
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM listings_approved WHERE id=?", (lid,))
+    row = cur.fetchone()
+    conn.close()
+    if row:
+        d = dict(row)
+        d["__source"] = "local"
+        return d
+    return None
+
+
+def get_saved_searches(chat_id: int):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM saved_searches WHERE chat_id=?", (chat_id,))
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows
 
 
 def get_status_map():
@@ -4329,6 +4418,193 @@ def format_saved_search_entry(row: dict) -> str:
     return " | ".join(parts)
 
 
+def show_notifications_inbox(chat_id: int, page: int = 1, message=None):
+    page = max(1, int(page or 1))
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM user_notifications WHERE chat_id=?", (chat_id,))
+    total = cur.fetchone()[0] or 0
+
+    if total == 0:
+        conn.close()
+        mk_empty = types.InlineKeyboardMarkup()
+        mk_empty.add(
+            types.InlineKeyboardButton("⚙️ Kriteriyalar", callback_data="notif_crit")
+        )
+        try:
+            if message:
+                bot.edit_message_text(
+                    "🔔 Yeni bildiriş yoxdur.",
+                    chat_id=message.chat.id,
+                    message_id=message.message_id,
+                    reply_markup=mk_empty,
+                )
+            else:
+                bot.send_message(chat_id, "🔔 Yeni bildiriş yoxdur.", reply_markup=mk_empty)
+        except Exception:
+            pass
+        return
+
+    total_pages = max(1, math.ceil(total / PAGE_SIZE_NOTIFICATIONS))
+    if page > total_pages:
+        page = total_pages
+    offset = (page - 1) * PAGE_SIZE_NOTIFICATIONS
+
+    cur.execute(
+        """
+        SELECT * FROM user_notifications
+        WHERE chat_id=?
+        ORDER BY datetime(created_at) DESC
+        LIMIT ? OFFSET ?
+        """,
+        (chat_id, PAGE_SIZE_NOTIFICATIONS, offset),
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+
+    unseen_ids = [r.get("id") for r in rows if r.get("status") == "new"]
+    if unseen_ids:
+        placeholders = ",".join(["?"] * len(unseen_ids))
+        cur.execute(
+            f"UPDATE user_notifications SET status='seen' WHERE id IN ({placeholders})",
+            unseen_ids,
+        )
+        conn.commit()
+    conn.close()
+
+    header_lines = [
+        "🔔 Bildirişlər",
+        f"Səhifə: {page} / {total_pages}",
+        f"Cəmi: {total}",
+    ]
+    mk = types.InlineKeyboardMarkup()
+    nav_buttons = [
+        types.InlineKeyboardButton("⏮ İlk", callback_data="notif_open:1"),
+        types.InlineKeyboardButton(
+            "◀️ Geri", callback_data=f"notif_open:{max(1, page - 1)}"
+        ),
+        types.InlineKeyboardButton(
+            f"📄 {page} / {total_pages}", callback_data=f"notif_open:{page}"
+        ),
+        types.InlineKeyboardButton(
+            "▶️ İrəli", callback_data=f"notif_open:{min(total_pages, page + 1)}"
+        ),
+        types.InlineKeyboardButton(
+            "⏭ Son", callback_data=f"notif_open:{total_pages}"
+        ),
+    ]
+    mk.row(*nav_buttons)
+    mk.add(types.InlineKeyboardButton("⚙️ Kriteriyalar", callback_data="notif_crit"))
+
+    header_text = "\n".join(header_lines)
+    try:
+        if message:
+            bot.edit_message_text(
+                header_text,
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=mk,
+            )
+        else:
+            bot.send_message(chat_id, header_text, reply_markup=mk)
+    except Exception:
+        pass
+
+    for r in rows:
+        listing = fetch_listing_for_notification(r.get("listing_id"))
+        if listing:
+            try:
+                send_listing_card(
+                    chat_id,
+                    listing,
+                    source=listing.get("__source", "main"),
+                    with_fav_button=True,
+                    status_controls=False,
+                    track_view=False,
+                    viewer_id=chat_id,
+                )
+            except Exception:
+                continue
+        else:
+            try:
+                bot.send_message(chat_id, f"🗂 Elan tapılmadı: ID {r.get('listing_id')}")
+            except Exception:
+                pass
+
+
+def send_criteria_list(chat_id: int, message=None):
+    rows = get_saved_searches(chat_id)
+    mk = types.InlineKeyboardMarkup()
+    if not rows:
+        mk.add(types.InlineKeyboardButton("⬅️ Bildirişlər", callback_data="notif_open:1"))
+        try:
+            if message:
+                bot.edit_message_text(
+                    "⚙️ Saxlanılmış kriteriya yoxdur.",
+                    chat_id=message.chat.id,
+                    message_id=message.message_id,
+                    reply_markup=mk,
+                )
+            else:
+                bot.send_message(
+                    chat_id,
+                    "⚙️ Saxlanılmış kriteriya yoxdur.",
+                    reply_markup=mk,
+                )
+        except Exception:
+            pass
+        return
+
+    for row in rows:
+        row = row or {}
+        cid = row.get("id")
+        status_flag = row.get("is_active", 1)
+        status_txt = "🟢 Aktiv" if status_flag else "⚪️ Deaktiv"
+        descr = format_saved_search_entry(row)
+        mk.add(
+            types.InlineKeyboardButton(
+                f"{status_txt} | {descr}", callback_data=f"crit_toggle:{cid}"
+            )
+        )
+        mk.add(
+            types.InlineKeyboardButton(
+                "🗑 Sil", callback_data=f"crit_del:{cid}"
+            )
+        )
+
+    mk.add(types.InlineKeyboardButton("⬅️ Bildirişlər", callback_data="notif_open:1"))
+    try:
+        if message:
+            bot.edit_message_text(
+                "⚙️ Bildiriş kriteriyaları:",
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=mk,
+            )
+        else:
+            bot.send_message(chat_id, "⚙️ Bildiriş kriteriyaları:", reply_markup=mk)
+    except Exception:
+        pass
+
+
+def set_saved_search_active(chat_id: int, criteria_id: int, active: bool):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE saved_searches SET is_active=? WHERE id=? AND chat_id=?",
+        (1 if active else 0, criteria_id, chat_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_saved_search_for_user(chat_id: int, criteria_id: int):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM saved_searches WHERE id=? AND chat_id=?", (criteria_id, chat_id))
+    conn.commit()
+    conn.close()
+
+
 @bot.message_handler(
     func=lambda m: not is_admin(m.chat.id) and m.text == ADMIN_PANEL_BACK_MAIN
 )
@@ -4343,21 +4619,7 @@ def show_saved_notifications(message):
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT operation, rooms, price_min, price_max, rayon, prop_type FROM saved_searches WHERE chat_id=?",
-        (chat_id,),
-    )
-    rows = cur.fetchall()
-    conn.close()
-
-    if not rows:
-        bot.send_message(chat_id, "🔔 Aktiv bildirişiniz yoxdur.")
-        return
-
-    lines = [format_saved_search_entry(dict(r)) for r in rows]
-    bot.send_message(chat_id, "🔔 Aktiv bildirişləriniz:\n" + "\n".join(lines))
+    show_notifications_inbox(chat_id, page=1, message=None)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ss|"))
@@ -4431,6 +4693,99 @@ def cb_save_search(c):
         st.pop("pending_save", None)
     else:
         st.pop("pending_save", None)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("notif_open:"))
+def cb_open_notifications(c):
+    if not ensure_allowed_cb(c):
+        return
+    try:
+        page = int(c.data.split(":")[1])
+    except Exception:
+        page = 1
+    show_notifications_inbox(c.message.chat.id, page=page, message=c.message)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "notif_crit")
+def cb_notif_criteria(c):
+    if not ensure_allowed_cb(c):
+        return
+    send_criteria_list(c.message.chat.id, message=c.message)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("notif_stopcrit:"))
+def cb_stop_criteria(c):
+    if not ensure_allowed_cb(c):
+        return
+    try:
+        criteria_id = int(c.data.split(":")[1])
+    except Exception:
+        criteria_id = None
+
+    if criteria_id:
+        set_saved_search_active(c.message.chat.id, criteria_id, False)
+        try:
+            bot.send_message(c.message.chat.id, "✅ Kriteriya dayandırıldı.")
+        except Exception:
+            pass
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("crit_toggle:"))
+def cb_toggle_criteria(c):
+    if not ensure_allowed_cb(c):
+        return
+    try:
+        criteria_id = int(c.data.split(":")[1])
+    except Exception:
+        criteria_id = None
+
+    if criteria_id:
+        conn = get_local_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT is_active FROM saved_searches WHERE id=? AND chat_id=?",
+            (criteria_id, c.message.chat.id),
+        )
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            current = row[0] if isinstance(row, tuple) else row["is_active"]
+            set_saved_search_active(c.message.chat.id, criteria_id, not bool(current))
+    send_criteria_list(c.message.chat.id, message=c.message)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("crit_del:"))
+def cb_delete_criteria(c):
+    if not ensure_allowed_cb(c):
+        return
+    try:
+        criteria_id = int(c.data.split(":")[1])
+    except Exception:
+        criteria_id = None
+
+    if criteria_id:
+        delete_saved_search_for_user(c.message.chat.id, criteria_id)
+    send_criteria_list(c.message.chat.id, message=c.message)
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -4879,6 +5234,8 @@ def process_saved_search_notifications():
     now_iso = datetime.utcnow().isoformat()
 
     for s in searches:
+        if str(s.get("is_active", 1)) in {"0", "False", "false"}:
+            continue
         since_raw = s.get("last_notified_at") or s.get("created_at")
         try:
             since_dt = datetime.fromisoformat(str(since_raw)) if since_raw else datetime.min
@@ -4891,20 +5248,17 @@ def process_saved_search_notifications():
         if not matches:
             continue
 
-        try:
-            bot.send_message(
-                s["chat_id"],
-                "🔔 Axtardığınız kriteriyalara uyğun YENİ ELAN tapıldı",
-            )
-            for ev in matches[:3]:
-                send_listing_card(
-                    s["chat_id"],
-                    ev,
-                    source=ev.get("__source", "main"),
-                    with_fav_button=True,
-                )
-        except Exception as e:
-            print("⚠️ Notification send error:", e)
+        listing_ids = []
+        for ev in matches:
+            listing_id = ev.get("id") or ev.get("ID") or ev.get("Elan_kodu")
+            if listing_id is None:
+                continue
+            try:
+                listing_ids.append(int(listing_id))
+            except Exception:
+                continue
+
+        new_count = ensure_notification_records(s["chat_id"], s.get("id"), listing_ids)
 
         conn = get_local_conn()
         cur = conn.cursor()
@@ -4914,6 +5268,31 @@ def process_saved_search_notifications():
         )
         conn.commit()
         conn.close()
+
+        if new_count <= 0:
+            continue
+
+        text = (
+            f"🔔 Axtardığınız kriteriyaya uyğun {new_count} yeni elan tapıldı — "
+            "Bildirişlər bölməsinə baxın"
+        )
+        mk = types.InlineKeyboardMarkup()
+        mk.row(
+            types.InlineKeyboardButton("👀 Elanları gör", callback_data="notif_open:1"),
+            types.InlineKeyboardButton("⚙️ Kriteriyalar", callback_data="notif_crit"),
+        )
+        if s.get("id"):
+            mk.add(
+                types.InlineKeyboardButton(
+                    "❌ Bu kriteriyanı dayandır",
+                    callback_data=f"notif_stopcrit:{s['id']}",
+                )
+            )
+
+        try:
+            bot.send_message(s["chat_id"], text, reply_markup=mk)
+        except Exception as e:
+            print("⚠️ Notification send error:", e)
 
 
 def saved_search_worker():
@@ -7829,11 +8208,16 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
         uid = row.get("chat_id")
         name = row.get("full_name") or "—"
         username_value = f"@{row['username']}" if row.get("username") else "—"
+        profile_url = (
+            f"https://t.me/{row['username']}"
+            if row.get("username")
+            else f"tg://user?id={uid}"
+        )
         join_date, join_time = fmt_dt(row.get("joined_at"))
 
         entry_lines = [
             f"👤 Ad: {name}",
-            f"🆔 ID: <code>{uid}</code>",
+            f"🆔 ID: <a href=\"{profile_url}\">{uid}</a>",
             f"👤 Username: {username_value}",
         ]
 
@@ -7858,11 +8242,8 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
 
         text_lines.append("\n".join(entry_lines))
 
-        mk.add(
-            types.InlineKeyboardButton(
-                f"🆔 {uid}", callback_data=f"user_search|{uid}"
-            )
-        )
+        mk.add(types.InlineKeyboardButton(f"🆔 ID: {uid}", url=profile_url))
+        mk.add(types.InlineKeyboardButton("👤 Profilə bax", url=profile_url))
 
         msg_button = types.InlineKeyboardButton(
             "💬 Mesaj göndər", callback_data=f"adm_msg:{status}:{uid}:{page}"
