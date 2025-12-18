@@ -80,6 +80,9 @@ print("✅ Bütün DB-lər tapıldı və hazırdır")
 # ==============================
 user_state = {}  # Yeni elan prosesi
 search_state = {}  # Axtarış paging və filter state
+customer_request_state = {}
+agent_request_lookup_state = {}
+CUSTOMER_REQUEST_COOLDOWN_SECONDS = 300
 
 bot = telebot.TeleBot(BOT_TOKEN)
 BOT_USERNAME = bot.get_me().username
@@ -606,6 +609,26 @@ def init_local_db():
             last_notified_at TEXT
         )
     """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS customer_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            request_type TEXT,
+            rayon TEXT,
+            rooms TEXT,
+            budget TEXT,
+            notes TEXT,
+            phone TEXT,
+            created_at DATETIME DEFAULT (CURRENT_TIMESTAMP),
+            status TEXT DEFAULT 'active'
+        )
+        """
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_customer_requests_status ON customer_requests(status)"
     )
 
     # Axtarış logları
@@ -2378,6 +2401,7 @@ def send_main_menu(chat_id: int):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("📝 Yeni elan əlavə et")
     kb.row("🔎 Axtarış sistemi")
+    kb.row("📝 Ev axtarıram")
     kb.row("📂 Elan statusları")
     kb.row("⭐ Favorilərim", "📋 Elanlarım")
     kb.row("💳 Ödəniş", "ℹ️ Haqqında")
@@ -2708,6 +2732,322 @@ def share_referral(message):
     )
     bot.send_message(chat_id, text)
 
+
+# =============== 📝 MÜŞTƏRİ SORĞULARI ===============
+
+
+REQUEST_RAYONS = [
+    "Binəqədi",
+    "Qaradağ",
+    "Sabunçu",
+    "Səbail",
+    "Suraxanı",
+    "Xəzər",
+    "Nərimanov",
+    "Nəsimi",
+    "Nizami",
+    "Pirallahı",
+    "Xətai",
+    "Yasamal",
+    "Xırdalan",
+    "Abşeron",
+    "Sumqayıt",
+    "Digər",
+]
+
+
+def build_request_rayon_keyboard(include_back: bool = True) -> types.ReplyKeyboardMarkup:
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    row = []
+    for rayon in REQUEST_RAYONS:
+        row.append(rayon)
+        if len(row) == 3:
+            kb.row(*row)
+            row = []
+    if row:
+        kb.row(*row)
+    if include_back:
+        kb.row("⬅️ Geri (Əsas menyu)")
+    return kb
+
+
+def build_request_rooms_keyboard() -> types.ReplyKeyboardMarkup:
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row("1", "2")
+    kb.row("3", "4+")
+    kb.row("⬅️ Geri (Əsas menyu)")
+    return kb
+
+
+def reset_customer_request(chat_id: int):
+    customer_request_state.pop(chat_id, None)
+
+
+def get_customer_request_step(chat_id: int) -> Optional[str]:
+    return customer_request_state.get(chat_id, {}).get("step")
+
+
+def handle_customer_request_nav(message) -> bool:
+    chat_id = message.chat.id
+    if message.text in {"⬅️ Geri (Əsas menyu)", *CANCEL_CMDS}:
+        reset_customer_request(chat_id)
+        bot.send_message(chat_id, "❌ Sorğu ləğv edildi.")
+        return_to_main_menu(chat_id)
+        return True
+    return False
+
+
+def validate_phone_number(phone: str) -> bool:
+    if not phone:
+        return False
+    digits = re.sub(r"[^0-9]", "", phone)
+    if len(digits) < 9:
+        return False
+    pattern = r"^\+?\d[\d\s\-()]{7,}$"
+    return bool(re.match(pattern, phone.strip()))
+
+
+def check_request_rate_limit(chat_id: int) -> Optional[int]:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT created_at FROM customer_requests WHERE chat_id=? ORDER BY datetime(created_at) DESC LIMIT 1",
+        (chat_id,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    last_dt = parse_dt_safe(row[0] if not isinstance(row, dict) else row.get("created_at"))
+    if not last_dt:
+        return None
+    diff = datetime.utcnow() - last_dt
+    remaining = CUSTOMER_REQUEST_COOLDOWN_SECONDS - diff.total_seconds()
+    if remaining > 0:
+        return int(remaining)
+    return None
+
+
+def persist_customer_request(chat_id: int, data: dict):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO customer_requests (chat_id, request_type, rayon, rooms, budget, notes, phone, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
+        """,
+        (
+            chat_id,
+            data.get("request_type"),
+            data.get("rayon"),
+            data.get("rooms"),
+            data.get("budget"),
+            data.get("notes"),
+            data.get("phone"),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def format_customer_request_card(row: dict) -> str:
+    req_type = row.get("request_type")
+    req_txt = "Alış" if req_type == "buy" else "Kirayə"
+    created_raw = row.get("created_at")
+    created_dt = parse_dt_safe(created_raw)
+    date_txt = created_dt.strftime("%d.%m.%Y") if created_dt else "-"
+
+    lines = [
+        "━━━━━━━━━━━━━━━━━━",
+        "👤 Müştəri istəyi",
+        f"📍 Rayon: {row.get('rayon') or '-'}",
+        f"🏠 Tip: {req_txt}",
+        f"🚪 Otaq: {row.get('rooms') or '-'}",
+        f"💰 Büdcə: {row.get('budget') or '-'}",
+        f"📝 Qeyd: {row.get('notes') or '-'}",
+        f"📞 Əlaqə: {row.get('phone') or '-'}",
+        f"📅 Tarix: {date_txt}",
+        "━━━━━━━━━━━━━━━━━━",
+    ]
+    return "\n".join(lines)
+
+
+def fetch_active_requests_by_rayon(
+    rayon: str, limit: int = 50, include_all_status: bool = False
+) -> list:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    query = "SELECT * FROM customer_requests WHERE LOWER(rayon) LIKE LOWER(?)"
+    params = [f"%{rayon.strip()}%"]
+    if not include_all_status:
+        query += " AND status='active'"
+    query += " ORDER BY datetime(created_at) DESC LIMIT ?"
+    params.append(limit)
+    cur.execute(query, params)
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def show_request_type_menu(chat_id: int):
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row("🏠 Almaq istəyirəm")
+    kb.row("🏢 Kirayə götürmək istəyirəm")
+    kb.row("⬅️ Geri (Əsas menyu)")
+    bot.send_message(chat_id, "📝 Nə üçün sorğu yaratmaq istəyirsiniz?", reply_markup=kb)
+
+
+@bot.message_handler(func=lambda m: m.text == "📝 Ev axtarıram")
+def start_customer_request_flow(message):
+    if not ensure_allowed(message):
+        return
+    chat_id = message.chat.id
+    if not is_user_allowed(chat_id):
+        bot.send_message(chat_id, "🛑 Sorğu göndərmək üçün hesabınız təsdiqlənməlidir.")
+        return
+    reset_customer_request(chat_id)
+    show_request_type_menu(chat_id)
+
+
+@bot.message_handler(func=lambda m: m.text == "⬅️ Geri (Əsas menyu)")
+def customer_request_back(message):
+    if not ensure_allowed(message):
+        return
+    reset_customer_request(message.chat.id)
+    return_to_main_menu(message.chat.id)
+
+
+@bot.message_handler(
+    func=lambda m: m.text in ["🏠 Almaq istəyirəm", "🏢 Kirayə götürmək istəyirəm"]
+)
+def handle_request_type_selection(message):
+    if not ensure_allowed(message):
+        return
+    chat_id = message.chat.id
+    if not is_user_allowed(chat_id):
+        bot.send_message(chat_id, "🛑 Sorğu göndərmək üçün hesabınız təsdiqlənməlidir.")
+        return
+
+    remaining = check_request_rate_limit(chat_id)
+    if remaining:
+        minutes = math.ceil(remaining / 60)
+        bot.send_message(
+            chat_id,
+            f"⏳ Sorğu artıq mövcuddur. {minutes} dəqiqə sonra yenidən cəhd edin.",
+        )
+        return
+
+    req_type = "buy" if "Almaq" in message.text else "rent"
+    customer_request_state[chat_id] = {"step": "rayon", "request_type": req_type}
+    bot.send_message(
+        chat_id,
+        "📍 Rayon / ərazini seçin və ya yazın:",
+        reply_markup=build_request_rayon_keyboard(),
+    )
+
+
+@bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "rayon")
+def handle_request_rayon(message):
+    if not ensure_allowed(message):
+        return
+    chat_id = message.chat.id
+    if handle_customer_request_nav(message):
+        return
+    val = (message.text or "").strip()
+    if not val:
+        bot.send_message(chat_id, "⚠️ Ərazi boş ola bilməz.")
+        return
+    st = customer_request_state.get(chat_id, {})
+    st["rayon"] = val
+    st["step"] = "rooms"
+    bot.send_message(
+        chat_id,
+        "🚪 Otaq sayını seçin və ya yazın:",
+        reply_markup=build_request_rooms_keyboard(),
+    )
+
+
+@bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "rooms")
+def handle_request_rooms(message):
+    if not ensure_allowed(message):
+        return
+    chat_id = message.chat.id
+    if handle_customer_request_nav(message):
+        return
+    val = (message.text or "").strip()
+    if not val:
+        bot.send_message(chat_id, "⚠️ Otaq sayı boş ola bilməz.")
+        return
+    st = customer_request_state.get(chat_id, {})
+    st["rooms"] = val
+    st["step"] = "budget"
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row("⬅️ Geri (Əsas menyu)")
+    bot.send_message(chat_id, "💰 Büdcəni yazın (məs: 800 AZN):", reply_markup=kb)
+
+
+@bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "budget")
+def handle_request_budget(message):
+    if not ensure_allowed(message):
+        return
+    chat_id = message.chat.id
+    if handle_customer_request_nav(message):
+        return
+    val = (message.text or "").strip()
+    if not val:
+        bot.send_message(chat_id, "⚠️ Büdcə boş ola bilməz.")
+        return
+    st = customer_request_state.get(chat_id, {})
+    st["budget"] = val
+    st["step"] = "notes"
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row("Keç")
+    kb.row("⬅️ Geri (Əsas menyu)")
+    bot.send_message(
+        chat_id,
+        "📝 Əlavə qeydlər (istəyə bağlı) yazın və ya 'Keç' seçin:",
+        reply_markup=kb,
+    )
+
+
+@bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "notes")
+def handle_request_notes(message):
+    if not ensure_allowed(message):
+        return
+    chat_id = message.chat.id
+    if handle_customer_request_nav(message):
+        return
+    val = (message.text or "").strip()
+    st = customer_request_state.get(chat_id, {})
+    st["notes"] = "" if val.lower() == "keç" else val
+    st["step"] = "phone"
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row("⬅️ Geri (Əsas menyu)")
+    bot.send_message(chat_id, "📞 Əlaqə nömrəsini yazın:", reply_markup=kb)
+
+
+@bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "phone")
+def handle_request_phone(message):
+    if not ensure_allowed(message):
+        return
+    chat_id = message.chat.id
+    if handle_customer_request_nav(message):
+        return
+    phone = (message.text or "").strip()
+    if not validate_phone_number(phone):
+        bot.send_message(chat_id, "⚠️ Telefon nömrəsi düzgün deyil. Misal: 0501234567")
+        return
+
+    st = customer_request_state.get(chat_id, {})
+    st["phone"] = phone
+
+    persist_customer_request(chat_id, st)
+    reset_customer_request(chat_id)
+    bot.send_message(
+        chat_id,
+        "✅ Sorğunuz qeydə alındı.\nUyğun vasitəçilər sizinlə əlaqə saxlayacaq.",
+    )
+    return_to_main_menu(chat_id)
 
 # =============== 📩 Şikayət və təkliflər ===============
 
@@ -7987,6 +8327,12 @@ def agents_button(message):
             callback_data="pub_agents_kw",
         )
     )
+    mk.add(
+        types.InlineKeyboardButton(
+            "🎯 Bu ərazidən maraqlanan müştərilər",
+            callback_data="agent_requests",
+        )
+    )
     bot.send_message(
         message.chat.id,
         "🧑‍💼 Vasitəçi elanları bölməsi:",
@@ -8003,6 +8349,31 @@ def cb_pub_agents_kw(c):
         "🔎 Vasitəçi elanlarında açar söz yaz:",
     )
     bot.register_next_step_handler(msg, pub_agent_search_by_keyword)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "agent_requests")
+def cb_agent_requests(c):
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id
+    if not (is_admin(chat_id) or is_agent_user(chat_id)):
+        try:
+            bot.answer_callback_query(
+                c.id, "❌ Bu bölmə yalnız BestHome agentləri üçündür.", show_alert=True
+            )
+        except Exception:
+            pass
+        return
+    agent_request_lookup_state[chat_id] = {"step": "rayon"}
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+    bot.send_message(
+        chat_id,
+        "📍 Rayon seçin və ya yazın:",
+        reply_markup=build_request_rayon_keyboard(),
+    )
 
 
 def pub_agent_search_by_keyword(message):
@@ -8037,6 +8408,40 @@ def pub_agent_search_by_keyword(message):
     bot.send_message(message.chat.id, f"✅ Tapıldı: {len(rows)} elan.")
     for r in rows:
         send_agent_card(message.chat.id, dict(r))
+
+
+@bot.message_handler(
+    func=lambda m: agent_request_lookup_state.get(m.chat.id, {}).get("step")
+    == "rayon"
+)
+def handle_agent_request_rayon(message):
+    if not ensure_allowed(message):
+        return
+    chat_id = message.chat.id
+    if not (is_admin(chat_id) or is_agent_user(chat_id)):
+        bot.send_message(chat_id, "❌ Bu bölmə yalnız BestHome agentləri üçündür.")
+        agent_request_lookup_state.pop(chat_id, None)
+        return
+    if message.text == "⬅️ Geri (Əsas menyu)":
+        agent_request_lookup_state.pop(chat_id, None)
+        return_to_main_menu(chat_id)
+        return
+    rayon = (message.text or "").strip()
+    if not rayon:
+        bot.send_message(chat_id, "⚠️ Rayon adı boş ola bilməz.")
+        return
+    agent_request_lookup_state.pop(chat_id, None)
+    entries = fetch_active_requests_by_rayon(
+        rayon, include_all_status=is_admin(chat_id)
+    )
+    if not entries:
+        bot.send_message(chat_id, "😕 Bu rayonda aktiv müştəri sorğusu yoxdur.")
+        return
+    bot.send_message(
+        chat_id, f"🎯 {rayon} üzrə aktiv müştəri sorğuları: {len(entries)}"
+    )
+    for row in entries:
+        bot.send_message(chat_id, format_customer_request_card(row))
 
 
 # =============== VASITƏÇİ ANALİTİKASI ===============
@@ -8855,6 +9260,7 @@ def main_menu(chat_id):
     mk = types.ReplyKeyboardMarkup(resize_keyboard=True)
     mk.add("📝 Yeni elan əlavə et")
     mk.add("🔎 Axtarış sistemi")
+    mk.add("📝 Ev axtarıram")
     mk.add("📂 Elan statusları")
     mk.add("⭐ Favorilərim", "📋 Elanlarım")
     mk.add("💳 Ödəniş", "ℹ️ Haqqında")
