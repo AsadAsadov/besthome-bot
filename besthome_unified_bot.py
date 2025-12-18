@@ -25,7 +25,7 @@ import shutil
 import tempfile
 from datetime import datetime, date, timedelta
 from typing import Optional, Tuple, List
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import requests
 from flask import Flask
@@ -123,6 +123,7 @@ ADMIN_PANEL_PAGE1 = [
     "🧪 Demo istifadəçilər",
     "🆔 İstifadəçi ID ilə axtar",
     "👥 İstifadəçilər",
+    "📌 Müştəri istəkləri",
 ]
 ADMIN_PANEL_PAGE2 = [
     "🎟 Promo kodlar",
@@ -142,6 +143,7 @@ ADMIN_PANEL_ACTIONS = set(ADMIN_PANEL_PAGE1 + ADMIN_PANEL_PAGE2)
 PAGE_SIZE = 20
 NEW_LISTING_WINDOW_HOURS = 24
 HOT_VIEWS_THRESHOLD = 50
+PAGE_SIZE_REQ = 10
 COMPLAINT_CATEGORIES = [
     "🐞 Texniki problem",
     "💡 Təklif",
@@ -650,6 +652,15 @@ def init_local_db():
     )
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_customer_requests_status ON customer_requests(status)"
+    )
+    try:
+        cur.execute(
+            "ALTER TABLE customer_requests ADD COLUMN flagged INTEGER DEFAULT 0"
+        )
+    except Exception:
+        pass
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_customer_requests_flagged ON customer_requests(flagged)"
     )
 
     # Axtarış logları
@@ -3146,6 +3157,17 @@ def handle_request_phone(message):
 # =============== 📩 Şikayət və təkliflər ===============
 
 
+def is_complaint_access_allowed(chat_id: int) -> bool:
+    record = get_user_record(chat_id)
+    if record and record.get("status") == STATUS_BLOCKED:
+        try:
+            bot.send_message(chat_id, BLOCKED_MESSAGE_TEXT)
+        except Exception:
+            pass
+        return False
+    return True
+
+
 def build_complaint_categories_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     for cat in COMPLAINT_CATEGORIES:
@@ -3207,14 +3229,14 @@ def notify_admin_complaint(message, category: str, user_text: str):
 
 @bot.message_handler(func=lambda m: m.text == "📩 Şikayət və təkliflər")
 def complaint_entry(message):
-    if not ensure_allowed(message):
+    if not is_complaint_access_allowed(message.chat.id):
         return
     start_complaint_flow(message.chat.id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "open_complaint")
 def cb_open_complaint(c):
-    if not ensure_allowed_cb(c):
+    if not is_complaint_access_allowed(c.message.chat.id):
         return
     try:
         bot.answer_callback_query(c.id)
@@ -6843,6 +6865,292 @@ def handle_admin_panel_action(message):
         start_admin_update_db(chat_id)
     elif txt == "📨 İstifadəçiyə mesaj göndər":
         start_direct_user_message_flow(chat_id)
+    elif txt == "📌 Müştəri istəkləri":
+        show_customer_requests_overview(chat_id, period="day")
+
+
+def get_request_period_start(period: str) -> datetime:
+    now = datetime.now()
+    if period == "week":
+        return now - timedelta(days=7)
+    if period == "month":
+        return datetime(now.year, now.month, 1)
+    return datetime(now.year, now.month, now.day)
+
+
+def fetch_customer_request_stats(period: str):
+    start_dt = get_request_period_start(period)
+    conn = get_local_conn()
+    cur = conn.cursor()
+    params = (start_dt.isoformat(),)
+    cur.execute(
+        """
+        SELECT COUNT(*) as total,
+               SUM(CASE WHEN request_type='buy' THEN 1 ELSE 0 END) as buy_count,
+               SUM(CASE WHEN request_type='rent' THEN 1 ELSE 0 END) as rent_count
+        FROM customer_requests
+        WHERE status!='archived' AND datetime(created_at) >= datetime(?)
+        """,
+        params,
+    )
+    row = cur.fetchone()
+    total = row["total"] if row else 0
+    buy_count = (row["buy_count"] or 0) if row else 0
+    rent_count = (row["rent_count"] or 0) if row else 0
+
+    cur.execute(
+        """
+        SELECT COALESCE(rayon, '-') as rayon, COUNT(*) as cnt
+        FROM customer_requests
+        WHERE status!='archived' AND datetime(created_at) >= datetime(?)
+        GROUP BY rayon
+        ORDER BY cnt DESC
+        """,
+        params,
+    )
+    rayons = [(r["rayon"], r["cnt"]) for r in cur.fetchall()]
+    conn.close()
+    return {
+        "total": total,
+        "buy": buy_count,
+        "rent": rent_count,
+        "rayons": rayons,
+    }
+
+
+def build_period_tabs(selected: str) -> List[types.InlineKeyboardButton]:
+    mapping = {
+        "day": "📆 Bu gün",
+        "week": "🗓 Bu həftə",
+        "month": "🗓 Bu ay",
+    }
+    buttons = []
+    for key, label in mapping.items():
+        prefix = "✅ " if key == selected else ""
+        buttons.append(
+            types.InlineKeyboardButton(prefix + label, callback_data=f"adm_req_period:{key}")
+        )
+    return buttons
+
+
+def show_customer_requests_overview(chat_id: int, period: str = "day"):
+    stats = fetch_customer_request_stats(period)
+    text_lines = [
+        f"📌 Müştəri istəkləri — {('Bu gün' if period=='day' else 'Bu həftə' if period=='week' else 'Bu ay')}",
+        "",
+        f"Ümumi istək sayı: {stats['total']}",
+        f"Satınalma: {stats['buy']} | Kirayə: {stats['rent']}",
+        "",
+        "Rayonlara görə dağılım:",
+    ]
+    if stats["rayons"]:
+        text_lines += [f"• {r}: {cnt}" for r, cnt in stats["rayons"]]
+    else:
+        text_lines.append("• Sorğu yoxdur")
+
+    mk = types.InlineKeyboardMarkup()
+    period_buttons = build_period_tabs(period)
+    mk.row(*period_buttons)
+    mk.add(types.InlineKeyboardButton("⭐ İşarələnənlər", callback_data="adm_req_viewflag:1"))
+
+    for i in range(0, len(stats["rayons"]), 2):
+        row = []
+        for rayon, cnt in stats["rayons"][i : i + 2]:
+            encoded = quote(rayon, safe="")
+            row.append(
+                types.InlineKeyboardButton(
+                    f"📍 {rayon} ({cnt})", callback_data=f"adm_req:{period}:{encoded}:1"
+                )
+            )
+        mk.row(*row)
+
+    bot.send_message(chat_id, "\n".join(text_lines), reply_markup=mk)
+
+
+def format_request_type(req_type: str) -> str:
+    if req_type == "buy":
+        return "Satınalma"
+    if req_type == "rent":
+        return "Kirayə"
+    return req_type or "-"
+
+
+def build_whatsapp_link(req: dict) -> Optional[str]:
+    phone_raw = req.get("phone") or ""
+    phone_clean = re.sub(r"\D", "", phone_raw)
+    if not phone_clean:
+        return None
+    if phone_clean.startswith("994"):
+        target = phone_clean
+    elif len(phone_clean) == 9:
+        target = "994" + phone_clean
+    elif len(phone_clean) == 10 and phone_clean.startswith("0"):
+        target = "994" + phone_clean[1:]
+    else:
+        target = phone_clean
+
+    msg = (
+        "Salam! BestHome-dan sorğunuza görə yazıram. "
+        f"Tip: {format_request_type(req.get('request_type'))}; "
+        f"Rayon: {req.get('rayon') or '-'}; "
+        f"Otaq: {req.get('rooms') or '-'}; "
+        f"Büdcə: {req.get('budget') or '-'}; "
+        f"Qeyd: {req.get('notes') or '-'}"
+    )
+    return f"https://wa.me/{target}?text={quote(msg)}"
+
+
+def format_request_card(req: dict) -> str:
+    created_at = req.get("created_at") or "-"
+    req_type = format_request_type(req.get("request_type"))
+    return "\n".join(
+        [
+            f"🆔 ID: {req.get('id')}",
+            f"📅 Tarix: {created_at}",
+            f"📄 Tip: {req_type}",
+            f"📍 Rayon: {req.get('rayon') or '-'}",
+            f"🚪 Otaq: {req.get('rooms') or '-'}",
+            f"💰 Büdcə: {req.get('budget') or '-'}",
+            f"📝 Qeyd: {req.get('notes') or '-'}",
+            f"📞 Telefon: {req.get('phone') or '-'}",
+            f"💬 Chat ID: {req.get('chat_id')}",
+            f"📦 Status: {req.get('status')}",
+            f"⭐ İşarə: {'Bəli' if req.get('flagged') else 'Xeyr'}",
+        ]
+    )
+
+
+def send_request_card(chat_id: int, req: dict):
+    mk = types.InlineKeyboardMarkup()
+    wa_link = build_whatsapp_link(req)
+    if wa_link:
+        mk.add(types.InlineKeyboardButton("💬 WhatsApp yaz", url=wa_link))
+    mk.add(
+        types.InlineKeyboardButton("⭐ İşarələ", callback_data=f"adm_req_flag:{req['id']}"),
+        types.InlineKeyboardButton("📦 Arxivlə", callback_data=f"adm_req_arch:{req['id']}")
+    )
+    bot.send_message(chat_id, format_request_card(req), reply_markup=mk)
+
+
+def build_rayon_pagination(period: str, rayon: str, page: int, total_pages: int):
+    mk = types.InlineKeyboardMarkup()
+    encoded = quote(rayon, safe="")
+    mk.row(
+        types.InlineKeyboardButton("⏮", callback_data=f"adm_req:{period}:{encoded}:1"),
+        types.InlineKeyboardButton(
+            "◀️", callback_data=f"adm_req:{period}:{encoded}:{max(1, page-1)}"
+        ),
+        types.InlineKeyboardButton(
+            f"📄 {page}/{total_pages}", callback_data="adm_req_nop:page"
+        ),
+        types.InlineKeyboardButton(
+            "▶️", callback_data=f"adm_req:{period}:{encoded}:{min(total_pages, page+1)}"
+        ),
+        types.InlineKeyboardButton(
+            "⏭", callback_data=f"adm_req:{period}:{encoded}:{total_pages}"
+        ),
+    )
+    mk.add(types.InlineKeyboardButton("⬅️ Rayon siyahısı", callback_data=f"adm_req_period:{period}"))
+    return mk
+
+
+def show_customer_requests_by_rayon(chat_id: int, period: str, rayon: str, page: int = 1):
+    start_dt = get_request_period_start(period)
+    conn = get_local_conn()
+    cur = conn.cursor()
+    params = [start_dt.isoformat(), rayon]
+    cur.execute(
+        """
+        SELECT COUNT(*) FROM customer_requests
+        WHERE status!='archived' AND datetime(created_at) >= datetime(?)
+          AND LOWER(rayon) = LOWER(?)
+        """,
+        params,
+    )
+    total = cur.fetchone()[0]
+    total_pages = max(1, math.ceil(total / PAGE_SIZE_REQ)) if total else 1
+    if page > total_pages:
+        page = total_pages
+    offset = (page - 1) * PAGE_SIZE_REQ
+    cur.execute(
+        """
+        SELECT * FROM customer_requests
+        WHERE status!='archived' AND datetime(created_at) >= datetime(?)
+          AND LOWER(rayon) = LOWER(?)
+        ORDER BY datetime(created_at) DESC
+        LIMIT ? OFFSET ?
+        """,
+        params + [PAGE_SIZE_REQ, offset],
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+
+    if not rows:
+        bot.send_message(chat_id, f"📭 Bu rayon üzrə ({rayon}) aktiv sorğu yoxdur.")
+        return
+
+    for req in rows:
+        send_request_card(chat_id, req)
+
+    mk = build_rayon_pagination(period, rayon, page, total_pages)
+    bot.send_message(
+        chat_id,
+        f"📄 Səhifə {page}/{total_pages} — {rayon} üçün sorğular",
+        reply_markup=mk,
+    )
+
+
+def fetch_flagged_requests(page: int = 1):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COUNT(*) FROM customer_requests WHERE flagged=1 AND status!='archived'"
+    )
+    total = cur.fetchone()[0]
+    total_pages = max(1, math.ceil(total / PAGE_SIZE_REQ)) if total else 1
+    if page > total_pages:
+        page = total_pages
+    offset = (page - 1) * PAGE_SIZE_REQ
+    cur.execute(
+        """
+        SELECT * FROM customer_requests
+        WHERE flagged=1 AND status!='archived'
+        ORDER BY datetime(created_at) DESC
+        LIMIT ? OFFSET ?
+        """,
+        (PAGE_SIZE_REQ, offset),
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows, total_pages
+
+
+def show_flagged_requests(chat_id: int, page: int = 1):
+    rows, total_pages = fetch_flagged_requests(page)
+    if not rows:
+        bot.send_message(chat_id, "⭐ İşarələnmiş sorğu yoxdur.")
+        return
+    for req in rows:
+        send_request_card(chat_id, req)
+
+    mk = types.InlineKeyboardMarkup()
+    mk.row(
+        types.InlineKeyboardButton("⏮", callback_data="adm_req_viewflag:1"),
+        types.InlineKeyboardButton(
+            "◀️", callback_data=f"adm_req_viewflag:{max(1, page-1)}"
+        ),
+        types.InlineKeyboardButton(
+            f"📄 {page}/{total_pages}", callback_data="adm_req_nop:flag"
+        ),
+        types.InlineKeyboardButton(
+            "▶️", callback_data=f"adm_req_viewflag:{min(total_pages, page+1)}"
+        ),
+        types.InlineKeyboardButton(
+            "⏭", callback_data=f"adm_req_viewflag:{total_pages}"
+        ),
+    )
+    mk.add(types.InlineKeyboardButton("⬅️ Rayon siyahısı", callback_data="adm_req_period:day"))
+    bot.send_message(chat_id, "⭐ İşarələnən sorğular:", reply_markup=mk)
 
 
 def send_financial_reports_menu(chat_id: int):
@@ -6867,6 +7175,109 @@ def handle_financial_reports_menu(message):
     elif message.text == FINANCIAL_REPORTS_BACK:
         page = admin_panel_page_state.get(message.chat.id, 1)
         send_admin_panel(message.chat.id, page=page)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_period:"))
+def cb_admin_request_period(c):
+    if not is_admin(c.from_user.id):
+        return
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+    period = c.data.split(":", 1)[1]
+    show_customer_requests_overview(c.message.chat.id, period)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req:"))
+def cb_admin_request_rayon(c):
+    if not is_admin(c.from_user.id):
+        return
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+    parts = c.data.split(":", 3)
+    if len(parts) < 4:
+        return
+    _, period, encoded_rayon, page_str = parts
+    rayon = encoded_rayon
+    try:
+        rayon = unquote(encoded_rayon)
+    except Exception:
+        pass
+    page = 1
+    try:
+        page = int(page_str)
+    except Exception:
+        pass
+    show_customer_requests_by_rayon(c.message.chat.id, period, rayon, page)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_flag:"))
+def cb_admin_request_flag(c):
+    if not is_admin(c.from_user.id):
+        return
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+    req_id = c.data.split(":", 1)[1]
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE customer_requests SET flagged=1 WHERE id=?",
+        (req_id,),
+    )
+    conn.commit()
+    conn.close()
+    bot.send_message(c.message.chat.id, f"⭐ Sorğu işarələndi (ID: {req_id}).")
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_arch:"))
+def cb_admin_request_archive(c):
+    if not is_admin(c.from_user.id):
+        return
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+    req_id = c.data.split(":", 1)[1]
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE customer_requests SET status='archived' WHERE id=?",
+        (req_id,),
+    )
+    conn.commit()
+    conn.close()
+    bot.send_message(c.message.chat.id, f"📦 Sorğu arxivləndi (ID: {req_id}).")
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_viewflag:"))
+def cb_admin_request_view_flagged(c):
+    if not is_admin(c.from_user.id):
+        return
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+    page = 1
+    try:
+        page = int(c.data.split(":", 1)[1])
+    except Exception:
+        pass
+    show_flagged_requests(c.message.chat.id, page)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_nop"))
+def cb_admin_request_noop(c):
+    if not is_admin(c.from_user.id):
+        return
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
 
 
 def format_remaining_time(delta: timedelta) -> str:
