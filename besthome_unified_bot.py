@@ -10345,10 +10345,91 @@ def format_ranked_lines(items, name_key: str, count_key: str):
         except Exception:
             count_raw = row[1] if len(row) > 1 else 0
 
-        name = str(name_raw or "").strip() or "Naməlum"
+        name = str(name_raw or "").strip() or "Açar sözlə axtarış"
         count = int(count_raw or 0)
         lines.append(f"{idx}) {name} — {count} axtarış")
     return lines
+
+
+def normalize_rayon_label(name_raw: str) -> str:
+    name = str(name_raw or "").strip()
+    return name or "Açar sözlə axtarış"
+
+
+def format_rayon_stats(rayons):
+    lines = []
+    for row in rayons:
+        try:
+            cnt = int(row["cnt"] or 0)
+        except Exception:
+            cnt = 0
+        try:
+            rn = row["rn"]
+        except Exception:
+            rn = row[0] if len(row) > 0 else ""
+        lines.append(f"• {normalize_rayon_label(rn)} — {cnt}")
+    return lines
+
+
+def build_profile_url(chat_id: int, username: Optional[str]) -> str:
+    username_clean = (username or "").strip().lstrip("@")
+    if username_clean:
+        return f"https://t.me/{username_clean}"
+    return f"tg://user?id={chat_id}"
+
+
+def format_active_user_stats(users):
+    blocks = []
+    buttons = []
+
+    for row in users:
+        try:
+            chat_id = row["chat_id"]
+        except Exception:
+            chat_id = None
+
+        if chat_id is None:
+            continue
+
+        try:
+            cnt = int(row["cnt"] or 0)
+        except Exception:
+            cnt = 0
+
+        try:
+            full_name = str(row["full_name"] or "").strip()
+        except Exception:
+            full_name = str(row[2] if len(row) > 2 else "").strip()
+
+        try:
+            username = str(row["username"] or "").strip()
+        except Exception:
+            username = str(row[3] if len(row) > 3 else "").strip()
+        display_name = full_name or username or "—"
+        label_name = display_name
+        if len(label_name) > 30:
+            label_name = label_name[:27] + "..."
+
+        blocks.append(
+            "\n".join(
+                [
+                    f"👤 {display_name}",
+                    f"🆔 {chat_id}",
+                    f"🔍 Axtarış sayı: {cnt}",
+                ]
+            )
+        )
+
+        try:
+            profile_url = build_profile_url(chat_id, username)
+            button_label = f"👤 Profilə bax — {label_name if label_name != '—' else chat_id}"
+            if len(button_label) > 64:
+                button_label = "👤 Profilə bax"
+            buttons.append(types.InlineKeyboardButton(button_label, url=profile_url))
+        except Exception:
+            continue
+
+    return blocks, buttons
 
 
 def show_admin_stats(chat_id, period: Optional[str] = None, message_id: Optional[int] = None):
@@ -10468,7 +10549,6 @@ def show_admin_stats(chat_id, period: Optional[str] = None, message_id: Optional
                     WHERE DATE(created_at) BETWEEN ? AND ?
                     GROUP BY rn
                     ORDER BY cnt DESC
-                    LIMIT 5
                     """,
                     (start_str, end_str),
                 )
@@ -10481,13 +10561,13 @@ def show_admin_stats(chat_id, period: Optional[str] = None, message_id: Optional
                     """
                     SELECT sl.chat_id,
                            COUNT(*) AS cnt,
-                           COALESCE(NULLIF(u.full_name, ''), NULLIF(u.username, ''), CAST(sl.chat_id AS TEXT)) AS nm
+                           u.full_name,
+                           u.username
                     FROM search_logs sl
                     LEFT JOIN users u ON u.chat_id = sl.chat_id
                     WHERE DATE(sl.created_at) BETWEEN ? AND ?
                     GROUP BY sl.chat_id
                     ORDER BY cnt DESC
-                    LIMIT 5
                     """,
                     (start_str, end_str),
                 )
@@ -10558,9 +10638,9 @@ def show_admin_stats(chat_id, period: Optional[str] = None, message_id: Optional
     lines.append(f"• Kirayə: {rent_total}")
     lines.append("")
 
-    lines.append(f"📍 Top rayonlar ({period_label}):")
+    lines.append(f"📍 Rayonlar üzrə axtarışlar ({period_label}):")
     if search_stats_available and top_rayons:
-        lines.extend(format_ranked_lines(top_rayons, "rn", "cnt"))
+        lines.extend(format_rayon_stats(top_rayons))
     else:
         lines.append("• Məlumat yoxdur")
     lines.append("")
@@ -10573,13 +10653,22 @@ def show_admin_stats(chat_id, period: Optional[str] = None, message_id: Optional
     lines.append("")
 
     lines.append(f"⚡ Aktiv istifadəçilər ({period_label}):")
-    if search_stats_available and top_users:
-        lines.extend(format_ranked_lines(top_users, "nm", "cnt"))
+    active_user_blocks, profile_buttons = (format_active_user_stats(top_users) if search_stats_available else ([], []))
+    if search_stats_available and active_user_blocks:
+        for idx, block in enumerate(active_user_blocks):
+            lines.append(block)
+            if idx != len(active_user_blocks) - 1:
+                lines.append("")
     else:
         lines.append("• Məlumat yoxdur")
 
     text = "\n".join(lines)
     keyboard = stats_period_keyboard(selected_period)
+    for btn in profile_buttons:
+        try:
+            keyboard.add(btn)
+        except Exception:
+            continue
 
     if message_id:
         try:
