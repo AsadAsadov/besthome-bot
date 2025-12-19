@@ -13516,13 +13516,12 @@ def show_unverified_users(chat_id: int, page: int = 1, message=None):
     conn = get_local_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT COUNT(*) FROM users WHERE approved=0 OR status=?",
-        (STATUS_PENDING,),
+        "SELECT COUNT(*) FROM users WHERE approved=0",
     )
     total = cur.fetchone()[0] or 0
     if total == 0:
         conn.close()
-        safe_send(chat_id, "✅ Təsdiqlənməmiş istifadəçi yoxdur.")
+        safe_send(chat_id, "❗ Təsdiqlənməmiş istifadəçi tapılmadı.")
         return
 
     total_pages = max(1, math.ceil(total / PAGE_SIZE_USERS))
@@ -13532,13 +13531,13 @@ def show_unverified_users(chat_id: int, page: int = 1, message=None):
     offset = (page - 1) * PAGE_SIZE_USERS
     cur.execute(
         """
-        SELECT chat_id, full_name, username, joined_at, request_sent_at
+        SELECT chat_id, full_name, username, joined_at, date_joined
         FROM users
-        WHERE approved=0 OR status=?
-        ORDER BY datetime(joined_at) ASC
+        WHERE approved=0
+        ORDER BY datetime(joined_at) DESC
         LIMIT ? OFFSET ?
         """,
-        (STATUS_PENDING, PAGE_SIZE_USERS, offset),
+        (PAGE_SIZE_USERS, offset),
     )
     rows = cur.fetchall()
     conn.close()
@@ -13554,15 +13553,19 @@ def show_unverified_users(chat_id: int, page: int = 1, message=None):
         uid = row["chat_id"]
         name = row["full_name"] or "—"
         username_value = f"@{row['username']}" if row["username"] else "—"
-        profile_url = f"https://t.me/{row['username']}" if row["username"] else f"tg://user?id={uid}"
-        join_date, join_time = parse_join_datetime(row["request_sent_at"] or row["joined_at"])
+        profile_url = (
+            f"https://t.me/{row['username']}"
+            if row["username"]
+            else f"tg://user?id={uid}"
+        )
+        join_date, _ = parse_join_datetime(row["joined_at"] or row["date_joined"])
         text_lines.append(
             "\n".join(
                 [
                     f"👤 Ad: {name}",
                     f"🆔 ID: <a href=\"{profile_url}\">{uid}</a>",
                     f"👤 Username: {username_value}",
-                    f"📅 Sorğu tarixi: {join_date} {join_time}",
+                    f"📅 Qeydiyyat: {join_date}",
                 ]
             )
         )
@@ -13575,25 +13578,19 @@ def show_unverified_users(chat_id: int, page: int = 1, message=None):
             types.InlineKeyboardButton(
                 "⛔ Blokla", callback_data=f"unverified_block|{uid}|{page}"
             ),
-            types.InlineKeyboardButton("⬅️ Geri", callback_data="unverified_back"),
+            types.InlineKeyboardButton("❌ Ləğv et", callback_data="unverified_back"),
         )
 
-    mk.row(
-        types.InlineKeyboardButton("⏮ İlk", callback_data="unverified_users_page|1"),
-        types.InlineKeyboardButton(
-            "◀️ Geri", callback_data=f"unverified_users_page|{max(1, page - 1)}"
-        ),
-        types.InlineKeyboardButton(
-            f"📄 {page} / {total_pages}", callback_data="unverified_users_page|noop"
-        ),
-        types.InlineKeyboardButton(
-            "▶️ İrəli",
-            callback_data=f"unverified_users_page|{min(total_pages, page + 1)}",
-        ),
-        types.InlineKeyboardButton(
-            "⏭ Son", callback_data=f"unverified_users_page|{total_pages}"
-        ),
-    )
+    if total_pages > 1:
+        mk.row(
+            types.InlineKeyboardButton(
+                "⬅️ Əvvəlki", callback_data=f"unverified_users_page|{max(1, page - 1)}"
+            ),
+            types.InlineKeyboardButton(
+                "➡️ Növbəti",
+                callback_data=f"unverified_users_page|{min(total_pages, page + 1)}",
+            ),
+        )
 
     text = "\n\n".join(text_lines)
     try:
