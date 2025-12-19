@@ -461,6 +461,7 @@ def init_local_db():
         "ALTER TABLE users ADD COLUMN demo_end_at TEXT",
         "ALTER TABLE users ADD COLUMN paid_until TEXT",
         "ALTER TABLE users ADD COLUMN last_status_change_at TEXT",
+        "ALTER TABLE users ADD COLUMN is_first_start INTEGER DEFAULT 0",
     ]:
         try:
             cur.execute(alter_stmt)
@@ -1007,6 +1008,36 @@ def get_user_record(chat_id: int) -> Optional[dict]:
     data = dict(row)
     data["status"] = derive_status_from_legacy(row, datetime.utcnow())
     return data
+
+
+def get_first_start_flag(chat_id: int) -> bool:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT is_first_start FROM users WHERE chat_id=?", (chat_id,))
+    except sqlite3.OperationalError:
+        conn.close()
+        return False
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return True
+    value = row[0] if not isinstance(row, dict) else row.get("is_first_start")
+    if value is None:
+        return False
+    return bool(value)
+
+
+def set_first_start_false_for_user(chat_id: int):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("UPDATE users SET is_first_start=0 WHERE chat_id=?", (chat_id,))
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        conn.close()
 
 
 def update_user_status(
@@ -2858,19 +2889,21 @@ def start_cmd(message):
     conn = get_local_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT chat_id, approved, is_admin, last_version FROM users WHERE chat_id=?",
+        "SELECT chat_id, approved, is_admin, last_version, is_first_start FROM users WHERE chat_id=?",
         (chat_id,),
     )
     row = cur.fetchone()
     is_first_time = False
+    is_first_start = False
 
     # 🧩 Əgər user bazada yoxdursa, əlavə et
     if not row:
         is_first_time = True
+        is_first_start = True
         cur.execute(
             """
-            INSERT INTO users (chat_id, username, full_name, first_seen, approved, is_admin, last_version, referred_by, referral_bonus_used, referral_milestone_used)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO users (chat_id, username, full_name, first_seen, approved, is_admin, last_version, referred_by, referral_bonus_used, referral_milestone_used, is_first_start)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 chat_id,
@@ -2883,6 +2916,7 @@ def start_cmd(message):
                 referred_by_value,
                 0,
                 0,
+                1,
             ),
         )
         conn.commit()
@@ -2892,6 +2926,7 @@ def start_cmd(message):
 
         update_user_status(chat_id, STATUS_PENDING)
     else:
+        is_first_start = bool(row["is_first_start"]) if row["is_first_start"] is not None else False
         record = get_user_record(chat_id)
         existing_status = record.get("status") if record else STATUS_PENDING
         if existing_status not in ACTIVE_STATUSES.union({STATUS_BLOCKED, STATUS_REJECTED, STATUS_PENDING}):
@@ -2918,6 +2953,19 @@ def start_cmd(message):
     if user_record and user_record.get("status") == STATUS_BLOCKED:
         bot.send_message(chat_id, "❌ Hesabınız deaktiv edilib. Dəstək ilə əlaqə saxlayın.")
         return
+
+    if is_first_start and not is_admin(chat_id):
+        bot.send_message(
+            chat_id,
+            "👋 Xoş gəldiniz!\n\n"
+            "📢 Ən son *alqı-satqı və kirayə elanlarını* "
+            "ilk görmək üçün Telegram kanalımıza qoşulmağı tövsiyə edirik:\n\n"
+            "👉 https://t.me/alqi_satqi_kiraye\n\n"
+            "✅ Botdan istifadə etməyə davam edə bilərsiniz.",
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+        set_first_start_false_for_user(chat_id)
 
     if not check_subscription(chat_id, silent=True):
         send_payment_menu(chat_id)
