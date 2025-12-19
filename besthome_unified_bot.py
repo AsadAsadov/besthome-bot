@@ -100,6 +100,7 @@ last_complaint_time = {}
 admin_stats_period = {}
 admin_direct_message_state = {}
 admin_user_message_state = {}
+admin_message_state = {}
 ui_state = defaultdict(list)
 BLOCKED_MESSAGE_TEXT = "Hesabınız müvəqqəti olaraq dayandırıldı."
 STATUS_PENDING = "pending"
@@ -7953,20 +7954,149 @@ def admin_open_user_profile(c):
         user_id = int(parts[1])
     except Exception:
         return
-    profile_url = get_profile_url_for_user(user_id)
+    show_user_profile(c.message.chat.id, user_id)
     try:
-        bot.answer_callback_query(c.id, url=profile_url)
-        return
+        bot.answer_callback_query(c.id)
     except Exception:
         pass
+
+
+def get_user_phone_for_admin(user_id: int) -> Optional[str]:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    phone = None
     try:
-        bot.send_message(
-            c.message.chat.id,
-            f"👤 <a href=\"{profile_url}\">Profil</a>",
-            parse_mode="HTML",
+        cur.execute(
+            """
+            SELECT phone FROM customer_requests
+            WHERE chat_id=? AND phone IS NOT NULL AND phone!=''
+            ORDER BY datetime(created_at) DESC
+            LIMIT 1
+            """,
+            (user_id,),
         )
+        row = cur.fetchone()
+        if row:
+            phone = row["phone"] if isinstance(row, dict) else row[0]
+
+        if not phone:
+            cur.execute(
+                """
+                SELECT phone FROM listings_approved
+                WHERE chat_id=? AND phone IS NOT NULL AND phone!=''
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (user_id,),
+            )
+            row = cur.fetchone()
+            if row:
+                phone = row["phone"] if isinstance(row, dict) else row[0]
+
+        if not phone:
+            cur.execute(
+                """
+                SELECT phone FROM listings_new
+                WHERE chat_id=? AND phone IS NOT NULL AND phone!=''
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (user_id,),
+            )
+            row = cur.fetchone()
+            if row:
+                phone = row["phone"] if isinstance(row, dict) else row[0]
+
+        if not phone:
+            cur.execute(
+                "SELECT phone FROM agents WHERE chat_id=?",
+                (user_id,),
+            )
+            row = cur.fetchone()
+            if row:
+                phone = row["phone"] if isinstance(row, dict) else row[0]
+    finally:
+        conn.close()
+
+    return phone
+
+
+def build_admin_whatsapp_url(phone_raw: Optional[str]) -> Optional[str]:
+    digits = re.sub(r"\D", "", phone_raw or "")
+    if not digits:
+        return None
+    return f"https://wa.me/{digits}"
+
+
+def show_user_profile(chat_id: int, user_id: int):
+    record = get_user_record(user_id) or {}
+    profile_url = get_profile_url_for_user(user_id)
+    phone_raw = get_user_phone_for_admin(user_id)
+    wa_url = build_admin_whatsapp_url(phone_raw)
+    joined_at = record.get("joined_at")
+    join_date, join_time = parse_join_datetime(joined_at)
+    username = record.get("username")
+
+    profile_text = "\n".join(
+        [
+            "👤 Profil",
+            f"🆔 ID: <a href=\"{profile_url}\">{user_id}</a>",
+            f"👤 Ad: {record.get('full_name') or '-'}",
+            f"👤 Username: @{username}" if username else "👤 Username: -",
+            f"📞 Telefon: {phone_raw or '-'}",
+            f"📅 Qoşulma: {join_date} {join_time}",
+            f"📦 Status: {record.get('status') or '-'}",
+        ]
+    )
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    buttons = [
+        types.InlineKeyboardButton(
+            "📨 Botdan mesaj göndər",
+            callback_data=f"admin_send_message:{user_id}",
+        )
+    ]
+    if wa_url:
+        buttons.append(types.InlineKeyboardButton("💬 WhatsApp-da yaz", url=wa_url))
+    markup.add(*buttons)
+
+    bot.send_message(
+        chat_id,
+        profile_text,
+        reply_markup=markup,
+        parse_mode="HTML",
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("admin_send_message:"))
+def admin_start_message(c):
+    if not is_admin(c.from_user.id):
+        return
+    parts = c.data.split(":", 1)
+    if len(parts) < 2:
+        return
+    try:
+        user_id = int(parts[1])
+    except Exception:
+        return
+    admin_message_state[c.message.chat.id] = user_id
+    bot.send_message(c.message.chat.id, "✍️ Mesajı yazın, göndəriləcək:")
+    try:
+        bot.answer_callback_query(c.id)
     except Exception:
         pass
+
+
+@bot.message_handler(func=lambda m: m.chat.id in admin_message_state)
+def admin_send_text(m):
+    if not is_admin(m.chat.id):
+        return
+    target_user_id = admin_message_state.pop(m.chat.id)
+    bot.send_message(
+        target_user_id,
+        f"📩 Admin mesajı:\n\n{m.text}",
+    )
+    bot.send_message(m.chat.id, "✅ Mesaj göndərildi")
 
 
 def format_remaining_time(delta: timedelta) -> str:
