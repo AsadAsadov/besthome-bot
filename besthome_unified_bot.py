@@ -12619,24 +12619,47 @@ def admin_direct_message_send(message):
         admin_direct_message_state.pop(message.chat.id, None)
 
 
+def clear_admin_update_states(chat_id: int):
+    user_state.pop(chat_id, None)
+    search_state.pop(chat_id, None)
+    customer_request_state.pop(chat_id, None)
+    customer_request_rule_state.pop(chat_id, None)
+    keyword_alert_state.pop(chat_id, None)
+    agent_request_lookup_state.pop(chat_id, None)
+    today_flow_state.pop(chat_id, None)
+    complaint_flow_state.pop(chat_id, None)
+    admin_reply_state.pop(chat_id, None)
+    admin_stats_period.pop(chat_id, None)
+    admin_direct_message_state.pop(chat_id, None)
+    admin_user_message_state.pop(chat_id, None)
+    admin_message_state.pop(chat_id, None)
+    admin_panel_page_state.pop(chat_id, None)
+    admin_customer_request_state.pop(chat_id, None)
+    ui_state.pop(chat_id, None)
+    session_interactions.pop(chat_id, None)
+    search_reminder_shown.discard(chat_id)
+
+    for key in list(admin_user_page_state.keys()):
+        if key[0] == chat_id:
+            admin_user_page_state.pop(key, None)
+
+
 def start_admin_update_db(chat_id: int, callback_id: Optional[str] = None):
     if not is_admin(chat_id):
+        if callback_id:
+            safe_answer_callback_query(callback_id, "⛔ İcazə yoxdur.")
         return
 
     if db_update_lock.locked():
         if callback_id:
-            try:
-                safe_answer_callback_query(callback_id, "⚠️ Baza yenilənir.")
-            except Exception:
-                pass
+            safe_answer_callback_query(callback_id, "⚠️ Baza yenilənir.")
         safe_send(chat_id, "⚠️ Hal-hazırda baza yenilənir. Zəhmət olmasa gözləyin.")
         return
 
+    clear_admin_update_states(chat_id)
+
     if callback_id:
-        try:
-            safe_answer_callback_query(callback_id, "📦 Baza yeniləmə")
-        except Exception:
-            pass
+        safe_answer_callback_query(callback_id, "📦 Baza yeniləmə")
 
     user_state[chat_id] = "WAITING_MAIN_DB"
     safe_send(
@@ -13498,7 +13521,7 @@ def show_users_menu(chat_id):
     )
     mk.add(
         types.InlineKeyboardButton(
-            "⏳ Təsdiqlənməmiş", callback_data="unverified_users"
+            "⏳ Təsdiqlənməmiş", callback_data="userlist|pending"
         )
     )
     mk.add(
@@ -13511,206 +13534,18 @@ def show_users_menu(chat_id):
     )
 
 
-def show_unverified_users(chat_id: int, page: int = 1, message=None):
-    page = max(1, int(page or 1))
-    print("UNVERIFIED USERS QUERY START")
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT COUNT(*) FROM users WHERE approved=0",
-    )
-    total = cur.fetchone()[0] or 0
-    if total == 0:
-        conn.close()
-        safe_send(chat_id, "❗ Təsdiqlənməmiş istifadəçi tapılmadı.")
-        return
-
-    total_pages = max(1, math.ceil(total / PAGE_SIZE_USERS))
-    if page > total_pages:
-        page = total_pages
-
-    offset = (page - 1) * PAGE_SIZE_USERS
-    cur.execute(
-        """
-        SELECT chat_id, full_name, username, joined_at, date_joined
-        FROM users
-        WHERE approved=0
-        ORDER BY datetime(joined_at) DESC
-        LIMIT ? OFFSET ?
-        """,
-        (PAGE_SIZE_USERS, offset),
-    )
-    rows = cur.fetchall()
-    conn.close()
-
-    text_lines = [
-        "⏳ Təsdiqlənməmiş istifadəçilər",
-        f"Səhifə: {page} / {total_pages}",
-        "",
-    ]
-    mk = types.InlineKeyboardMarkup()
-
-    for row in rows:
-        uid = row["chat_id"]
-        name = row["full_name"] or "—"
-        username_value = f"@{row['username']}" if row["username"] else "—"
-        profile_url = (
-            f"https://t.me/{row['username']}"
-            if row["username"]
-            else f"tg://user?id={uid}"
-        )
-        join_date, _ = parse_join_datetime(row["joined_at"] or row["date_joined"])
-        text_lines.append(
-            "\n".join(
-                [
-                    f"👤 Ad: {name}",
-                    f"🆔 ID: <a href=\"{profile_url}\">{uid}</a>",
-                    f"👤 Username: {username_value}",
-                    f"📅 Qeydiyyat: {join_date}",
-                ]
-            )
-        )
-
-        mk.add(types.InlineKeyboardButton(f"🆔 ID: {uid}", url=profile_url))
-        mk.row(
-            types.InlineKeyboardButton(
-                "✅ Təsdiqlə", callback_data=f"unverified_approve|{uid}|{page}"
-            ),
-            types.InlineKeyboardButton(
-                "⛔ Blokla", callback_data=f"unverified_block|{uid}|{page}"
-            ),
-            types.InlineKeyboardButton("❌ Ləğv et", callback_data="unverified_back"),
-        )
-
-    if total_pages > 1:
-        mk.row(
-            types.InlineKeyboardButton(
-                "⬅️ Əvvəlki", callback_data=f"unverified_users_page|{max(1, page - 1)}"
-            ),
-            types.InlineKeyboardButton(
-                "➡️ Növbəti",
-                callback_data=f"unverified_users_page|{min(total_pages, page + 1)}",
-            ),
-        )
-
-    text = "\n\n".join(text_lines)
-    try:
-        if message:
-            safe_edit_message_text(
-                text,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-                parse_mode="HTML",
-            )
-        else:
-            safe_send(chat_id, text, parse_mode="HTML", reply_markup=mk)
-    except Exception:
-        safe_send(chat_id, text, parse_mode="HTML", reply_markup=mk)
-
-
-@bot.callback_query_handler(func=lambda c: c.data == "unverified_users")
-def cb_unverified_users(c):
-    try:
-        safe_answer_callback_query(c.id)
-    except Exception:
-        pass
-    print("CALLBACK DATA:", c.data)
-    if not is_admin(c.message.chat.id):
-        return
-    show_unverified_users(c.message.chat.id, page=1, message=c.message)
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("unverified_users_page|"))
-def cb_unverified_users_page(c):
-    try:
-        safe_answer_callback_query(c.id)
-    except Exception:
-        pass
-    print("CALLBACK DATA:", c.data)
-    if not is_admin(c.message.chat.id):
-        return
-    page_raw = c.data.split("|")[1]
-    if page_raw == "noop":
-        return
-    try:
-        page = int(page_raw)
-    except Exception:
-        page = 1
-    show_unverified_users(c.message.chat.id, page=page, message=c.message)
-
-
-@bot.callback_query_handler(func=lambda c: c.data == "unverified_back")
-def cb_unverified_back(c):
-    try:
-        safe_answer_callback_query(c.id)
-    except Exception:
-        pass
-    if not is_admin(c.message.chat.id):
-        return
-    show_users_menu(c.message.chat.id)
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("unverified_approve|"))
-def cb_unverified_approve(c):
-    try:
-        safe_answer_callback_query(c.id, "✅ Emal edilir...")
-    except Exception:
-        pass
-    if not is_admin(c.message.chat.id):
-        return
-    parts = c.data.split("|")
-    uid = int(parts[1])
-    page = int(parts[2]) if len(parts) > 2 else 1
-    new_status, expires_at = determine_activation_status(uid)
-    if not new_status:
-        safe_send(c.message.chat.id, "⚠️ Aktiv plan tapılmadı")
-        return
-    if new_status == STATUS_ACTIVE_PAID:
-        update_user_status(uid, STATUS_ACTIVE_PAID, paid_until=expires_at)
-        status_text = "💳 Ödənişli"
-    else:
-        demo_start = datetime.utcnow()
-        update_user_status(uid, STATUS_ACTIVE_DEMO, demo_start_at=demo_start, demo_end_at=expires_at)
-        status_text = "🎁 Demo"
-    apply_referral_bonus(uid)
-    try:
-        expiry_txt = format_display_date(expires_at)
-        safe_send(uid, f"🎉 Hesabınız {status_text} kimi aktiv edildi.\n📅 Bitmə tarixi: {expiry_txt}")
-    except Exception:
-        pass
-    show_unverified_users(c.message.chat.id, page=page, message=c.message)
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("unverified_block|"))
-def cb_unverified_block(c):
-    try:
-        safe_answer_callback_query(c.id, "⛔ Emal edilir...")
-    except Exception:
-        pass
-    if not is_admin(c.message.chat.id):
-        return
-    parts = c.data.split("|")
-    uid = int(parts[1])
-    page = int(parts[2]) if len(parts) > 2 else 1
-    block_user(uid)
-    show_unverified_users(c.message.chat.id, page=page, message=c.message)
-
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("userlist|"))
 def cb_userlist(c):
+    safe_answer_callback_query(c.id)
     if not is_admin(c.message.chat.id):
         return
     status = c.data.split("|")[1]
     show_all_users(c.message.chat.id, status, page=1, force_new=True)
-    try:
-        safe_answer_callback_query(c.id)
-    except Exception:
-        pass
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_u:"))
 def cb_admin_user_pagination(c):
+    safe_answer_callback_query(c.id)
     if not is_admin(c.message.chat.id):
         return
     try:
@@ -13720,14 +13555,11 @@ def cb_admin_user_pagination(c):
         list_type = "active"
         page = 1
     show_all_users(c.message.chat.id, list_type, page=page, message=c.message)
-    try:
-        safe_answer_callback_query(c.id)
-    except Exception:
-        pass
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_search|"))
 def cb_user_search(c):
+    safe_answer_callback_query(c.id)
     if not is_admin(c.message.chat.id):
         return
     try:
@@ -13735,10 +13567,6 @@ def cb_user_search(c):
     except Exception:
         return
     admin_show_subscription_info(c.message.chat.id, uid)
-    try:
-        safe_answer_callback_query(c.id)
-    except Exception:
-        pass
 
 
 def parse_join_datetime(dt_raw: Optional[str]) -> Tuple[str, str]:
@@ -14570,7 +14398,8 @@ def show_pending_listings(chat_id):
     conn = get_local_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT * FROM listings_new WHERE approved=0 " "ORDER BY id DESC LIMIT 50"
+        "SELECT * FROM listings_new WHERE approved IS NULL OR approved != 1 "
+        "ORDER BY id DESC LIMIT 50"
     )
     rows = cur.fetchall()
     conn.close()
@@ -16016,9 +15845,15 @@ def show_admin_stats(chat_id, period: Optional[str] = None, message_id: Optional
         if table_exists(cur_local, "users"):
             total_users = safe_count(cur_local, "SELECT COUNT(*) FROM users")
             active_users = safe_count(
-                cur_local, "SELECT COUNT(*) FROM users WHERE approved=1 AND blocked=0"
+                cur_local,
+                "SELECT COUNT(*) FROM users WHERE status IN (?, ?, ?)",
+                (STATUS_ACTIVE_PAID, STATUS_ACTIVE_DEMO, STATUS_ACTIVE_FREE),
             )
-            pending_users = safe_count(cur_local, "SELECT COUNT(*) FROM users WHERE approved=0")
+            pending_users = safe_count(
+                cur_local,
+                "SELECT COUNT(*) FROM users WHERE status=?",
+                (STATUS_PENDING,),
+            )
 
         if table_exists(cur_local, "subscriptions"):
             cols = column_lookup(cur_local, "subscriptions")
