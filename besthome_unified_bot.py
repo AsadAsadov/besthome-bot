@@ -330,6 +330,7 @@ def init_local_db():
         CREATE TABLE IF NOT EXISTS listings_new (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             date_added TEXT,
+            created_at TEXT,
             chat_id INTEGER,
             role TEXT,
             prop_type TEXT,
@@ -355,6 +356,7 @@ def init_local_db():
         CREATE TABLE IF NOT EXISTS listings_approved (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             date_added TEXT,
+            created_at TEXT,
             chat_id INTEGER,
             role TEXT,
             prop_type TEXT,
@@ -384,6 +386,9 @@ def init_local_db():
         )
     """
     )
+
+    ensure_created_at_column(conn, "listings_new", ("date_added",))
+    ensure_created_at_column(conn, "listings_approved", ("date_added",))
 
     # Vasitəçi aktivliyi (axtarış, baxış, WhatsApp, favorit)
     cur.execute(
@@ -814,6 +819,11 @@ def init_main_db_indices():
     try:
         conn = get_main_conn()
         cur = conn.cursor()
+        ensure_created_at_column(
+            conn,
+            "listings",
+            ("inserted_at", "date_read", "date_added", "Elanin_tarixi", "added_at"),
+        )
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_main_operation ON listings(operation)"
         )
@@ -930,7 +940,7 @@ def parse_price_value(raw) -> Optional[int]:
 
 
 def safe_date(row: dict):
-    for key in ("date_read", "date_added", "Elanin_tarixi", "added_at", "created_at"):
+    for key in ("inserted_at", "created_at", "date_read", "date_added", "Elanin_tarixi", "added_at"):
         v = row.get(key)
         if v:
             try:
@@ -2029,10 +2039,39 @@ def get_table_columns(cur, table: str):
 
 def detect_table_date_column(cur, table: str) -> Optional[str]:
     cols = get_table_columns(cur, table)
-    for key in ("created_at", "date_added", "date_read", "added_at"):
+    for key in ("inserted_at", "created_at", "date_added", "date_read", "added_at"):
         if key in cols:
             return cols[key]
     return None
+
+
+def ensure_created_at_column(conn, table: str, fallback_cols: Optional[Tuple[str, ...]] = None):
+    cur = conn.cursor()
+    cols = get_table_columns(cur, table)
+    if "created_at" in cols or "inserted_at" in cols:
+        target_col = cols.get("created_at")
+    else:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN created_at TEXT")
+        cols = get_table_columns(cur, table)
+        target_col = cols.get("created_at")
+
+    if not target_col:
+        return
+
+    candidates = fallback_cols or ()
+    for candidate in candidates:
+        if candidate in cols and candidate != target_col:
+            cur.execute(
+                f"UPDATE {table} SET {target_col} = {cols[candidate]} "
+                f"WHERE {target_col} IS NULL OR {target_col} = ''"
+            )
+            break
+    else:
+        cur.execute(
+            f"UPDATE {table} SET {target_col} = ? "
+            f"WHERE {target_col} IS NULL OR {target_col} = ''",
+            (format_sqlite_datetime(datetime.now()),),
+        )
 
 
 def build_today_clause(column: Optional[str]):
@@ -2043,6 +2082,141 @@ def build_today_clause(column: Optional[str]):
         " AND ((typeof({col})='integer' AND {col} BETWEEN ? AND ?) "
         "OR datetime({col}) BETWEEN datetime(?) AND datetime(?))".format(col=column),
         [int(start.timestamp()), int(end.timestamp()), format_sqlite_datetime(start), format_sqlite_datetime(end)],
+    )
+
+
+def attach_local_db(conn) -> bool:
+    try:
+        conn.execute("ATTACH DATABASE ? AS local_db", (LOCAL_DB,))
+        return True
+    except Exception:
+        return False
+
+
+def detach_local_db(conn, attached: bool):
+    if not attached:
+        return
+    try:
+        conn.execute("DETACH DATABASE local_db")
+    except Exception:
+        pass
+
+
+def build_rayon_filter_sql(cur, table: str, rayon: Optional[str], prefix: str):
+    if not rayon or rayon == "all":
+        return "", []
+    cols = get_table_columns(cur, table)
+    targets = []
+    if "rayon" in cols:
+        targets.append(f"{prefix}{cols['rayon']}")
+    if "address" in cols:
+        targets.append(f"{prefix}{cols['address']}")
+    if "summary" in cols:
+        targets.append(f"{prefix}{cols['summary']}")
+    if not targets:
+        return "", []
+    conds = [f"LOWER(COALESCE({col},'')) LIKE ?" for col in targets]
+    params = [f"%{rayon.lower()}%"] * len(targets)
+    return " AND (" + " OR ".join(conds) + ")", params
+
+
+def count_main_active_listings(
+    op_code: str = "all",
+    prop_code: str = "all",
+    rayon: Optional[str] = None,
+    only_today: bool = False,
+    use_direct_conn: bool = False,
+) -> int:
+    if not os.path.exists(MAIN_DB):
+        return 0
+    if use_direct_conn or main_db_update_in_progress.is_set():
+        conn = sqlite3.connect(MAIN_DB)
+        conn.row_factory = sqlite3.Row
+        use_direct_conn = True
+    else:
+        conn = get_main_conn()
+    attached = False
+    try:
+        cur = conn.cursor()
+        attached = attach_local_db(conn)
+        flt, params = build_filters_sql(op_code, prop_code, None, mode="main")
+        date_sql, date_params = ("", [])
+        if only_today:
+            date_col = detect_table_date_column(cur, "listings")
+            if date_col:
+                date_sql, date_params = build_today_clause(f"l.{date_col}")
+        rayon_sql, rayon_params = build_rayon_filter_sql(cur, "listings", rayon, "l.")
+        if attached:
+            sql = (
+                "SELECT COUNT(*) FROM listings l "
+                "LEFT JOIN local_db.listing_status ls "
+                "ON ls.source='main' AND ls.listing_id = l.id "
+                + flt
+                + " AND (ls.status IS NULL OR ls.status NOT IN ('sold','rented','blacklisted'))"
+                + date_sql
+                + rayon_sql
+            )
+        else:
+            sql = "SELECT COUNT(*) FROM listings l " + flt + date_sql + rayon_sql
+        cur.execute(sql, params + date_params + rayon_params)
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    finally:
+        detach_local_db(conn, attached)
+        if use_direct_conn:
+            conn.close()
+        else:
+            close_main_conn(conn)
+
+
+def count_local_active_listings(
+    op_code: str = "all",
+    prop_code: str = "all",
+    rayon: Optional[str] = None,
+    only_today: bool = False,
+) -> int:
+    conn = get_local_conn()
+    try:
+        cur = conn.cursor()
+        flt, params = build_filters_sql(op_code, prop_code, None, mode="local")
+        date_sql, date_params = ("", [])
+        if only_today:
+            date_col = detect_table_date_column(cur, "listings_approved")
+            if date_col:
+                date_sql, date_params = build_today_clause(f"l.{date_col}")
+        rayon_sql, rayon_params = build_rayon_filter_sql(
+            cur, "listings_approved", rayon, "l."
+        )
+        sql = (
+            "SELECT COUNT(*) FROM listings_approved l "
+            "LEFT JOIN listing_status ls "
+            "ON ls.source='local' AND ls.listing_id = l.id "
+            + flt
+            + " AND (ls.status IS NULL OR ls.status NOT IN ('sold','rented','blacklisted'))"
+            + date_sql
+            + rayon_sql
+        )
+        cur.execute(sql, params + date_params + rayon_params)
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    finally:
+        conn.close()
+
+
+def count_today_listings(filters: dict, op_override: Optional[str] = None) -> int:
+    op_code = op_override if op_override is not None else filters.get("op", "all")
+    prop_code = filters.get("prop", "all")
+    rayon = filters.get("rayon")
+    return count_main_active_listings(
+        op_code=op_code,
+        prop_code=prop_code,
+        rayon=rayon,
+        only_today=True,
+    ) + count_local_active_listings(
+        op_code=op_code,
+        prop_code=prop_code,
+        rayon=rayon,
+        only_today=True,
     )
 
 
@@ -4439,14 +4613,15 @@ def add_listing_new(data: dict) -> int:
     cur.execute(
         """
         INSERT INTO listings_new (
-            date_added, chat_id, role, prop_type, operation,
+            date_added, created_at, chat_id, role, prop_type, operation,
             rayon, metro, rooms, area_kvm, price, currency,
             phone, contact_name, summary, link, approved
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
     """,
         (
-            datetime.utcnow().date().isoformat(),
+            datetime.now().date().isoformat(),
+            format_sqlite_datetime(datetime.now()),
             data.get("chat_id"),
             data.get("role"),
             data.get("prop_type"),
@@ -4813,8 +4988,8 @@ def search_system_menu(message):
 def prompt_today_operation(chat_id: int):
     mk = types.InlineKeyboardMarkup()
     mk.add(
-        types.InlineKeyboardButton("💸 Satılır", callback_data="td|op|sat"),
-        types.InlineKeyboardButton("🏢 Kirayə", callback_data="td|op|kir"),
+        types.InlineKeyboardButton("✅ Satılır", callback_data="td|op|sat"),
+        types.InlineKeyboardButton("✅ Kirayə verilir", callback_data="td|op|kir"),
     )
     mk.add(types.InlineKeyboardButton("🌐 Hamısı", callback_data="td|op|all"))
     bot.send_message(chat_id, "Əməliyyat növünü seç:", reply_markup=mk)
@@ -4832,9 +5007,56 @@ def prompt_today_property(chat_id: int):
     )
     mk.add(
         types.InlineKeyboardButton("Torpaq", callback_data="td|tp|t"),
-        types.InlineKeyboardButton("Hamısı", callback_data="td|tp|all"),
+        types.InlineKeyboardButton("Digər", callback_data="td|tp|d"),
     )
+    mk.add(types.InlineKeyboardButton("Hamısı", callback_data="td|tp|all"))
     bot.send_message(chat_id, "🏠 Əmlak tipini seç:", reply_markup=mk)
+
+
+def prompt_today_rayon(chat_id: int):
+    rayons = REGION_OPTIONS.get("all", {}).get("rayons", [])
+    if not rayons:
+        send_today_results(chat_id, today_flow_state.get(chat_id, {}))
+        return
+    mk = types.InlineKeyboardMarkup()
+    mk.add(types.InlineKeyboardButton("Hamısı", callback_data="td|rn|all"))
+    row = []
+    for idx, rn in enumerate(rayons):
+        row.append(types.InlineKeyboardButton(rn, callback_data=f"td|rn|{idx}"))
+        if len(row) == 2:
+            mk.row(*row)
+            row = []
+    if row:
+        mk.row(*row)
+    bot.send_message(chat_id, "📍 Rayon seçin:", reply_markup=mk)
+
+
+def compute_today_stats(filters: dict) -> dict:
+    op = filters.get("op", "all")
+    if op == "sat":
+        sale = count_today_listings(filters, op_override="sat")
+        rent = 0
+        total = sale
+    elif op == "kir":
+        sale = 0
+        rent = count_today_listings(filters, op_override="kir")
+        total = rent
+    else:
+        sale = count_today_listings(filters, op_override="sat")
+        rent = count_today_listings(filters, op_override="kir")
+        total = sale + rent
+    return {"total": total, "sale": sale, "rent": rent}
+
+
+def send_today_stats_message(chat_id: int, filters: dict):
+    stats = compute_today_stats(filters)
+    text = (
+        "🆕 Bu gün daxil olan elanlar\n"
+        f"📊 Ümumi: {stats['total']}\n"
+        f"1⃣ Satılır: {stats['sale']}\n"
+        f"2⃣ Kirayə: {stats['rent']}"
+    )
+    bot.send_message(chat_id, text)
 
 
 def send_today_results(chat_id: int, filters: dict, message=None):
@@ -4862,9 +5084,8 @@ def send_today_results(chat_id: int, filters: dict, message=None):
 
 def start_today_flow(chat_id: int):
     reset_search_state(chat_id)
-    today_flow_state[chat_id] = {"op": "all", "prop": "all"}
-    total_today = count_today_filtered(today_flow_state[chat_id])
-    bot.send_message(chat_id, f"📈 Bu gün daxil olan elanlar: {total_today}")
+    today_flow_state[chat_id] = {"op": "all", "prop": "all", "rayon": "all"}
+    send_today_stats_message(chat_id, today_flow_state[chat_id])
     prompt_today_operation(chat_id)
 
 
@@ -4888,18 +5109,28 @@ def handle_today_callbacks(c):
         return
 
     chat_id = c.message.chat.id
-    st = today_flow_state.setdefault(chat_id, {"op": "all", "prop": "all"})
+    st = today_flow_state.setdefault(chat_id, {"op": "all", "prop": "all", "rayon": "all"})
     action, value = parts[1], parts[2]
 
     if action == "op":
         st["op"] = value
-        op_count = count_today_filtered(st)
-        bot.send_message(chat_id, f"Filtrdən sonra qalan elanlar: {op_count}")
+        send_today_stats_message(chat_id, st)
         prompt_today_property(chat_id)
     elif action == "tp":
         st["prop"] = value
-        final_count = count_today_filtered(st)
-        bot.send_message(chat_id, f"Seçilmiş kriteriyaya uyğun bu gün {final_count} elan var.")
+        send_today_stats_message(chat_id, st)
+        prompt_today_rayon(chat_id)
+    elif action == "rn":
+        rayons = REGION_OPTIONS.get("all", {}).get("rayons", [])
+        if value == "all":
+            st["rayon"] = "all"
+        else:
+            try:
+                idx = int(value)
+                st["rayon"] = rayons[idx]
+            except Exception:
+                st["rayon"] = "all"
+        send_today_stats_message(chat_id, st)
         send_today_results(chat_id, st, message=(c.message.chat.id, c.message.message_id))
 
     try:
@@ -5624,6 +5855,7 @@ PROP_TYPES = {
     "q": "qeyri-yaşayış sahəsi",
     "b": "bağ evi",
     "t": "torpaq",
+    "d": "digər",
 }
 
 RAYON_GROUPS = {
@@ -6241,7 +6473,7 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
         filtered.append(ev)
 
     filtered.sort(key=safe_date, reverse=True)
-    total = len(filtered)
+    total = count_today_listings(filters)
     if limit is not None:
         filtered = filtered[offset : offset + limit]
     return filtered, total
@@ -8789,22 +9021,36 @@ def handle_admin_db_upload(message):
 
             conn = sqlite3.connect(MAIN_DB)
             try:
+                ensure_created_at_column(
+                    conn,
+                    "listings",
+                    ("inserted_at", "date_read", "date_added", "Elanin_tarixi", "added_at"),
+                )
                 cur = conn.cursor()
                 cur.execute("SELECT COUNT(*) FROM listings")
                 row = cur.fetchone()
                 final_count = int(row[0]) if row and row[0] is not None else 0
+                conn.commit()
             finally:
                 conn.close()
 
             added = final_count - old_count
             if added < 0:
                 added = 0
+            total_active = count_main_active_listings(use_direct_conn=True)
+            sale_active = count_main_active_listings(op_code="sat", use_direct_conn=True)
+            rent_active = count_main_active_listings(op_code="kir", use_direct_conn=True)
+            today_active = count_main_active_listings(only_today=True, use_direct_conn=True)
 
-            bot.send_message(
-                chat_id,
-                "✅ Baza uğurla yeniləndi.\n📦 Yeni elanlar: "
-                f"{added}\n📊 Ümumi elan sayı: {final_count}",
+            report = (
+                "✅ Baza uğurla yeniləndi.\n"
+                f"📦 Yeni elanlar: {added}\n"
+                f"📊 Ümumi elan sayı: {total_active}\n"
+                f"1⃣ Satılır: {sale_active}\n"
+                f"2⃣ Kirayə verilir: {rent_active}\n"
+                f"🆕 Bu gün daxil olan elanlar: {today_active}"
             )
+            bot.send_message(ADMIN_ID, report)
         except Exception as e:
             print("DB update error:", e)
             bot.send_message(
@@ -10516,14 +10762,15 @@ def handle_admin_approve(c):
         cur.execute(
             """
             INSERT INTO listings_approved (
-                date_added, chat_id, role, prop_type, operation,
+                date_added, created_at, chat_id, role, prop_type, operation,
                 rayon, metro, rooms, area_kvm, price, currency,
                 phone, contact_name, summary, link
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 ev.get("date_added"),
+                ev.get("created_at") or format_sqlite_datetime(datetime.now()),
                 ev.get("chat_id"),
                 ev.get("role"),
                 ev.get("prop_type"),
@@ -12167,6 +12414,7 @@ def main_menu(chat_id):
         "🔎 Axtarış sistemi",
         "📝 Ev axtarıram",
         "📌 Müştəri istəkləri",
+        "🆕 Bu gün daxil olan elanlar",
         "📂 Elan statusları",
         "⭐ Favorilərim",
         "📋 Elanlarım",
