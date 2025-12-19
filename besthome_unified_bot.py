@@ -149,6 +149,7 @@ ADMIN_PANEL_PAGE2 = [
 ADMIN_PANEL_NAV_NEXT = "▶️ Növbəti səhifə"
 ADMIN_PANEL_NAV_PREV = "◀️ Əvvəlki səhifə"
 ADMIN_PANEL_BACK_MAIN = "⬅️ Əsas menyuya qayıt"
+MAIN_MENU_BACK_BUTTON = ADMIN_PANEL_BACK_MAIN
 admin_panel_page_state = {}
 ADMIN_PANEL_ACTIONS = set(ADMIN_PANEL_PAGE1 + ADMIN_PANEL_PAGE2)
 
@@ -2087,6 +2088,7 @@ def check_subscription(chat_id: int, silent: bool = False) -> bool:
                 bot.send_message(chat_id, "❌ Hesabınız deaktiv edilib. Dəstək ilə əlaqə saxlayın.")
             except Exception:
                 pass
+            show_main_menu(chat_id)
         return False
     if status == STATUS_REJECTED:
         if not silent:
@@ -2094,6 +2096,7 @@ def check_subscription(chat_id: int, silent: bool = False) -> bool:
                 bot.send_message(chat_id, "❌ Sorğunuz rədd edilib. Daha sonra yenidən müraciət edə bilərsiniz.")
             except Exception:
                 pass
+            show_main_menu(chat_id)
         return False
 
     now = datetime.utcnow()
@@ -3085,10 +3088,8 @@ def send_logo_if_exists(chat_id: int):
 MENU_REFRESH_BUTTON = "🔄 Botu yenilə"
 MENU_VISIBILITY_HINT_TEXT = (
     "ℹ️ Əsas menyu görünmür?\n"
-    "➡️ /start yazın və ya aşağıdakı düyməyə toxunun."
+    "➡️ /start yazın və ya aşağıdakı düyməni istifadə edin."
 )
-MENU_VISIBILITY_HINT_COOLDOWN_SECONDS = 300
-menu_visibility_hint_last_sent = {}
 
 
 def send_refresh_button(chat_id: int):
@@ -3108,18 +3109,8 @@ def ensure_refresh_button(kb: types.ReplyKeyboardMarkup) -> types.ReplyKeyboardM
     return kb
 
 
-def send_menu_visibility_hint(chat_id: int):
-    now = time.time()
-    last_ts = menu_visibility_hint_last_sent.get(chat_id, 0)
-    if now - last_ts < MENU_VISIBILITY_HINT_COOLDOWN_SECONDS:
-        return
-    menu_visibility_hint_last_sent[chat_id] = now
-    _original_send_message(chat_id, MENU_VISIBILITY_HINT_TEXT)
-
-
 def send_with_reply_keyboard(chat_id: int, text: str, keyboard: types.ReplyKeyboardMarkup):
     bot.send_message(chat_id, text, reply_markup=keyboard)
-    send_menu_visibility_hint(chat_id)
 
 
 def build_main_menu_keyboard(chat_id: int) -> types.ReplyKeyboardMarkup:
@@ -3159,10 +3150,6 @@ def show_main_menu(user_id: int):
     _original_send_message(user_id, "🏠 Əsas menyu:", reply_markup=kb)
 
 
-def send_main_menu(chat_id: int):
-    show_main_menu(chat_id)
-
-
 def build_search_menu_inline() -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup()
     mk.row(
@@ -3185,58 +3172,6 @@ def build_search_menu_inline() -> types.InlineKeyboardMarkup:
 def send_search_menu(chat_id: int):
     mk = build_search_menu_inline()
     _original_send_message(chat_id, "🔍 Axtarış sistemi:", reply_markup=mk)
-    show_main_menu(chat_id)
-
-
-def is_main_menu_keyboard(reply_markup) -> bool:
-    if not isinstance(reply_markup, types.ReplyKeyboardMarkup):
-        return False
-    try:
-        flat = {btn for row in reply_markup.keyboard for btn in row}
-    except Exception:
-        return False
-    return {"🔍 Axtarış sistemi", MENU_REFRESH_BUTTON}.issubset(flat)
-
-
-def should_attach_main_menu(reply_markup, text: Optional[str]) -> bool:
-    if text in {"🏠 Əsas menyu:", "📋 Əsas menyudan seçim et:"}:
-        return False
-    if isinstance(reply_markup, types.ReplyKeyboardMarkup):
-        return False
-    return True
-
-
-def merge_main_menu_keyboard(
-    keyboard: types.ReplyKeyboardMarkup, chat_id: int
-) -> types.ReplyKeyboardMarkup:
-    main_kb = build_main_menu_keyboard(chat_id)
-    try:
-        existing = {btn for row in keyboard.keyboard for btn in row}
-    except Exception:
-        existing = set()
-    for row in getattr(main_kb, "keyboard", []):
-        filtered = [btn for btn in row if btn not in existing]
-        if filtered:
-            keyboard.row(*filtered)
-    return keyboard
-
-
-def send_message_with_menu(chat_id, text, *args, **kwargs):
-    reply_markup = kwargs.get("reply_markup")
-    attach_menu = should_attach_main_menu(reply_markup, text)
-    if isinstance(reply_markup, types.ReplyKeyboardMarkup) and not is_main_menu_keyboard(
-        reply_markup
-    ):
-        reply_markup = merge_main_menu_keyboard(reply_markup, chat_id)
-        kwargs["reply_markup"] = reply_markup
-        attach_menu = False
-    result = _original_send_message(chat_id, text, *args, **kwargs)
-    if attach_menu:
-        show_main_menu(chat_id)
-    return result
-
-
-bot.send_message = send_message_with_menu
 
 
 # =============== ELAN KARTI (WhatsApp ilə) ===============
@@ -3534,7 +3469,7 @@ def start_cmd(message):
 def share_referral(message):
     chat_id = message.chat.id
     if is_admin(chat_id):
-        main_menu(chat_id)
+        bot.send_message(chat_id, "ℹ️ Bu funksiya yalnız istifadəçilər üçündür.")
         return
     if not is_user_allowed(chat_id):
         bot.send_message(
@@ -3591,7 +3526,7 @@ def build_request_rayon_keyboard(include_back: bool = True) -> types.ReplyKeyboa
     if row:
         kb.row(*row)
     if include_back:
-        kb.row("⬅️ Geri (Əsas menyu)")
+        kb.row(MAIN_MENU_BACK_BUTTON)
     return kb
 
 
@@ -3599,7 +3534,7 @@ def build_request_rooms_keyboard() -> types.ReplyKeyboardMarkup:
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("1", "2")
     kb.row("3", "4+")
-    kb.row("⬅️ Geri (Əsas menyu)")
+    kb.row(MAIN_MENU_BACK_BUTTON)
     return kb
 
 
@@ -3613,10 +3548,11 @@ def get_customer_request_step(chat_id: int) -> Optional[str]:
 
 def handle_customer_request_nav(message) -> bool:
     chat_id = message.chat.id
-    if message.text in {"⬅️ Geri (Əsas menyu)", *CANCEL_CMDS}:
+    if message.text in {MAIN_MENU_BACK_BUTTON, *CANCEL_CMDS}:
         reset_customer_request(chat_id)
         bot.send_message(chat_id, "❌ Sorğu ləğv edildi.")
-        return_to_main_menu(chat_id)
+        if message.text == MAIN_MENU_BACK_BUTTON:
+            return_to_main_menu(chat_id)
         return True
     return False
 
@@ -4570,7 +4506,7 @@ def show_request_type_menu(chat_id: int):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("🏠 Almaq istəyirəm")
     kb.row("🏢 Kirayə götürmək istəyirəm")
-    kb.row("⬅️ Geri (Əsas menyu)")
+    kb.row(MAIN_MENU_BACK_BUTTON)
     send_with_reply_keyboard(
         chat_id,
         "📝 Nə üçün sorğu yaratmaq istəyirsiniz?",
@@ -4590,7 +4526,7 @@ def start_customer_request_flow(message):
     show_request_type_menu(chat_id)
 
 
-@bot.message_handler(func=lambda m: m.text == "⬅️ Geri (Əsas menyu)")
+@bot.message_handler(func=lambda m: m.text == MAIN_MENU_BACK_BUTTON)
 def customer_request_back(message):
     if not ensure_allowed(message):
         return
@@ -4625,7 +4561,6 @@ def handle_request_type_selection(message):
         "📍 Rayon / ərazini seçin və ya yazın:",
         reply_markup=build_request_rayon_keyboard(),
     )
-    send_menu_visibility_hint(chat_id)
 
 
 @bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "rayon")
@@ -4647,7 +4582,6 @@ def handle_request_rayon(message):
         "🚪 Otaq sayını seçin və ya yazın:",
         reply_markup=build_request_rooms_keyboard(),
     )
-    send_menu_visibility_hint(chat_id)
 
 
 @bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "rooms")
@@ -4665,7 +4599,7 @@ def handle_request_rooms(message):
     st["rooms"] = val
     st["step"] = "budget"
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row("⬅️ Geri (Əsas menyu)")
+    kb.row(MAIN_MENU_BACK_BUTTON)
     send_with_reply_keyboard(
         chat_id, "💰 Büdcəni yazın (məs: 800 AZN):", kb
     )
@@ -4687,7 +4621,7 @@ def handle_request_budget(message):
     st["step"] = "notes"
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("Keç")
-    kb.row("⬅️ Geri (Əsas menyu)")
+    kb.row(MAIN_MENU_BACK_BUTTON)
     send_with_reply_keyboard(
         chat_id,
         "📝 Əlavə qeydlər (istəyə bağlı) yazın və ya 'Keç' seçin:",
@@ -4707,7 +4641,7 @@ def handle_request_notes(message):
     st["notes"] = "" if val.lower() == "keç" else val
     st["step"] = "phone"
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row("⬅️ Geri (Əsas menyu)")
+    kb.row(MAIN_MENU_BACK_BUTTON)
     send_with_reply_keyboard(chat_id, "📞 Əlaqə nömrəsini yazın:", kb)
 
 
@@ -4739,7 +4673,6 @@ def handle_request_phone(message):
         process_keyword_alerts_for_request(req_row)
     except Exception:
         pass
-    return_to_main_menu(chat_id)
 
 # =============== 📩 Şikayət və təkliflər ===============
 
@@ -4759,7 +4692,7 @@ def build_complaint_categories_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     for cat in COMPLAINT_CATEGORIES:
         kb.row(cat)
-    kb.row(COMPLAINT_BACK)
+    kb.row(MAIN_MENU_BACK_BUTTON)
     return kb
 
 
@@ -4838,9 +4771,9 @@ def cb_open_complaint(c):
 def complaint_category_handler(message):
     chat_id = message.chat.id
     choice = message.text
-    if choice == COMPLAINT_BACK:
+    if choice == MAIN_MENU_BACK_BUTTON:
         complaint_flow_state.pop(chat_id, None)
-        send_main_menu(chat_id)
+        return_to_main_menu(chat_id)
         return
     if choice not in COMPLAINT_CATEGORIES:
         bot.send_message(
@@ -4848,11 +4781,11 @@ def complaint_category_handler(message):
             "📂 Kateqoriyanı seçin:",
             reply_markup=build_complaint_categories_keyboard(),
         )
-        send_menu_visibility_hint(chat_id)
         return
     complaint_flow_state[chat_id] = {"step": "message", "category": choice}
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row(COMPLAINT_BACK)
+    kb.row(MAIN_MENU_BACK_BUTTON)
     send_with_reply_keyboard(chat_id, "✍️ Zəhmət olmasa mesajınızı yazın.", kb)
 
 
@@ -4863,6 +4796,10 @@ def complaint_category_handler(message):
 def complaint_message_handler(message):
     chat_id = message.chat.id
     text = message.text
+    if text == MAIN_MENU_BACK_BUTTON:
+        complaint_flow_state.pop(chat_id, None)
+        return_to_main_menu(chat_id)
+        return
     if text == COMPLAINT_BACK:
         complaint_flow_state[chat_id] = {"step": "category"}
         send_with_reply_keyboard(
@@ -4883,7 +4820,6 @@ def complaint_message_handler(message):
         "✅ Mesajınız qəbul edildi.\nTəşəkkür edirik! 🙏",
         reply_markup=types.ReplyKeyboardRemove(),
     )
-    send_main_menu(chat_id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("complaint_reply:"))
@@ -5056,8 +4992,6 @@ def promo_code_entry_step(message):
     success, response, _ = apply_promo_code(chat_id, message.text)
     bot.send_message(chat_id, response)
     reset_user_state(chat_id)
-    if success:
-        main_menu(chat_id)
 
 
 def activate_subscription_plan(chat_id: int, plan_key: str) -> Optional[datetime]:
@@ -5163,7 +5097,6 @@ def cb_demo_activate(c):
     bot.send_message(ADMIN_ID, admin_text)
     reset_user_state(chat_id)
     reset_search_state(chat_id)
-    send_main_menu(chat_id)
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -5261,12 +5194,12 @@ def cb_pay_admin(c):
 
 # =============== 📝 YENİ ELAN ƏLAVƏ ET ===============
 
-CANCEL_CMDS = ["❌ Ləğv et", "🏠 Əsas menyu"]
+CANCEL_CMDS = ["❌ Ləğv et"]
 
 
 def new_listing_keyboard(extra=None):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row("❌ Ləğv et", "🏠 Əsas menyu")
+    kb.row("❌ Ləğv et", MAIN_MENU_BACK_BUTTON)
     if extra:
         for row in extra:
             kb.row(*row)
@@ -5276,10 +5209,14 @@ def new_listing_keyboard(extra=None):
 def handle_common_nav(message):
     chat_id = message.chat.id
     txt = message.text
+    if txt == MAIN_MENU_BACK_BUTTON:
+        reset_user_state(chat_id)
+        bot.send_message(chat_id, "❌ Əməliyyat ləğv edildi.")
+        return_to_main_menu(chat_id)
+        return True
     if txt in CANCEL_CMDS:
         reset_user_state(chat_id)
         bot.send_message(chat_id, "❌ Əməliyyat ləğv edildi.")
-        send_main_menu(chat_id)
         return True
     return False
 
@@ -5913,7 +5850,7 @@ def status_menu_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("🏠 Satılan elanlar", "🏢 Kirayə verilən elanlar")
     kb.row("⛔ Qara siyahı")
-    kb.row("⬅️ Geri")
+    kb.row(MAIN_MENU_BACK_BUTTON)
     return kb
 
 
@@ -5963,11 +5900,11 @@ def show_blacklist(message):
     )
 
 
-@bot.message_handler(func=lambda m: m.text == "⬅️ Geri")
+@bot.message_handler(func=lambda m: m.text == MAIN_MENU_BACK_BUTTON)
 def status_back_to_main(message):
     if not ensure_allowed(message):
         return
-    send_main_menu(message.chat.id)
+    return_to_main_menu(message.chat.id)
 
 
 @bot.message_handler(func=lambda m: m.text == "🔥 Ən çox baxılan elanlar")
@@ -10770,7 +10707,7 @@ def build_admin_request_list_nav(
             "⬅️ Satılır / Kirayə seçiminə qayıt", callback_data="adm_req_types"
         )
     )
-    mk.add(types.InlineKeyboardButton("🏠 Əsas menyu", callback_data="adm_req_main"))
+    mk.add(types.InlineKeyboardButton(MAIN_MENU_BACK_BUTTON, callback_data="adm_req_main"))
     return mk
 
 
@@ -14853,7 +14790,7 @@ def broadcast_bot_update(admin_chat_id):
 def handle_bot_refresh(message):
     chat_id = message.chat.id
     reset_all_states(chat_id)
-    return_to_main_menu(chat_id)
+    bot.send_message(chat_id, "✅ Bot yeniləndi.")
 
 
 def reset_all_states(chat_id: int):
@@ -15679,7 +15616,7 @@ def handle_agent_request_rayon(message):
         bot.send_message(chat_id, "❌ Bu funksiya sizin üçün aktiv deyil.")
         agent_request_lookup_state.pop(chat_id, None)
         return
-    if message.text == "⬅️ Geri (Əsas menyu)":
+    if message.text == MAIN_MENU_BACK_BUTTON:
         agent_request_lookup_state.pop(chat_id, None)
         return_to_main_menu(chat_id)
         return
@@ -16635,10 +16572,6 @@ def run_bot():
             time.sleep(5)
 
 
-def main_menu(chat_id):
-    show_main_menu(chat_id)
-
-
 def has_active_flow(chat_id: int) -> bool:
     return any(
         [
@@ -16666,10 +16599,7 @@ def fallback_unknown_message(message):
         return
     if has_active_flow(message.chat.id):
         return
-    _original_send_message(
-        message.chat.id,
-        "ℹ️ Əsas menyu görünmür?\n➡️ /start yazın və ya aşağıdakı düyməyə toxunun.",
-    )
+    _original_send_message(message.chat.id, MENU_VISIBILITY_HINT_TEXT)
     show_main_menu(message.chat.id)
 
 
