@@ -7,10 +7,6 @@
 # ============================================
 
 CURRENT_VERSION = "v9.1"
-# ==============================
-# 🧩 Admin konfiqurasiyası
-# ==============================
-ADMIN_ID = 6736526711
 
 import os
 import io
@@ -31,6 +27,7 @@ from collections import defaultdict
 from functools import wraps
 from typing import Optional, Tuple, List, Dict, Any
 from urllib.parse import quote, unquote, urlsplit, urlunsplit, parse_qs, urlencode
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 import requests
 from flask import Flask
@@ -54,7 +51,12 @@ REFERRAL_MILESTONE_BONUS_DAYS = 45
 # ==============================
 # 🔐 BOT KONFİQURASİYASI
 # ==============================
-BOT_TOKEN = "7938311608:AAHmzsTqnVJ7cVtStp2lmzGe2-1oj9LN1JM"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError(
+        "BOT_TOKEN env dəyişəni tapılmadı. Zəhmət olmasa BOT_TOKEN dəyərini təyin edin."
+    )
+
 ADMIN_ID = 1311851277
 CHANNEL_ID = -1001878623087  # Bot bu kanalda admin olmalıdır
 
@@ -90,8 +92,6 @@ agent_request_lookup_state = {}
 admin_customer_request_state = {}
 CUSTOMER_REQUEST_COOLDOWN_SECONDS = 300
 
-bot = telebot.TeleBot(BOT_TOKEN)
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -112,6 +112,10 @@ db_update_lock_by_admin_lock = threading.Lock()
 DB_UPDATE_TTL_SECONDS = 600
 DB_UPDATE_MAX_ZIP_BYTES = 500 * 1024 * 1024
 DB_UPDATE_MIN_ZIP_BYTES = 1 * 1024 * 1024
+DB_UPDATE_DOWNLOAD_TIMEOUT_SECONDS = 240
+DB_UPDATE_UNZIP_TIMEOUT_SECONDS = 120
+DB_UPDATE_VALIDATE_TIMEOUT_SECONDS = 60
+DB_UPDATE_REPLACE_TIMEOUT_SECONDS = 60
 DB_UPDATE_STATE_PATH = os.path.join(DATA_DIR, "db_update_state.json")
 complaint_flow_state = {}
 complaint_records = {}
@@ -204,6 +208,7 @@ admin_user_page_state = {}
 main_db_connections = set()
 main_db_connections_lock = threading.Lock()
 main_db_update_in_progress = threading.Event()
+main_db_replace_lock = threading.Lock()
 
 
 def register_main_conn(conn):
@@ -298,6 +303,13 @@ def callback_guard(handler):
     @wraps(handler)
     def wrapper(call):
         safe_answer_callback_query(call.id)
+        logger.info(
+            "callback entry handler=%s chat_id=%s from=%s data=%s",
+            handler.__name__,
+            getattr(getattr(call, "message", None), "chat", None).id if getattr(call, "message", None) else None,
+            getattr(getattr(call, "from_user", None), "id", None),
+            getattr(call, "data", None),
+        )
         try:
             return handler(call)
         except Exception as exc:
@@ -312,6 +324,22 @@ def callback_guard(handler):
                     f"⚠️ Xəta oldu: {exc} (chat_id={chat_id})",
                 )
     return wrapper
+
+
+def run_with_timeout(step_name: str, timeout_seconds: int, func, *args, **kwargs):
+    logger.info("DB update step start step=%s timeout=%s", step_name, timeout_seconds)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(func, *args, **kwargs)
+        try:
+            result = future.result(timeout=timeout_seconds)
+            logger.info("DB update step done step=%s", step_name)
+            return result
+        except FutureTimeoutError:
+            logger.error("DB update step timeout step=%s timeout=%s", step_name, timeout_seconds)
+            raise RuntimeError(f"{step_name} vaxt limiti bitdi")
+        except Exception:
+            logger.exception("DB update step failed step=%s", step_name)
+            raise
 
 
 def now_utc() -> datetime:
@@ -680,20 +708,41 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
     try:
         main_db_update_in_progress.set()
         send_db_update_progress(admin_id, "⬇️ Zip yüklənir…")
-        temp_zip_path = download_zip_stream(url)
+        temp_zip_path = run_with_timeout(
+            "zip_download",
+            DB_UPDATE_DOWNLOAD_TIMEOUT_SECONDS,
+            download_zip_stream,
+            url,
+        )
         send_db_update_progress(admin_id, "📦 Zip açılır…")
-        extracted_db_path, extracted_dir = extract_main_db_from_zip(temp_zip_path)
+        extracted_db_path, extracted_dir = run_with_timeout(
+            "zip_extract",
+            DB_UPDATE_UNZIP_TIMEOUT_SECONDS,
+            extract_main_db_from_zip,
+            temp_zip_path,
+        )
         send_db_update_progress(admin_id, "🗄️ DB yoxlanır…")
-        validate_main_db_file(extracted_db_path)
+        run_with_timeout(
+            "db_validate",
+            DB_UPDATE_VALIDATE_TIMEOUT_SECONDS,
+            validate_main_db_file,
+            extracted_db_path,
+        )
 
         last_max_id = load_last_update_max_id()
         if last_max_id is None and os.path.exists(MAIN_DB):
             last_max_id = get_max_listing_id(MAIN_DB)
 
         send_db_update_progress(admin_id, "🔁 DB əvəz olunur…")
-        close_all_main_conns()
-        prepare_main_db_for_swap()
-        backup_path = atomic_replace_main_db(extracted_db_path)
+        with main_db_replace_lock:
+            close_all_main_conns()
+            prepare_main_db_for_swap()
+            backup_path = run_with_timeout(
+                "db_replace",
+                DB_UPDATE_REPLACE_TIMEOUT_SECONDS,
+                atomic_replace_main_db,
+                extracted_db_path,
+            )
 
         conn = sqlite3.connect(MAIN_DB)
         try:
@@ -13903,12 +13952,17 @@ def show_unverified_users(chat_id: int, page: int = 1, message=None, force_new: 
     conn = get_local_conn()
     cur = conn.cursor()
     try:
+        logger.info(
+            "unverified users count query start chat_id=%s where=%s",
+            chat_id,
+            where_clause,
+        )
         cur.execute(f"SELECT COUNT(*) FROM users WHERE {where_clause}", params)
         total = cur.fetchone()[0] or 0
         logger.info(
-            "Unverified users count=%s chat_id=%s where=%s",
-            total,
+            "unverified users count query done chat_id=%s total=%s where=%s",
             chat_id,
+            total,
             where_clause,
         )
     except Exception:
@@ -13942,11 +13996,22 @@ def show_unverified_users(chat_id: int, page: int = 1, message=None, force_new: 
 
     offset = (page - 1) * PAGE_SIZE_USERS
     try:
+        logger.info(
+            "unverified users fetch query start chat_id=%s page=%s offset=%s",
+            chat_id,
+            page,
+            offset,
+        )
         cur.execute(
             f"SELECT * FROM users WHERE {where_clause} {order_clause} LIMIT ? OFFSET ?",
             (*params, PAGE_SIZE_USERS, offset),
         )
         rows = cur.fetchall()
+        logger.info(
+            "unverified users fetch query done chat_id=%s rows=%s",
+            chat_id,
+            len(rows),
+        )
     except Exception:
         conn.close()
         logger.exception("Failed to fetch unverified users chat_id=%s", chat_id)
@@ -14113,10 +14178,6 @@ def cb_admin_user_pagination(c):
         list_type = "active"
         page = 1
     show_all_users(c.message.chat.id, list_type, page=page, message=c.message)
-    try:
-        bot.answer_callback_query(c.id)
-    except Exception:
-        pass
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_search|"))
@@ -14129,10 +14190,6 @@ def cb_user_search(c):
     except Exception:
         return
     admin_show_subscription_info(c.message.chat.id, uid)
-    try:
-        bot.answer_callback_query(c.id)
-    except Exception:
-        pass
 
 
 def parse_join_datetime(dt_raw: Optional[str]) -> Tuple[str, str]:
@@ -14348,14 +14405,41 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
 
         base_query = "SELECT * FROM users"
 
+        logger.info(
+            "users count query start chat_id=%s status=%s where=%s",
+            chat_id,
+            status,
+            parts["where"],
+        )
         cur.execute(
             f"SELECT COUNT(*) FROM users WHERE {parts['where']}",
             parts["params"],
         )
         total = cur.fetchone()[0] or 0
+        logger.info(
+            "users count query done chat_id=%s status=%s total=%s",
+            chat_id,
+            status,
+            total,
+        )
 
         if total == 0:
-            safe_send(chat_id, f"❌ {parts['title']} tapılmadı.")
+            conn.close()
+            mk = types.InlineKeyboardMarkup()
+            mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="adm|users"))
+            text = f"❌ {parts['title']} tapılmadı."
+            try:
+                if message and not force_new:
+                    bot.edit_message_text(
+                        text,
+                        chat_id=message.chat.id,
+                        message_id=message.message_id,
+                        reply_markup=mk,
+                    )
+                else:
+                    bot.send_message(chat_id, text, reply_markup=mk)
+            except Exception:
+                safe_admin_step(chat_id, text, reply_markup=mk)
             return
 
         total_pages = max(1, math.ceil(total / PAGE_SIZE_USERS))
@@ -14363,12 +14447,25 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
             page = total_pages
 
         offset = (page - 1) * PAGE_SIZE_USERS
+        logger.info(
+            "users fetch query start chat_id=%s status=%s page=%s offset=%s",
+            chat_id,
+            status,
+            page,
+            offset,
+        )
         cur.execute(
             base_query
             + f" WHERE {parts['where']} {parts['order']} LIMIT ? OFFSET ?",
             (*parts["params"], PAGE_SIZE_USERS, offset),
         )
         rows = cur.fetchall()
+        logger.info(
+            "users fetch query done chat_id=%s status=%s rows=%s",
+            chat_id,
+            status,
+            len(rows),
+        )
         columns = [desc[0] for desc in (cur.description or [])]
 
         admin_user_page_state[(chat_id, status)] = page
@@ -14597,10 +14694,7 @@ def cb_admin_start_user_message(c):
         target_uid = None
 
     if not target_uid:
-        try:
-            bot.answer_callback_query(c.id, "⚠️ İstifadəçi tapılmadı")
-        except Exception:
-            pass
+        safe_answer_callback_query(c.id, "⚠️ İstifadəçi tapılmadı")
         show_all_users(
             c.message.chat.id,
             list_type,
@@ -14627,10 +14721,7 @@ def cb_admin_start_user_message(c):
     except Exception:
         pass
 
-    try:
-        bot.answer_callback_query(c.id)
-    except Exception:
-        pass
+    safe_answer_callback_query(c.id)
 
 
 @bot.callback_query_handler(
@@ -14661,10 +14752,7 @@ def cb_admin_cancel_user_message(c):
         message=origin_message if origin_message else c.message,
     )
 
-    try:
-        bot.answer_callback_query(c.id)
-    except Exception:
-        pass
+    safe_answer_callback_query(c.id)
 
 
 @bot.message_handler(
@@ -14746,29 +14834,20 @@ def cb_admin_stop_user(c):
         uid = None
 
     if uid is None:
-        try:
-            bot.answer_callback_query(c.id, "⚠️ İstifadəçi tapılmadı")
-        except Exception:
-            pass
+        safe_answer_callback_query(c.id, "⚠️ İstifadəçi tapılmadı")
         show_all_users(c.message.chat.id, list_type, page=get_admin_user_page(c.message.chat.id, list_type), message=c.message)
         return
 
     record = get_user_record(uid)
     if not record:
-        try:
-            bot.answer_callback_query(c.id, "⚠️ İstifadəçi tapılmadı")
-        except Exception:
-            pass
+        safe_answer_callback_query(c.id, "⚠️ İstifadəçi tapılmadı")
         show_all_users(c.message.chat.id, list_type, page=get_admin_user_page(c.message.chat.id, list_type), message=c.message)
         return
 
     blocked = block_user(uid)
-    try:
-        bot.answer_callback_query(
-            c.id, "⛔ Dayandırıldı" if blocked else "⚠️ Dəyişiklik olmadı"
-        )
-    except Exception:
-        pass
+    safe_answer_callback_query(
+        c.id, "⛔ Dayandırıldı" if blocked else "⚠️ Dəyişiklik olmadı"
+    )
 
     show_all_users(c.message.chat.id, list_type, page=page or get_admin_user_page(c.message.chat.id, list_type), message=c.message)
 
@@ -14793,10 +14872,7 @@ def cb_user_block_action(c):
 
     block_user(uid)
 
-    try:
-        bot.answer_callback_query(c.id, "🚫 İstifadəçi dayandırıldı.")
-    except Exception:
-        pass
+    safe_answer_callback_query(c.id, "🚫 İstifadəçi dayandırıldı.")
 
     if not list_type:
         if prev_status == STATUS_PENDING:
@@ -14825,7 +14901,7 @@ def cb_user_approve_action(c):
 
     new_status, expires_at = determine_activation_status(uid)
     if not new_status:
-        bot.answer_callback_query(c.id, "⚠️ Aktiv plan tapılmadı")
+        safe_answer_callback_query(c.id, "⚠️ Aktiv plan tapılmadı")
         bot.send_message(
             c.message.chat.id,
             "Ödəniş və ya demo aktiv deyil. Limitsiz et və ya ödəniş gözləyin.",
@@ -14842,10 +14918,7 @@ def cb_user_approve_action(c):
 
     apply_referral_bonus(uid)
 
-    try:
-        bot.answer_callback_query(c.id, "✅ İstifadəçi aktiv edildi.")
-    except Exception:
-        pass
+    safe_answer_callback_query(c.id, "✅ İstifadəçi aktiv edildi.")
 
     try:
         expiry_txt = format_display_date(expires_at)
@@ -14880,10 +14953,7 @@ def cb_user_demo_action(c):
         )
     except Exception:
         pass
-    try:
-        bot.answer_callback_query(c.id, "🎁 Demo verildi")
-    except Exception:
-        pass
+    safe_answer_callback_query(c.id, "🎁 Demo verildi")
     target_page = page or get_admin_user_page(c.message.chat.id, list_type)
     show_all_users(c.message.chat.id, list_type, page=target_page, message=c.message)
 
@@ -14901,10 +14971,7 @@ def cb_user_set_free(c):
     except Exception:
         page = None
     set_user_unlimited(uid)
-    try:
-        bot.answer_callback_query(c.id, "♾ Limitsiz edildi")
-    except Exception:
-        pass
+    safe_answer_callback_query(c.id, "♾ Limitsiz edildi")
     try:
         bot.send_message(uid, "♾ Limitsiz giriş aktiv edildi. Limitsiz müddət ərzində istifadə edə bilərsiniz.")
     except Exception:
@@ -14926,10 +14993,7 @@ def cb_user_to_paid(c):
     except Exception:
         page = None
     switch_user_to_paid_flow(uid)
-    try:
-        bot.answer_callback_query(c.id, "💳 Ödəniş tələb olunur")
-    except Exception:
-        pass
+    safe_answer_callback_query(c.id, "💳 Ödəniş tələb olunur")
     try:
         bot.send_message(uid, "💳 Hesabınız ödənişli rejimə keçirildi. Davam etmək üçün ödəniş edin.")
     except Exception:
@@ -14951,10 +15015,7 @@ def cb_user_reject(c):
     except Exception:
         page = None
     reject_user(uid)
-    try:
-        bot.answer_callback_query(c.id, "❌ Rədd edildi")
-    except Exception:
-        pass
+    safe_answer_callback_query(c.id, "❌ Rədd edildi")
     target_page = page or get_admin_user_page(c.message.chat.id, list_type)
     show_all_users(c.message.chat.id, list_type, page=target_page, message=c.message)
 
@@ -14974,7 +15035,7 @@ def cb_user_restore_action(c):
 
     restore_user_to_pending(uid)
 
-    bot.answer_callback_query(c.id, "↩️ İstifadəçi gözləməyə qaytarıldı.")
+    safe_answer_callback_query(c.id, "↩️ İstifadəçi gözləməyə qaytarıldı.")
     target_page = page or get_admin_user_page(c.message.chat.id, list_type)
     show_all_users(c.message.chat.id, list_type, page=target_page, message=c.message)
 
@@ -14997,9 +15058,12 @@ def cb_user_delete_action(c):
     deleted = delete_user_fully(uid)
 
     if deleted:
-        bot.answer_callback_query(c.id, "🗑 İstifadəçi silindi.")
+        safe_answer_callback_query(c.id, "🗑 İstifadəçi silindi.")
     else:
-        bot.answer_callback_query(c.id, "⚠️ Yalnız bloklu və ya rədd edilən istifadəçi silinə bilər.")
+        safe_answer_callback_query(
+            c.id,
+            "⚠️ Yalnız bloklu və ya rədd edilən istifadəçi silinə bilər.",
+        )
 
     if previous_status == STATUS_REJECTED:
         list_type = "rejected"
