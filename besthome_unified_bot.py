@@ -127,7 +127,6 @@ ADMIN_PANEL_PAGE1 = [
     "🧪 Demo istifadəçilər",
     "🆔 İstifadəçi ID ilə axtar",
     "👥 İstifadəçilər",
-    "📌 Müştəri istəkləri",
 ]
 ADMIN_PANEL_PAGE2 = [
     "🎟 Promo kodlar",
@@ -1067,8 +1066,6 @@ def set_customer_requests_enabled(chat_id: int, enabled: bool):
 
 
 def ensure_customer_requests_enabled(chat_id: int) -> bool:
-    if is_admin(chat_id):
-        return True
     if not has_customer_requests_access(chat_id):
         bot.send_message(chat_id, "❌ Bu funksiya sizin üçün aktiv deyil.")
         return False
@@ -3387,7 +3384,7 @@ def notify_agents_for_request(req_row: Optional[dict]):
     conn.close()
 
     for agent_id in agent_rows:
-        if not is_agent_user(agent_id):
+        if not has_customer_requests_access(agent_id):
             continue
         if add_agent_notification(agent_id, req_row.get("id")):
             try:
@@ -7612,8 +7609,6 @@ def handle_admin_panel_action(message):
         start_admin_update_db(chat_id)
     elif txt == "📨 İstifadəçiyə mesaj göndər":
         start_direct_user_message_flow(chat_id)
-    elif txt == "📌 Müştəri istəkləri":
-        show_customer_requests_overview(chat_id, period="day")
     elif txt == "📌 Müştəri istəkləri icazələri":
         msg = bot.send_message(chat_id, "🆔 Telegram istifadəçi ID-sini daxil edin:")
         bot.register_next_step_handler(msg, admin_customer_requests_access_step)
@@ -10734,10 +10729,10 @@ def cb_agent_request_page(c):
     if not ensure_allowed_cb(c):
         return
     chat_id = c.message.chat.id
-    if not (is_admin(chat_id) or is_agent_user(chat_id)):
+    if not has_customer_requests_access(chat_id):
         try:
             bot.answer_callback_query(
-                c.id, "❌ Bu bölmə yalnız BestHome agentləri üçündür.", show_alert=True
+                c.id, "❌ Bu funksiya sizin üçün aktiv deyil", show_alert=True
             )
         except Exception:
             pass
@@ -10874,10 +10869,10 @@ def cb_agent_my_customers(c):
     if not ensure_allowed_cb(c):
         return
     chat_id = c.message.chat.id
-    if not (is_admin(chat_id) or is_agent_user(chat_id)):
+    if not has_customer_requests_access(chat_id):
         try:
             bot.answer_callback_query(
-                c.id, "❌ Bu bölmə yalnız BestHome agentləri üçündür.", show_alert=True
+                c.id, "❌ Bu funksiya sizin üçün aktiv deyil", show_alert=True
             )
         except Exception:
             pass
@@ -10898,10 +10893,10 @@ def cb_agent_interest(c):
     if not ensure_allowed_cb(c):
         return
     chat_id = c.message.chat.id
-    if not (is_admin(chat_id) or is_agent_user(chat_id)):
+    if not has_customer_requests_access(chat_id):
         try:
             bot.answer_callback_query(
-                c.id, "❌ Bu bölmə yalnız BestHome agentləri üçündür.", show_alert=True
+                c.id, "❌ Bu funksiya sizin üçün aktiv deyil", show_alert=True
             )
         except Exception:
             pass
@@ -10990,8 +10985,8 @@ def handle_agent_request_rayon(message):
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
-    if not (is_admin(chat_id) or is_agent_user(chat_id)):
-        bot.send_message(chat_id, "❌ Bu bölmə yalnız BestHome agentləri üçündür.")
+    if not has_customer_requests_access(chat_id):
+        bot.send_message(chat_id, "❌ Bu funksiya sizin üçün aktiv deyil.")
         agent_request_lookup_state.pop(chat_id, None)
         return
     if message.text == "⬅️ Geri (Əsas menyu)":
@@ -11003,9 +10998,7 @@ def handle_agent_request_rayon(message):
         bot.send_message(chat_id, "⚠️ Rayon adı boş ola bilməz.")
         return
     agent_request_lookup_state.pop(chat_id, None)
-    entries = fetch_active_requests_by_rayon(
-        rayon, include_all_status=is_admin(chat_id)
-    )
+    entries = fetch_active_requests_by_rayon(rayon, include_all_status=True)
     if not entries:
         bot.send_message(chat_id, "😕 Bu rayonda aktiv müştəri sorğusu yoxdur.")
         return
@@ -11092,6 +11085,11 @@ def stats_period_keyboard(selected: str) -> types.InlineKeyboardMarkup:
         types.InlineKeyboardButton("📆 Bu ay", callback_data="stats_period:month"),
     ]
     mk.row(*buttons)
+    mk.add(
+        types.InlineKeyboardButton(
+            "📌 Müştəri istəkləri", callback_data="adm_req_period:day"
+        )
+    )
     return mk
 
 
