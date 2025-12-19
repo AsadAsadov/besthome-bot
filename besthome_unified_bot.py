@@ -84,6 +84,7 @@ user_state = {}  # Yeni elan prosesi
 search_state = {}  # Axtarış paging və filter state
 customer_request_state = {}
 agent_request_lookup_state = {}
+admin_customer_request_state = {}
 CUSTOMER_REQUEST_COOLDOWN_SECONDS = 300
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -5186,7 +5187,7 @@ def customer_requests_from_menu(message):
         return
     chat_id = message.chat.id
     if is_admin(chat_id):
-        show_customer_requests_overview(chat_id, "day")
+        show_admin_customer_request_types(chat_id)
         return
     if not has_customer_requests_access(chat_id):
         bot.send_message(chat_id, "❌ Bu funksiya sizin üçün aktiv deyil.")
@@ -7993,6 +7994,313 @@ def build_period_tabs(selected: str) -> List[types.InlineKeyboardButton]:
     return buttons
 
 
+def format_admin_request_type(req_type: str) -> str:
+    if req_type == "buy":
+        return "Satılır"
+    if req_type == "rent":
+        return "Kirayə verilir"
+    return req_type or "-"
+
+
+def fetch_admin_request_type_counts() -> dict:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT request_type, COUNT(*) as cnt
+        FROM customer_requests
+        WHERE status='active'
+        GROUP BY request_type
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+    counts = {"buy": 0, "rent": 0}
+    for row in rows:
+        req_type = row["request_type"] if isinstance(row, dict) else row[0]
+        cnt = row["cnt"] if isinstance(row, dict) else row[1]
+        if req_type in counts:
+            counts[req_type] = cnt or 0
+    return counts
+
+
+def show_admin_customer_request_types(
+    chat_id: int, message: Optional[types.Message] = None
+):
+    counts = fetch_admin_request_type_counts()
+    buy_count = counts.get("buy", 0)
+    rent_count = counts.get("rent", 0)
+    mk = types.InlineKeyboardMarkup()
+    buttons = []
+    if buy_count > 0:
+        buttons.append(
+            types.InlineKeyboardButton(
+                f"🏠 Satılır ({buy_count})", callback_data="adm_req_type:buy"
+            )
+        )
+    if rent_count > 0:
+        buttons.append(
+            types.InlineKeyboardButton(
+                f"🏡 Kirayə verilir ({rent_count})", callback_data="adm_req_type:rent"
+            )
+        )
+
+    if not buttons:
+        text = "Bu bölmədə aktiv müştəri istəyi yoxdur."
+        if message:
+            try:
+                bot.edit_message_text(
+                    text,
+                    chat_id=message.chat.id,
+                    message_id=message.message_id,
+                )
+            except Exception:
+                bot.send_message(chat_id, text)
+        else:
+            bot.send_message(chat_id, text)
+        return
+
+    if len(buttons) == 2:
+        mk.row(*buttons)
+    else:
+        mk.add(buttons[0])
+
+    text = "📌 Müştəri istəkləri"
+    if message:
+        try:
+            bot.edit_message_text(
+                text,
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=mk,
+            )
+            return
+        except Exception:
+            pass
+    bot.send_message(chat_id, text, reply_markup=mk)
+
+
+def fetch_admin_request_rayons(req_type: str) -> List[Tuple[str, int]]:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT rayon, COUNT(*) as cnt
+        FROM customer_requests
+        WHERE status='active'
+          AND request_type=?
+          AND rayon IS NOT NULL
+          AND TRIM(rayon) != ''
+        GROUP BY rayon
+        HAVING cnt > 0
+        ORDER BY cnt DESC
+        """,
+        (req_type,),
+    )
+    rows = [(r["rayon"], r["cnt"]) for r in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def show_admin_request_rayons(
+    chat_id: int, req_type: str, message: Optional[types.Message] = None
+):
+    admin_customer_request_state[chat_id] = {"request_type": req_type}
+    rayons = fetch_admin_request_rayons(req_type)
+    mk = types.InlineKeyboardMarkup()
+    for i in range(0, len(rayons), 2):
+        row_buttons = []
+        for rayon, cnt in rayons[i : i + 2]:
+            row_buttons.append(
+                types.InlineKeyboardButton(
+                    f"📍 {rayon} ({cnt})",
+                    callback_data=f"adm_req_rayon:{req_type}:{quote(rayon, safe='')}:1",
+                )
+            )
+        mk.row(*row_buttons)
+
+    mk.add(
+        types.InlineKeyboardButton(
+            "⬅️ Satılır / Kirayə seçiminə qayıt", callback_data="adm_req_types"
+        )
+    )
+
+    if not rayons:
+        text = "Bu seçim üzrə aktiv müştəri istəyi yoxdur."
+        if message:
+            try:
+                bot.edit_message_text(
+                    text,
+                    chat_id=message.chat.id,
+                    message_id=message.message_id,
+                    reply_markup=mk,
+                )
+                return
+            except Exception:
+                pass
+        bot.send_message(chat_id, text, reply_markup=mk)
+        return
+
+    text = f"📍 {format_admin_request_type(req_type)} üzrə rayonlar:"
+    if message:
+        try:
+            bot.edit_message_text(
+                text,
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=mk,
+            )
+            return
+        except Exception:
+            pass
+    bot.send_message(chat_id, text, reply_markup=mk)
+
+
+def format_admin_request_list_item(req: dict) -> str:
+    created_dt = parse_dt_safe(req.get("created_at"))
+    created_at = created_dt.strftime("%Y-%m-%d %H:%M") if created_dt else "bilinmir"
+    req_type = format_admin_request_type(req.get("request_type"))
+    return "\n".join(
+        [
+            f"🆔 Sorğu ID: {req.get('id')}",
+            f"📅 Tarix: {created_at}",
+            f"🏠 Tip: {req_type}",
+            f"📍 Rayon: {req.get('rayon') or '-'}",
+            f"🛏 Otaq: {req.get('rooms') or '-'}",
+            f"💰 Büdcə: {req.get('budget') or '-'}",
+            f"📞 Telefon: {req.get('phone') or '-'}",
+            f"🆔 Müştəri ID: {req.get('chat_id') or '-'}",
+        ]
+    )
+
+
+def fetch_admin_requests_by_rayon(
+    req_type: str, rayon: str, page: int
+) -> Tuple[List[dict], int, int, int]:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT COUNT(*) FROM customer_requests
+        WHERE status='active'
+          AND request_type=?
+          AND LOWER(rayon) = LOWER(?)
+        """,
+        (req_type, rayon),
+    )
+    total = cur.fetchone()[0] or 0
+    total_pages = max(1, math.ceil(total / PAGE_SIZE_REQ)) if total else 1
+    page = max(1, min(page, total_pages))
+    offset = (page - 1) * PAGE_SIZE_REQ
+    cur.execute(
+        """
+        SELECT * FROM customer_requests
+        WHERE status='active'
+          AND request_type=?
+          AND LOWER(rayon) = LOWER(?)
+        ORDER BY datetime(created_at) DESC
+        LIMIT ? OFFSET ?
+        """,
+        (req_type, rayon, PAGE_SIZE_REQ, offset),
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows, total, total_pages, page
+
+
+def build_admin_request_list_nav(
+    req_type: str, rayon: str, page: int, total_pages: int
+) -> types.InlineKeyboardMarkup:
+    mk = types.InlineKeyboardMarkup()
+    encoded = quote(rayon, safe="")
+    mk.row(
+        types.InlineKeyboardButton(
+            "⏮", callback_data=f"adm_req_rayon:{req_type}:{encoded}:1"
+        ),
+        types.InlineKeyboardButton(
+            "◀️",
+            callback_data=f"adm_req_rayon:{req_type}:{encoded}:{max(1, page - 1)}",
+        ),
+        types.InlineKeyboardButton(
+            f"📄 {page}/{total_pages}", callback_data="adm_req_nop:list"
+        ),
+        types.InlineKeyboardButton(
+            "▶️",
+            callback_data=f"adm_req_rayon:{req_type}:{encoded}:{min(total_pages, page + 1)}",
+        ),
+        types.InlineKeyboardButton(
+            "⏭", callback_data=f"adm_req_rayon:{req_type}:{encoded}:{total_pages}"
+        ),
+    )
+    mk.add(
+        types.InlineKeyboardButton(
+            "⬅️ Rayonlara qayıt", callback_data=f"adm_req_rayons:{req_type}"
+        )
+    )
+    mk.add(
+        types.InlineKeyboardButton(
+            "⬅️ Satılır / Kirayə seçiminə qayıt", callback_data="adm_req_types"
+        )
+    )
+    mk.add(types.InlineKeyboardButton("🏠 Əsas menyu", callback_data="adm_req_main"))
+    return mk
+
+
+def show_admin_requests_by_rayon(
+    chat_id: int,
+    req_type: str,
+    rayon: str,
+    page: int = 1,
+    message: Optional[types.Message] = None,
+):
+    admin_customer_request_state[chat_id] = {
+        "request_type": req_type,
+        "rayon": rayon,
+    }
+    rows, total, total_pages, current_page = fetch_admin_requests_by_rayon(
+        req_type, rayon, page
+    )
+    if not rows:
+        mk = build_admin_request_list_nav(req_type, rayon, 1, 1)
+        text = f"📭 {rayon} üzrə aktiv sorğu yoxdur."
+        if message:
+            try:
+                bot.edit_message_text(
+                    text,
+                    chat_id=message.chat.id,
+                    message_id=message.message_id,
+                    reply_markup=mk,
+                )
+                return
+            except Exception:
+                pass
+        bot.send_message(chat_id, text, reply_markup=mk)
+        return
+
+    for req in rows:
+        bot.send_message(chat_id, format_admin_request_list_item(req))
+
+    mk = build_admin_request_list_nav(req_type, rayon, current_page, total_pages)
+    footer = (
+        f"📄 Səhifə: {current_page}/{total_pages}\n"
+        f"📍 Rayon: {rayon}\n"
+        f"🏠 Tip: {format_admin_request_type(req_type)}\n"
+        f"Cəmi: {total}"
+    )
+    if message:
+        try:
+            bot.edit_message_text(
+                footer,
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=mk,
+            )
+            return
+        except Exception:
+            pass
+    bot.send_message(chat_id, footer, reply_markup=mk)
+
+
 def show_customer_requests_overview(chat_id: int, period: str = "day"):
     stats = fetch_customer_request_stats(period)
     text_lines = [
@@ -8343,6 +8651,77 @@ def cb_admin_request_period(c):
         pass
     period = c.data.split(":", 1)[1]
     show_customer_requests_overview(c.message.chat.id, period)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "adm_req_types")
+def cb_admin_request_types(c):
+    if not is_admin(c.from_user.id):
+        return
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+    show_admin_customer_request_types(c.message.chat.id, message=c.message)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_type:"))
+def cb_admin_request_type_select(c):
+    if not is_admin(c.from_user.id):
+        return
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+    req_type = c.data.split(":", 1)[1]
+    show_admin_request_rayons(c.message.chat.id, req_type, message=c.message)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_rayons:"))
+def cb_admin_request_rayons(c):
+    if not is_admin(c.from_user.id):
+        return
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+    req_type = c.data.split(":", 1)[1]
+    show_admin_request_rayons(c.message.chat.id, req_type, message=c.message)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_rayon:"))
+def cb_admin_request_rayon_list(c):
+    if not is_admin(c.from_user.id):
+        return
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+    parts = c.data.split(":", 3)
+    if len(parts) < 4:
+        return
+    _, req_type, encoded_rayon, page_str = parts
+    try:
+        rayon = unquote(encoded_rayon)
+    except Exception:
+        rayon = encoded_rayon
+    try:
+        page = int(page_str)
+    except Exception:
+        page = 1
+    show_admin_requests_by_rayon(
+        c.message.chat.id, req_type, rayon, page=page, message=c.message
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "adm_req_main")
+def cb_admin_request_main_menu(c):
+    if not is_admin(c.from_user.id):
+        return
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+    return_to_main_menu(c.message.chat.id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req:"))
@@ -11795,7 +12174,7 @@ def stats_period_keyboard(selected: str) -> types.InlineKeyboardMarkup:
     mk.row(*buttons)
     mk.add(
         types.InlineKeyboardButton(
-            "📌 Müştəri istəkləri", callback_data="adm_req_period:day"
+            "📌 Müştəri istəkləri", callback_data="adm_req_types"
         )
     )
     return mk
