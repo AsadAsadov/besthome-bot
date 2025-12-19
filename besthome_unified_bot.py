@@ -121,6 +121,7 @@ FINANCIAL_REPORTS_MENU = [
 ADMIN_PANEL_PAGE1 = [
     "✅ Təsdiqlənməyən elanlar",
     "📊 Statistikalar",
+    "📌 Müştəri istəkləri",
     FINANCIAL_REPORTS_BUTTON,
     "📢 Vasitəçilərə bildiriş",
     "🧠 Aktiv / passiv maklerlər",
@@ -136,6 +137,7 @@ ADMIN_PANEL_PAGE2 = [
     "📦 Baza yenilə",
     "📨 İstifadəçiyə mesaj göndər",
     "📌 Müştəri istəkləri icazələri",
+    "🗄 Arxivlənmiş müştəri istəkləri",
 ]
 ADMIN_PANEL_NAV_NEXT = "▶️ Növbəti səhifə"
 ADMIN_PANEL_NAV_PREV = "◀️ Əvvəlki səhifə"
@@ -2696,10 +2698,49 @@ def send_logo_if_exists(chat_id: int):
         pass
 
 
+MENU_REFRESH_BUTTON = "🔄 Botu yenilə"
+MENU_VISIBILITY_HINT_TEXT = (
+    "ℹ️ Əsas menyu görünmür?\n"
+    "➡️ /start yazın\n"
+    "və ya\n"
+    "🔄 “Botu yenilə” düyməsinə klik edin."
+)
+MENU_VISIBILITY_HINT_COOLDOWN_SECONDS = 300
+menu_visibility_hint_last_sent = {}
+
+
 def send_refresh_button(chat_id: int):
     mk = types.InlineKeyboardMarkup()
-    mk.add(types.InlineKeyboardButton("🔄 Botu yenilə", callback_data="bot_refresh"))
-    bot.send_message(chat_id, "🔄 Botu yenilə", reply_markup=mk)
+    mk.add(types.InlineKeyboardButton(MENU_REFRESH_BUTTON, callback_data="bot_refresh"))
+    bot.send_message(chat_id, MENU_REFRESH_BUTTON, reply_markup=mk)
+
+
+def ensure_refresh_button(kb: types.ReplyKeyboardMarkup) -> types.ReplyKeyboardMarkup:
+    try:
+        for row in kb.keyboard:
+            if any(btn == MENU_REFRESH_BUTTON for btn in row):
+                return kb
+    except Exception:
+        pass
+    kb.row(MENU_REFRESH_BUTTON)
+    return kb
+
+
+def send_menu_visibility_hint(chat_id: int):
+    now = time.time()
+    last_ts = menu_visibility_hint_last_sent.get(chat_id, 0)
+    if now - last_ts < MENU_VISIBILITY_HINT_COOLDOWN_SECONDS:
+        return
+    menu_visibility_hint_last_sent[chat_id] = now
+    mk = types.InlineKeyboardMarkup()
+    mk.add(types.InlineKeyboardButton(MENU_REFRESH_BUTTON, callback_data="bot_refresh"))
+    bot.send_message(chat_id, MENU_VISIBILITY_HINT_TEXT, reply_markup=mk)
+
+
+def send_with_reply_keyboard(chat_id: int, text: str, keyboard: types.ReplyKeyboardMarkup):
+    ensure_refresh_button(keyboard)
+    bot.send_message(chat_id, text, reply_markup=keyboard)
+    send_menu_visibility_hint(chat_id)
 
 
 def send_main_menu(chat_id: int):
@@ -2725,8 +2766,8 @@ def send_main_menu(chat_id: int):
     for i in range(0, len(buttons), 2):
         row = buttons[i : i + 2]
         kb.row(*row)
-    kb.row("🔄 Botu yenilə")
-    bot.send_message(chat_id, "🏠 Əsas menyu:", reply_markup=kb)
+    kb.row(MENU_REFRESH_BUTTON)
+    send_with_reply_keyboard(chat_id, "🏠 Əsas menyu:", kb)
 
 
 def build_search_menu_keyboard():
@@ -2735,12 +2776,13 @@ def build_search_menu_keyboard():
     kb.row("🔍 Açar sözlə axtar", "📞 Nömrə ilə axtar")
     kb.row("⭐ Favorilərim", "🔔 Bildirişlərim")
     kb.row("⬅️ Əsas menyuya qayıt")
+    ensure_refresh_button(kb)
     return kb
 
 
 def send_search_menu(chat_id: int):
     kb = build_search_menu_keyboard()
-    bot.send_message(chat_id, "\u2063", reply_markup=kb)
+    send_with_reply_keyboard(chat_id, "\u2063", kb)
 
 
 # =============== ELAN KARTI (WhatsApp ilə) ===============
@@ -3099,6 +3141,7 @@ def build_request_rayon_keyboard(include_back: bool = True) -> types.ReplyKeyboa
         kb.row(*row)
     if include_back:
         kb.row("⬅️ Geri (Əsas menyu)")
+    ensure_refresh_button(kb)
     return kb
 
 
@@ -3107,6 +3150,7 @@ def build_request_rooms_keyboard() -> types.ReplyKeyboardMarkup:
     kb.row("1", "2")
     kb.row("3", "4+")
     kb.row("⬅️ Geri (Əsas menyu)")
+    ensure_refresh_button(kb)
     return kb
 
 
@@ -3270,6 +3314,9 @@ def ensure_customer_request_action_allowed(admin_chat_id: int, req_id: str) -> b
     if not req:
         bot.send_message(admin_chat_id, "⚠️ Sorğu tapılmadı.")
         return False
+    if req.get("status") == "deleted":
+        bot.send_message(admin_chat_id, "⚠️ Sorğu artıq silinib.")
+        return False
     return True
 
 
@@ -3401,7 +3448,11 @@ def show_request_type_menu(chat_id: int):
     kb.row("🏠 Almaq istəyirəm")
     kb.row("🏢 Kirayə götürmək istəyirəm")
     kb.row("⬅️ Geri (Əsas menyu)")
-    bot.send_message(chat_id, "📝 Nə üçün sorğu yaratmaq istəyirsiniz?", reply_markup=kb)
+    send_with_reply_keyboard(
+        chat_id,
+        "📝 Nə üçün sorğu yaratmaq istəyirsiniz?",
+        kb,
+    )
 
 
 @bot.message_handler(func=lambda m: m.text == "📝 Ev axtarıram")
@@ -3451,6 +3502,7 @@ def handle_request_type_selection(message):
         "📍 Rayon / ərazini seçin və ya yazın:",
         reply_markup=build_request_rayon_keyboard(),
     )
+    send_menu_visibility_hint(chat_id)
 
 
 @bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "rayon")
@@ -3472,6 +3524,7 @@ def handle_request_rayon(message):
         "🚪 Otaq sayını seçin və ya yazın:",
         reply_markup=build_request_rooms_keyboard(),
     )
+    send_menu_visibility_hint(chat_id)
 
 
 @bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "rooms")
@@ -3490,7 +3543,9 @@ def handle_request_rooms(message):
     st["step"] = "budget"
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("⬅️ Geri (Əsas menyu)")
-    bot.send_message(chat_id, "💰 Büdcəni yazın (məs: 800 AZN):", reply_markup=kb)
+    send_with_reply_keyboard(
+        chat_id, "💰 Büdcəni yazın (məs: 800 AZN):", kb
+    )
 
 
 @bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "budget")
@@ -3510,10 +3565,10 @@ def handle_request_budget(message):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("Keç")
     kb.row("⬅️ Geri (Əsas menyu)")
-    bot.send_message(
+    send_with_reply_keyboard(
         chat_id,
         "📝 Əlavə qeydlər (istəyə bağlı) yazın və ya 'Keç' seçin:",
-        reply_markup=kb,
+        kb,
     )
 
 
@@ -3530,7 +3585,7 @@ def handle_request_notes(message):
     st["step"] = "phone"
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("⬅️ Geri (Əsas menyu)")
-    bot.send_message(chat_id, "📞 Əlaqə nömrəsini yazın:", reply_markup=kb)
+    send_with_reply_keyboard(chat_id, "📞 Əlaqə nömrəsini yazın:", kb)
 
 
 @bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "phone")
@@ -3579,6 +3634,7 @@ def build_complaint_categories_keyboard():
     for cat in COMPLAINT_CATEGORIES:
         kb.row(cat)
     kb.row(COMPLAINT_BACK)
+    ensure_refresh_button(kb)
     return kb
 
 
@@ -3589,10 +3645,10 @@ def start_complaint_flow(chat_id: int):
         bot.send_message(chat_id, "⏳ Zəhmət olmasa bir neçə dəqiqə sonra yenidən göndərin.")
         return
     complaint_flow_state[chat_id] = {"step": "category"}
-    bot.send_message(
+    send_with_reply_keyboard(
         chat_id,
         "📂 Kateqoriyanı seçin:",
-        reply_markup=build_complaint_categories_keyboard(),
+        build_complaint_categories_keyboard(),
     )
 
 
@@ -3667,11 +3723,12 @@ def complaint_category_handler(message):
             "📂 Kateqoriyanı seçin:",
             reply_markup=build_complaint_categories_keyboard(),
         )
+        send_menu_visibility_hint(chat_id)
         return
     complaint_flow_state[chat_id] = {"step": "message", "category": choice}
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row(COMPLAINT_BACK)
-    bot.send_message(chat_id, "✍️ Zəhmət olmasa mesajınızı yazın.", reply_markup=kb)
+    send_with_reply_keyboard(chat_id, "✍️ Zəhmət olmasa mesajınızı yazın.", kb)
 
 
 @bot.message_handler(
@@ -3683,10 +3740,10 @@ def complaint_message_handler(message):
     text = message.text
     if text == COMPLAINT_BACK:
         complaint_flow_state[chat_id] = {"step": "category"}
-        bot.send_message(
+        send_with_reply_keyboard(
             chat_id,
             "📂 Kateqoriyanı seçin:",
-            reply_markup=build_complaint_categories_keyboard(),
+            build_complaint_categories_keyboard(),
         )
         return
     data = complaint_flow_state.pop(chat_id, {})
@@ -4044,6 +4101,7 @@ def new_listing_keyboard(extra=None):
     if extra:
         for row in extra:
             kb.row(*row)
+    ensure_refresh_button(kb)
     return kb
 
 
@@ -4680,6 +4738,7 @@ def status_menu_keyboard():
     kb.row("🏠 Satılan elanlar", "🏢 Kirayə verilən elanlar")
     kb.row("⛔ Qara siyahı")
     kb.row("⬅️ Geri")
+    ensure_refresh_button(kb)
     return kb
 
 
@@ -4687,10 +4746,10 @@ def status_menu_keyboard():
 def open_status_menu(message):
     if not ensure_allowed(message):
         return
-    bot.send_message(
+    send_with_reply_keyboard(
         message.chat.id,
         "📂 Elan statuslarını seçin:",
-        reply_markup=status_menu_keyboard(),
+        status_menu_keyboard(),
     )
 
 
@@ -4904,6 +4963,9 @@ def customer_requests_from_menu(message):
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
+    if is_admin(chat_id):
+        show_customer_requests_overview(chat_id, "day")
+        return
     if not has_customer_requests_access(chat_id):
         bot.send_message(chat_id, "❌ Bu funksiya sizin üçün aktiv deyil.")
         return
@@ -7534,12 +7596,13 @@ def build_admin_panel_keyboard(chat_id: int, page: int = 1):
     else:
         mk.row(ADMIN_PANEL_NAV_PREV, ADMIN_PANEL_BACK_MAIN)
     admin_panel_page_state[chat_id] = page
+    ensure_refresh_button(mk)
     return mk
 
 
 def send_admin_panel(chat_id: int, page: int = 1, text: str = "🛠 Admin Panel:"):
     mk = build_admin_panel_keyboard(chat_id, page)
-    bot.send_message(chat_id, text, reply_markup=mk)
+    send_with_reply_keyboard(chat_id, text, mk)
 
 
 @bot.message_handler(func=lambda m: m.text == "📊 Admin Panel")
@@ -7577,6 +7640,8 @@ def handle_admin_panel_action(message):
     elif txt == "📊 Statistikalar":
         admin_stats_period[chat_id] = "day"
         show_admin_stats(chat_id)
+    elif txt == "📌 Müştəri istəkləri":
+        show_customer_requests_overview(chat_id, "day")
     elif txt == FINANCIAL_REPORTS_BUTTON:
         send_financial_reports_menu(chat_id)
     elif txt == "📢 Vasitəçilərə bildiriş":
@@ -7612,6 +7677,8 @@ def handle_admin_panel_action(message):
     elif txt == "📌 Müştəri istəkləri icazələri":
         msg = bot.send_message(chat_id, "🆔 Telegram istifadəçi ID-sini daxil edin:")
         bot.register_next_step_handler(msg, admin_customer_requests_access_step)
+    elif txt == "🗄 Arxivlənmiş müştəri istəkləri":
+        show_archived_requests(chat_id, page=1)
 
 
 def admin_customer_requests_access_step(message):
@@ -7660,7 +7727,7 @@ def fetch_customer_request_stats(period: str):
                SUM(CASE WHEN request_type='buy' THEN 1 ELSE 0 END) as buy_count,
                SUM(CASE WHEN request_type='rent' THEN 1 ELSE 0 END) as rent_count
         FROM customer_requests
-        WHERE status!='archived' AND datetime(created_at) >= datetime(?)
+        WHERE status='active' AND datetime(created_at) >= datetime(?)
         """,
         params,
     )
@@ -7673,7 +7740,7 @@ def fetch_customer_request_stats(period: str):
         """
         SELECT COALESCE(rayon, '-') as rayon, COUNT(*) as cnt
         FROM customer_requests
-        WHERE status!='archived' AND datetime(created_at) >= datetime(?)
+        WHERE status='active' AND datetime(created_at) >= datetime(?)
         GROUP BY rayon
         ORDER BY cnt DESC
         """,
@@ -7815,7 +7882,10 @@ def send_request_card(chat_id: int, req: dict):
         mk.add(types.InlineKeyboardButton("💬 WhatsApp yaz", url=wa_link))
     mk.add(
         types.InlineKeyboardButton("⭐ İşarələ", callback_data=f"adm_req_flag:{req['id']}"),
-        types.InlineKeyboardButton("📦 Arxivlə", callback_data=f"adm_req_arch:{req['id']}")
+        types.InlineKeyboardButton("🗄 Arxivlə", callback_data=f"adm_req_arch:{req['id']}")
+    )
+    mk.add(
+        types.InlineKeyboardButton("🗑 Sil", callback_data=f"adm_req_del:{req['id']}")
     )
     bot.send_message(chat_id, format_request_card(req), reply_markup=mk)
 
@@ -7850,7 +7920,7 @@ def show_customer_requests_by_rayon(chat_id: int, period: str, rayon: str, page:
     cur.execute(
         """
         SELECT COUNT(*) FROM customer_requests
-        WHERE status!='archived' AND datetime(created_at) >= datetime(?)
+        WHERE status='active' AND datetime(created_at) >= datetime(?)
           AND LOWER(rayon) = LOWER(?)
         """,
         params,
@@ -7863,7 +7933,7 @@ def show_customer_requests_by_rayon(chat_id: int, period: str, rayon: str, page:
     cur.execute(
         """
         SELECT * FROM customer_requests
-        WHERE status!='archived' AND datetime(created_at) >= datetime(?)
+        WHERE status='active' AND datetime(created_at) >= datetime(?)
           AND LOWER(rayon) = LOWER(?)
         ORDER BY datetime(created_at) DESC
         LIMIT ? OFFSET ?
@@ -7892,7 +7962,7 @@ def fetch_flagged_requests(page: int = 1):
     conn = get_local_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT COUNT(*) FROM customer_requests WHERE flagged=1 AND status!='archived'"
+        "SELECT COUNT(*) FROM customer_requests WHERE flagged=1 AND status='active'"
     )
     total = cur.fetchone()[0]
     total_pages = max(1, math.ceil(total / PAGE_SIZE_REQ)) if total else 1
@@ -7902,7 +7972,7 @@ def fetch_flagged_requests(page: int = 1):
     cur.execute(
         """
         SELECT * FROM customer_requests
-        WHERE flagged=1 AND status!='archived'
+        WHERE flagged=1 AND status='active'
         ORDER BY datetime(created_at) DESC
         LIMIT ? OFFSET ?
         """,
@@ -7941,6 +8011,82 @@ def show_flagged_requests(chat_id: int, page: int = 1):
     bot.send_message(chat_id, "⭐ İşarələnən sorğular:", reply_markup=mk)
 
 
+def format_archived_request_card(req: dict) -> str:
+    created_dt = parse_dt_safe(req.get("created_at"))
+    created_at = created_dt.strftime("%Y-%m-%d %H:%M") if created_dt else "-"
+    req_type = format_request_type(req.get("request_type"))
+    return "\n".join(
+        [
+            "🗄 Arxivlənmiş sorğu",
+            f"📍 Rayon: {req.get('rayon') or '-'}",
+            f"📅 Tarix: {created_at}",
+            f"📄 Tip: {req_type}",
+            f"🆔 Müştəri ID: {req.get('chat_id') or '-'}",
+            f"💰 Büdcə: {req.get('budget') or '-'}",
+        ]
+    )
+
+
+def fetch_archived_requests(page: int = 1):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM customer_requests WHERE status='archived'")
+    total = cur.fetchone()[0]
+    total_pages = max(1, math.ceil(total / PAGE_SIZE_REQ)) if total else 1
+    if page > total_pages:
+        page = total_pages
+    offset = (page - 1) * PAGE_SIZE_REQ
+    cur.execute(
+        """
+        SELECT * FROM customer_requests
+        WHERE status='archived'
+        ORDER BY datetime(created_at) DESC
+        LIMIT ? OFFSET ?
+        """,
+        (PAGE_SIZE_REQ, offset),
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows, total_pages
+
+
+def show_archived_requests(chat_id: int, page: int = 1):
+    rows, total_pages = fetch_archived_requests(page)
+    if not rows:
+        bot.send_message(chat_id, "🗄 Arxivlənmiş sorğu yoxdur.")
+        return
+    for req in rows:
+        mk = types.InlineKeyboardMarkup()
+        mk.row(
+            types.InlineKeyboardButton(
+                "♻️ Geri qaytar", callback_data=f"adm_req_restore:{req['id']}"
+            ),
+            types.InlineKeyboardButton(
+                "🗑 Tam sil", callback_data=f"adm_req_del:{req['id']}"
+            ),
+        )
+        bot.send_message(chat_id, format_archived_request_card(req), reply_markup=mk)
+
+    mk = types.InlineKeyboardMarkup()
+    mk.row(
+        types.InlineKeyboardButton("⏮", callback_data="adm_req_archived:1"),
+        types.InlineKeyboardButton(
+            "◀️", callback_data=f"adm_req_archived:{max(1, page-1)}"
+        ),
+        types.InlineKeyboardButton(
+            f"📄 {page}/{total_pages}", callback_data="adm_req_nop:archived"
+        ),
+        types.InlineKeyboardButton(
+            "▶️", callback_data=f"adm_req_archived:{min(total_pages, page+1)}"
+        ),
+        types.InlineKeyboardButton(
+            "⏭", callback_data=f"adm_req_archived:{total_pages}"
+        ),
+    )
+    mk.add(types.InlineKeyboardButton("⬅️ Müştəri istəkləri", callback_data="adm_req_period:day"))
+    bot.send_message(chat_id, "🗄 Arxivlənmiş sorğular:", reply_markup=mk)
+
+
 def send_financial_reports_menu(chat_id: int):
     if not is_admin(chat_id):
         return
@@ -7949,7 +8095,7 @@ def send_financial_reports_menu(chat_id: int):
     mk.row("📜 Ödəniş tarixçəsi", "🤝 Referral statistikası")
     mk.row("📈 Aylıq gəlir hesabatı")
     mk.row(FINANCIAL_REPORTS_BACK)
-    bot.send_message(chat_id, "💰 Maliyyə hesabatları:", reply_markup=mk)
+    send_with_reply_keyboard(chat_id, "💰 Maliyyə hesabatları:", mk)
 
 
 @bot.message_handler(func=lambda m: is_admin(m.chat.id) and m.text in FINANCIAL_REPORTS_MENU)
@@ -8043,7 +8189,67 @@ def cb_admin_request_archive(c):
     )
     conn.commit()
     conn.close()
-    bot.send_message(c.message.chat.id, f"📦 Sorğu arxivləndi (ID: {req_id}).")
+    bot.send_message(c.message.chat.id, f"🗄 Sorğu arxivləndi (ID: {req_id}).")
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_restore:"))
+def cb_admin_request_restore(c):
+    if not is_admin(c.from_user.id):
+        return
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+    req_id = c.data.split(":", 1)[1]
+    if not ensure_customer_request_action_allowed(c.message.chat.id, req_id):
+        return
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE customer_requests SET status='active' WHERE id=?",
+        (req_id,),
+    )
+    conn.commit()
+    conn.close()
+    bot.send_message(c.message.chat.id, f"♻️ Sorğu aktiv edildi (ID: {req_id}).")
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_del:"))
+def cb_admin_request_delete(c):
+    if not is_admin(c.from_user.id):
+        return
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+    req_id = c.data.split(":", 1)[1]
+    if not ensure_customer_request_action_allowed(c.message.chat.id, req_id):
+        return
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE customer_requests SET status='deleted' WHERE id=?",
+        (req_id,),
+    )
+    conn.commit()
+    conn.close()
+    bot.send_message(c.message.chat.id, f"🗑 Sorğu silindi (ID: {req_id}).")
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_archived:"))
+def cb_admin_request_archived(c):
+    if not is_admin(c.from_user.id):
+        return
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+    page = 1
+    try:
+        page = int(c.data.split(":", 1)[1])
+    except Exception:
+        pass
+    show_archived_requests(c.message.chat.id, page)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_viewflag:"))
@@ -10509,8 +10715,8 @@ def broadcast_bot_update(admin_chat_id):
     mk = types.InlineKeyboardMarkup()
     mk.add(
         types.InlineKeyboardButton(
-            "🔁 Botu yenilə",
-            callback_data="refresh_bot",
+            MENU_REFRESH_BUTTON,
+            callback_data="bot_refresh",
         )
     )
 
@@ -10536,9 +10742,20 @@ def handle_bot_refresh(message):
     chat_id = message.chat.id
     user_state.pop(chat_id, None)
     search_state.pop(chat_id, None)
+    customer_request_state.pop(chat_id, None)
+    agent_request_lookup_state.pop(chat_id, None)
+    today_flow_state.pop(chat_id, None)
+    complaint_flow_state.pop(chat_id, None)
+    admin_reply_state.pop(chat_id, None)
+    admin_stats_period.pop(chat_id, None)
+    admin_direct_message_state.pop(chat_id, None)
+    admin_user_message_state.pop(chat_id, None)
+    admin_message_state.pop(chat_id, None)
+    admin_panel_page_state.pop(chat_id, None)
+    admin_user_page_state.pop(chat_id, None)
+    ui_state.pop(chat_id, None)
     session_interactions.pop(chat_id, None)
     search_reminder_shown.discard(chat_id)
-    admin_panel_page_state.pop(chat_id, None)
     return_to_main_menu(chat_id)
 
 
@@ -11966,9 +12183,9 @@ def main_menu(chat_id):
 
     for i in range(0, len(buttons), 2):
         mk.row(*buttons[i : i + 2])
-    mk.add("🔄 Botu yenilə")
+    mk.add(MENU_REFRESH_BUTTON)
 
-    bot.send_message(chat_id, "📋 Əsas menyudan seçim et:", reply_markup=mk)
+    send_with_reply_keyboard(chat_id, "📋 Əsas menyudan seçim et:", mk)
 
 
 if __name__ == "__main__":
