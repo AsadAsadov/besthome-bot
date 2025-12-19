@@ -28,6 +28,7 @@ import logging
 import json
 from datetime import datetime, date, timedelta, timezone
 from collections import defaultdict
+from functools import wraps
 from typing import Optional, Tuple, List, Dict, Any
 from urllib.parse import quote, unquote, urlsplit, urlunsplit, parse_qs, urlencode
 
@@ -103,9 +104,11 @@ search_state = {}  # Açar sözlə axtarış paging state
 today_flow_state = {}
 search_reminder_shown = set()  # Session-level reminder flag
 session_interactions = {}
-db_update_lock = threading.Lock()
 db_update_state_lock = threading.Lock()
 db_update_state: Dict[int, Dict[str, Any]] = {}
+db_update_lock_by_admin: Dict[int, bool] = {}
+db_update_started_at: Dict[int, datetime] = {}
+db_update_lock_by_admin_lock = threading.Lock()
 DB_UPDATE_TTL_SECONDS = 600
 DB_UPDATE_MAX_ZIP_BYTES = 500 * 1024 * 1024
 DB_UPDATE_MIN_ZIP_BYTES = 1 * 1024 * 1024
@@ -223,8 +226,6 @@ def close_all_main_conns():
 
 
 def get_main_conn():
-    while main_db_update_in_progress.is_set():
-        time.sleep(0.05)
     conn = sqlite3.connect(MAIN_DB)
     conn.row_factory = sqlite3.Row
     register_main_conn(conn)
@@ -284,6 +285,26 @@ def safe_answer_callback_query(callback_id: Optional[str], text: Optional[str] =
         logger.exception("answer_callback_query failed callback_id=%s", callback_id)
 
 
+def callback_guard(handler):
+    @wraps(handler)
+    def wrapper(call):
+        safe_answer_callback_query(call.id)
+        try:
+            return handler(call)
+        except Exception as exc:
+            logger.exception("Callback failed data=%s", getattr(call, "data", None))
+            chat_id = None
+            if call and getattr(call, "message", None):
+                chat_id = call.message.chat.id
+            notify_chat_id = chat_id if chat_id and is_admin(chat_id) else ADMIN_ID
+            if notify_chat_id is not None:
+                safe_admin_step(
+                    notify_chat_id,
+                    f"⚠️ Xəta oldu: {exc} (chat_id={chat_id})",
+                )
+    return wrapper
+
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -336,7 +357,11 @@ def cleanup_stale_db_updates() -> List[int]:
                 stale.append(admin_id)
                 db_update_state.pop(admin_id, None)
     if stale:
-        logger.warning("Recovered stale db update locks: %s", stale)
+        with db_update_lock_by_admin_lock:
+            for admin_id in stale:
+                db_update_lock_by_admin.pop(admin_id, None)
+                db_update_started_at.pop(admin_id, None)
+        logger.warning("stale db update lock recovered admins=%s", stale)
         for admin_id in stale:
             admin_update_state.pop(admin_id, None)
     return stale
@@ -357,6 +382,28 @@ def set_db_update_state(admin_id: int, status: str) -> None:
             "started_at": now_utc(),
             "last_progress": now_utc(),
         }
+
+
+def acquire_db_update_lock(admin_id: int) -> bool:
+    now = now_utc()
+    with db_update_lock_by_admin_lock:
+        if db_update_lock_by_admin.get(admin_id):
+            started_at = db_update_started_at.get(admin_id)
+            if started_at and (now - started_at).total_seconds() > DB_UPDATE_TTL_SECONDS:
+                logger.warning("stale db update lock recovered admin_id=%s", admin_id)
+                db_update_lock_by_admin.pop(admin_id, None)
+                db_update_started_at.pop(admin_id, None)
+            else:
+                return False
+        db_update_lock_by_admin[admin_id] = True
+        db_update_started_at[admin_id] = now
+        return True
+
+
+def release_db_update_lock(admin_id: int) -> None:
+    with db_update_lock_by_admin_lock:
+        db_update_lock_by_admin.pop(admin_id, None)
+        db_update_started_at.pop(admin_id, None)
 
 
 def update_db_update_progress(admin_id: int) -> None:
@@ -612,6 +659,7 @@ def atomic_replace_main_db(new_db_path: str) -> Optional[str]:
 
 def send_db_update_progress(admin_id: int, message: str) -> None:
     update_db_update_progress(admin_id)
+    logger.info("DB update progress chat_id=%s step=%s", admin_id, message)
     safe_admin_step(admin_id, message)
 
 
@@ -620,16 +668,7 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
     extracted_db_path = None
     extracted_dir = None
     backup_path = None
-    acquired = False
     try:
-        acquired = db_update_lock.acquire(blocking=False)
-        if not acquired:
-            safe_admin_step(
-                admin_id,
-                "⏳ Hal-hazırda baza yenilənir. Zəhmət olmasa gözləyin.",
-            )
-            return
-
         main_db_update_in_progress.set()
         send_db_update_progress(admin_id, "⬇️ Zip yüklənir…")
         temp_zip_path = download_zip_stream(url)
@@ -658,35 +697,49 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
         finally:
             conn.close()
 
-        send_db_update_progress(admin_id, "📊 Statistika hesablanır…")
-        new_listings = count_new_listings_since(MAIN_DB, last_max_id)
-        new_max_id = get_max_listing_id(MAIN_DB)
-        save_last_update_max_id(new_max_id)
-
-        total_active = count_main_active_listings(use_direct_conn=True)
-        sale_active = count_main_active_listings(op_code="sat", use_direct_conn=True)
-        rent_active = count_main_active_listings(op_code="kir", use_direct_conn=True)
-        today_active = count_main_active_listings(only_today=True, use_direct_conn=True)
+        send_db_update_progress(admin_id, "🧱 FTS/indeks yenilənir…")
         try:
-            process_keyword_alerts_for_new_listings()
-        except Exception as e:
-            logger.warning("keyword alert listing scan error: %s", e)
+            init_main_db_indices()
+            ensure_fts_tables()
+        except Exception:
+            logger.exception("FTS/index rebuild failed after update")
 
-        report = (
-            "✅ Baza uğurla yeniləndi.\n"
-            f"📦 Yeni elanlar: {new_listings}\n"
-            f"📊 Ümumi elan sayı: {total_active}\n"
-            f"1⃣ Satılır: {sale_active}\n"
-            f"2⃣ Kirayə verilir: {rent_active}\n"
-            f"🆕 Bu gün daxil olan elanlar: {today_active}"
-        )
-        safe_admin_step(admin_id, report)
-        logger.info(
-            "DB update completed chat_id=%s new=%s total=%s",
-            admin_id,
-            new_listings,
-            total_active,
-        )
+        send_db_update_progress(admin_id, "📊 Statistika hesablanır…")
+        try:
+            new_listings = count_new_listings_since(MAIN_DB, last_max_id)
+            new_max_id = get_max_listing_id(MAIN_DB)
+            save_last_update_max_id(new_max_id)
+
+            total_active = count_main_active_listings(use_direct_conn=True)
+            sale_active = count_main_active_listings(op_code="sat", use_direct_conn=True)
+            rent_active = count_main_active_listings(op_code="kir", use_direct_conn=True)
+            today_active = count_main_active_listings(only_today=True, use_direct_conn=True)
+            try:
+                process_keyword_alerts_for_new_listings()
+            except Exception as e:
+                logger.warning("keyword alert listing scan error: %s", e)
+
+            report = (
+                "✅ Baza uğurla yeniləndi.\n"
+                f"📦 Yeni elanlar: {new_listings}\n"
+                f"📊 Ümumi elan sayı: {total_active}\n"
+                f"1⃣ Satılır: {sale_active}\n"
+                f"2⃣ Kirayə verilir: {rent_active}\n"
+                f"🆕 Bu gün daxil olan elanlar: {today_active}"
+            )
+            safe_admin_step(admin_id, report)
+            logger.info(
+                "DB update completed chat_id=%s new=%s total=%s",
+                admin_id,
+                new_listings,
+                total_active,
+            )
+        except Exception:
+            logger.exception("DB stats failed after update chat_id=%s", admin_id)
+            safe_admin_step(
+                admin_id,
+                "✅ DB yeniləndi, amma statistika hesablama zamanı xəta oldu (bot işləkdir).",
+            )
     except Exception as exc:
         logger.exception("DB update failed chat_id=%s", admin_id)
         safe_admin_step(admin_id, f"❌ Yenilənmə alınmadı: {exc}")
@@ -694,8 +747,7 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             restore_main_db_from_backup(backup_path)
     finally:
         main_db_update_in_progress.clear()
-        if acquired:
-            db_update_lock.release()
+        release_db_update_lock(admin_id)
         admin_update_state.pop(admin_id, None)
         clear_db_update_state(admin_id)
         for path in (temp_zip_path, extracted_db_path):
@@ -1349,41 +1401,78 @@ def ensure_fts_tables():
 
     def build_fts(conn, base_table: str, fts_name: str):
         cur = conn.cursor()
-        cur.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS "
-            f"{fts_name} USING fts5(summary, address, metro, rayon, contact_name, operation, "
-            f"content='{base_table}', content_rowid='id')"
-        )
-        cur.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?", (fts_name,))
-        if cur.fetchone()[0] == 0:
+        cur.execute(f"PRAGMA table_info({base_table})")
+        cols = {row[1].lower(): row[1] for row in cur.fetchall()}
+        if not cols:
+            logger.warning("FTS skip: table not found base_table=%s", base_table)
             return
+
+        def pick_col(candidates: List[str]) -> Optional[str]:
+            for name in candidates:
+                col = cols.get(name.lower())
+                if col:
+                    return col
+            return None
+
+        summary_col = pick_col(["summary", "title", "description", "text", "details"])
+        if not summary_col:
+            logger.warning(
+                "FTS skip: no text column found base_table=%s columns=%s",
+                base_table,
+                sorted(cols.values()),
+            )
+            return
+
+        col_candidates = {
+            "address": ["address", "unvan", "adres"],
+            "metro": ["metro", "station"],
+            "rayon": ["rayon", "district", "region"],
+            "contact_name": ["contact_name", "contact", "name"],
+            "operation": ["operation", "op", "deal_type"],
+        }
+        chosen = [summary_col]
+        for candidate_list in col_candidates.values():
+            picked = pick_col(candidate_list)
+            if picked:
+                chosen.append(picked)
+        chosen = list(dict.fromkeys(chosen))
+
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (fts_name,))
+        exists = cur.fetchone() is not None
+        if exists:
+            cur.execute(f"PRAGMA table_info({fts_name})")
+            existing_cols = [row[1] for row in cur.fetchall()]
+            if [c.lower() for c in existing_cols] != [c.lower() for c in chosen]:
+                logger.info(
+                    "FTS schema mismatch, rebuilding fts_name=%s old=%s new=%s",
+                    fts_name,
+                    existing_cols,
+                    chosen,
+                )
+                cur.execute(f"DROP TABLE IF EXISTS {fts_name}")
+                exists = False
+
+        if not exists:
+            cur.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS "
+                f"{fts_name} USING fts5({', '.join(chosen)}, "
+                f"content='{base_table}', content_rowid='id')"
+            )
+
+        logger.info(
+            "FTS build base_table=%s fts_table=%s columns=%s",
+            base_table,
+            fts_name,
+            chosen,
+        )
         cur.execute(f"SELECT COUNT(*) FROM {fts_name}")
         existing = cur.fetchone()[0] or 0
         if existing > 0:
             return
 
-        cur.execute(f"SELECT name FROM pragma_table_info('{base_table}')")
-        cols = {row[0] for row in cur.fetchall()}
-
-        def col_expr(name: str):
-            return name if name in cols else "''"
-
-        select_sql = (
-            "SELECT id, "
-            + ", ".join(
-                [
-                    col_expr("summary"),
-                    col_expr("address"),
-                    col_expr("metro"),
-                    col_expr("rayon"),
-                    col_expr("contact_name"),
-                    col_expr("operation"),
-                ]
-            )
-            + f" FROM {base_table}"
-        )
+        select_sql = f"SELECT id, {', '.join(chosen)} FROM {base_table}"
         cur.execute(
-            f"INSERT INTO {fts_name}(rowid, summary, address, metro, rayon, contact_name, operation) "
+            f"INSERT INTO {fts_name}(rowid, {', '.join(chosen)}) "
             + select_sql
         )
         conn.commit()
@@ -1393,15 +1482,15 @@ def ensure_fts_tables():
             conn = get_main_conn()
             build_fts(conn, "listings", "listings_fts")
             close_main_conn(conn)
-    except Exception as e:
-        print("⚠️ FTS (main) yaradarkən xəta:", e)
+    except Exception:
+        logger.exception("FTS (main) yaradarkən xəta")
 
     try:
         conn = get_local_conn()
         build_fts(conn, "listings_approved", "local_listings_fts")
         conn.close()
-    except Exception as e:
-        print("⚠️ FTS (local) yaradarkən xəta:", e)
+    except Exception:
+        logger.exception("FTS (local) yaradarkən xəta")
 
 
 # =============== ÜMUMİ UTIL FUNKSİYALAR ===============
@@ -5122,6 +5211,7 @@ def complaint_entry(message):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "open_complaint")
+@callback_guard
 def cb_open_complaint(c):
     if not is_complaint_access_allowed(c.message.chat.id):
         return
@@ -5187,6 +5277,7 @@ def complaint_message_handler(message):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("complaint_reply:"))
+@callback_guard
 def complaint_reply_callback(c):
     if not is_admin(c.from_user.id):
         try:
@@ -5301,6 +5392,7 @@ def payment_menu_entry(message):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "payinfo")
+@callback_guard
 def cb_payinfo(c):
     about(c.message)
     try:
@@ -5321,6 +5413,7 @@ def send_active_promo_info(chat_id: int):
 
 
 @bot.callback_query_handler(func=lambda c: c.data in ("promoenter", "promo_enter"))
+@callback_guard
 def cb_promo_enter(c):
     chat_id = c.message.chat.id
     status = get_user_promo_status(chat_id)
@@ -5342,6 +5435,7 @@ def cb_promo_enter(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "promo_active_info")
+@callback_guard
 def cb_promo_active_info(c):
     chat_id = c.message.chat.id
     send_active_promo_info(chat_id)
@@ -5361,6 +5455,7 @@ def promo_code_entry_step(message):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("payplan|"))
+@callback_guard
 def cb_payplan(c):
     chat_id = c.message.chat.id
     plan_key = c.data.split("|")[1]
@@ -5388,6 +5483,7 @@ def cb_payplan(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "demo3")
+@callback_guard
 def cb_demo_activate(c):
     chat_id = c.message.chat.id
     if not is_demo_available(chat_id):
@@ -5439,6 +5535,7 @@ def cb_demo_activate(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("paydone|"))
+@callback_guard
 def cb_paydone(c):
     chat_id = c.message.chat.id
     plan_key = c.data.split("|")[1]
@@ -5473,6 +5570,7 @@ def cb_paydone(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("payadm|"))
+@callback_guard
 def cb_pay_admin(c):
     if not is_admin(c.message.chat.id):
         return
@@ -6004,6 +6102,7 @@ def show_favorites(message):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("fav|"))
+@callback_guard
 def cb_add_favorite(c):
     if not ensure_allowed_cb(c):
         return
@@ -6030,6 +6129,7 @@ def cb_add_favorite(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("wa|"))
+@callback_guard
 def cb_whatsapp_click(c):
     if not ensure_allowed_cb(c):
         return
@@ -6060,6 +6160,7 @@ def cb_whatsapp_click(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("favdel|"))
+@callback_guard
 def cb_remove_favorite(c):
     if not ensure_allowed_cb(c):
         return
@@ -6114,6 +6215,7 @@ def status_label(code: str) -> str:
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("st|"))
+@callback_guard
 def cb_listing_status(c):
     if not ensure_allowed_cb(c):
         return
@@ -6346,6 +6448,7 @@ def handle_today_menu(message):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("td|"))
+@callback_guard
 def handle_today_callbacks(c):
     if not ensure_allowed_cb(c):
         return
@@ -7560,6 +7663,7 @@ def show_saved_notifications(message):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "kw_alert_menu")
+@callback_guard
 def cb_keyword_alert_menu(c):
     if not ensure_allowed_cb(c):
         return
@@ -7571,6 +7675,7 @@ def cb_keyword_alert_menu(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "kw_alert_back")
+@callback_guard
 def cb_keyword_alert_back(c):
     if not ensure_allowed_cb(c):
         return
@@ -7582,6 +7687,7 @@ def cb_keyword_alert_back(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "kw_alert_add")
+@callback_guard
 def cb_keyword_alert_add(c):
     if not ensure_allowed_cb(c):
         return
@@ -7612,6 +7718,7 @@ def handle_keyword_alert_keyword(message):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("kw_alert_rayon_"))
+@callback_guard
 def cb_keyword_alert_rayon(c):
     if not ensure_allowed_cb(c):
         return
@@ -7654,6 +7761,7 @@ def cb_keyword_alert_rayon(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("kw_alert_list:"))
+@callback_guard
 def cb_keyword_alert_list(c):
     if not ensure_allowed_cb(c):
         return
@@ -7669,6 +7777,7 @@ def cb_keyword_alert_list(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("kw_alert_toggle:"))
+@callback_guard
 def cb_keyword_alert_toggle(c):
     if not ensure_allowed_cb(c):
         return
@@ -7685,6 +7794,7 @@ def cb_keyword_alert_toggle(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("kw_alert_delete:"))
+@callback_guard
 def cb_keyword_alert_delete(c):
     if not ensure_allowed_cb(c):
         return
@@ -7702,6 +7812,7 @@ def cb_keyword_alert_delete(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "kw_hits_menu")
+@callback_guard
 def cb_keyword_hits_menu(c):
     if not ensure_allowed_cb(c):
         return
@@ -7714,6 +7825,7 @@ def cb_keyword_hits_menu(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("kw_hits:"))
+@callback_guard
 def cb_keyword_hits(c):
     if not ensure_allowed_cb(c):
         return
@@ -7733,6 +7845,7 @@ def cb_keyword_hits(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("kw_hit_view:"))
+@callback_guard
 def cb_keyword_hit_view(c):
     if not ensure_allowed_cb(c):
         return
@@ -7781,6 +7894,7 @@ def cb_keyword_hit_view(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ss|"))
+@callback_guard
 def cb_search_select(c):
     if not ensure_allowed_cb(c):
         return
@@ -7834,6 +7948,7 @@ def cb_search_select(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("save_search|"))
+@callback_guard
 def cb_save_search(c):
     if not ensure_allowed_cb(c):
         return
@@ -7858,6 +7973,7 @@ def cb_save_search(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_open:"))
+@callback_guard
 def cb_open_notifications(c):
     if not ensure_allowed_cb(c):
         return
@@ -7888,6 +8004,7 @@ def cb_open_notifications(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "notif_menu")
+@callback_guard
 def cb_notifications_menu(c):
     if not ensure_allowed_cb(c):
         return
@@ -7899,6 +8016,7 @@ def cb_notifications_menu(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "notif_back")
+@callback_guard
 def cb_notifications_back(c):
     if not ensure_allowed_cb(c):
         return
@@ -7910,6 +8028,7 @@ def cb_notifications_back(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_period:"))
+@callback_guard
 def cb_notifications_period(c):
     if not ensure_allowed_cb(c):
         return
@@ -7925,6 +8044,7 @@ def cb_notifications_period(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "notif_kw_hits")
+@callback_guard
 def cb_notifications_keyword_hits(c):
     if not ensure_allowed_cb(c):
         return
@@ -7936,6 +8056,7 @@ def cb_notifications_keyword_hits(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "notif_cust_req")
+@callback_guard
 def cb_notifications_customer_requests(c):
     if not ensure_allowed_cb(c):
         return
@@ -7957,6 +8078,7 @@ def cb_notifications_customer_requests(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_view:"))
+@callback_guard
 def cb_notifications_view_listing(c):
     if not ensure_allowed_cb(c):
         return
@@ -7986,6 +8108,7 @@ def cb_notifications_view_listing(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("agent_notif:"))
+@callback_guard
 def cb_agent_notifications(c):
     if not ensure_allowed_cb(c):
         return
@@ -8010,6 +8133,7 @@ def cb_agent_notifications(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "notif_crit")
+@callback_guard
 def cb_notif_criteria(c):
     if not ensure_allowed_cb(c):
         return
@@ -8021,6 +8145,7 @@ def cb_notif_criteria(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "notif_rule_new")
+@callback_guard
 def cb_notif_rule_new(c):
     if not ensure_allowed_cb(c):
         return
@@ -8056,6 +8181,7 @@ def handle_notification_rule_operation(message):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_rule_rayon_"))
+@callback_guard
 def cb_notification_rule_rayon(c):
     if not ensure_allowed_cb(c):
         return
@@ -8097,6 +8223,7 @@ def cb_notification_rule_rayon(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_rule_prop"))
+@callback_guard
 def cb_notification_rule_prop(c):
     if not ensure_allowed_cb(c):
         return
@@ -8242,6 +8369,7 @@ def finalize_notification_rule(chat_id: int):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_stopcrit:"))
+@callback_guard
 def cb_stop_criteria(c):
     if not ensure_allowed_cb(c):
         return
@@ -8263,6 +8391,7 @@ def cb_stop_criteria(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("crit_toggle:"))
+@callback_guard
 def cb_toggle_criteria(c):
     if not ensure_allowed_cb(c):
         return
@@ -8291,6 +8420,7 @@ def cb_toggle_criteria(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("crit_del:"))
+@callback_guard
 def cb_delete_criteria(c):
     if not ensure_allowed_cb(c):
         return
@@ -8351,6 +8481,7 @@ def send_keyword_date_prompt(chat_id: int, message=None):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("kwop|"))
+@callback_guard
 def cb_keyword_operation(c):
     if not ensure_allowed_cb(c):
         return
@@ -8389,6 +8520,7 @@ def cb_keyword_operation(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("kwdr|"))
+@callback_guard
 def cb_keyword_date_range(c):
     if not ensure_allowed_cb(c):
         return
@@ -9685,6 +9817,7 @@ def send_paginated_results(
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("pg:"))
+@callback_guard
 def cb_pagination(c):
     if not ensure_allowed_cb(c):
         return
@@ -9911,6 +10044,7 @@ def structured_go_back(chat_id, message=None):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("fs|"))
+@callback_guard
 def cb_structured(c):
     if not ensure_allowed_cb(c):
         return
@@ -10355,6 +10489,7 @@ def send_agents_panel_message(chat_id: int):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "agent_search|filter")
+@callback_guard
 def cb_agent_filter(c):
     chat_id = c.message.chat.id
 
@@ -10386,6 +10521,7 @@ def cb_agent_filter(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "agent_filter|rayon")
+@callback_guard
 def cb_agent_filter_rayon(c):
     chat_id = c.message.chat.id
     if not is_admin(chat_id):
@@ -10433,6 +10569,7 @@ def agent_search_by_rayon(message):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "agent_search|keyword")
+@callback_guard
 def cb_agent_keyword(c):
     chat_id = c.message.chat.id
     if not is_admin(chat_id):
@@ -10483,6 +10620,7 @@ def agent_search_by_keyword(message):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "agent_search|phone")
+@callback_guard
 def cb_agent_phone(c):
     chat_id = c.message.chat.id
     if not is_admin(chat_id):
@@ -11869,6 +12007,7 @@ def handle_financial_reports_menu(message):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_period:"))
+@callback_guard
 def cb_admin_request_period(c):
     if not is_admin(c.from_user.id):
         return
@@ -11881,6 +12020,7 @@ def cb_admin_request_period(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "adm_req_types")
+@callback_guard
 def cb_admin_request_types(c):
     if not is_admin(c.from_user.id):
         return
@@ -11892,6 +12032,7 @@ def cb_admin_request_types(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_type:"))
+@callback_guard
 def cb_admin_request_type_select(c):
     if not is_admin(c.from_user.id):
         return
@@ -11904,6 +12045,7 @@ def cb_admin_request_type_select(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_rayons:"))
+@callback_guard
 def cb_admin_request_rayons(c):
     if not is_admin(c.from_user.id):
         return
@@ -11916,6 +12058,7 @@ def cb_admin_request_rayons(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_rayon:"))
+@callback_guard
 def cb_admin_request_rayon_list(c):
     if not is_admin(c.from_user.id):
         return
@@ -11941,6 +12084,7 @@ def cb_admin_request_rayon_list(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "adm_req_main")
+@callback_guard
 def cb_admin_request_main_menu(c):
     if not is_admin(c.from_user.id):
         return
@@ -11952,6 +12096,7 @@ def cb_admin_request_main_menu(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req:"))
+@callback_guard
 def cb_admin_request_rayon(c):
     if not is_admin(c.from_user.id):
         return
@@ -11977,6 +12122,7 @@ def cb_admin_request_rayon(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_flag:"))
+@callback_guard
 def cb_admin_request_flag(c):
     if not is_admin(c.from_user.id):
         return
@@ -11999,6 +12145,7 @@ def cb_admin_request_flag(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_arch:"))
+@callback_guard
 def cb_admin_request_archive(c):
     if not is_admin(c.from_user.id):
         return
@@ -12021,6 +12168,7 @@ def cb_admin_request_archive(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_restore:"))
+@callback_guard
 def cb_admin_request_restore(c):
     if not is_admin(c.from_user.id):
         return
@@ -12043,6 +12191,7 @@ def cb_admin_request_restore(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_del:"))
+@callback_guard
 def cb_admin_request_delete(c):
     if not is_admin(c.from_user.id):
         return
@@ -12065,6 +12214,7 @@ def cb_admin_request_delete(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_archived:"))
+@callback_guard
 def cb_admin_request_archived(c):
     if not is_admin(c.from_user.id):
         return
@@ -12081,6 +12231,7 @@ def cb_admin_request_archived(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_viewflag:"))
+@callback_guard
 def cb_admin_request_view_flagged(c):
     if not is_admin(c.from_user.id):
         return
@@ -12097,6 +12248,7 @@ def cb_admin_request_view_flagged(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_nop"))
+@callback_guard
 def cb_admin_request_noop(c):
     if not is_admin(c.from_user.id):
         return
@@ -12107,6 +12259,7 @@ def cb_admin_request_noop(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("admin_view_profile:"))
+@callback_guard
 def admin_open_user_profile(c):
     if not is_admin(c.from_user.id):
         return
@@ -12125,6 +12278,7 @@ def admin_open_user_profile(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("toggle_customer_requests:"))
+@callback_guard
 def toggle_customer_requests(c):
     if not is_admin(c.from_user.id):
         return
@@ -12153,6 +12307,7 @@ def toggle_customer_requests(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cust_req_access:"))
+@callback_guard
 def cb_customer_requests_access(c):
     if not is_admin(c.from_user.id):
         return
@@ -12180,6 +12335,7 @@ def cb_customer_requests_access(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "cust_req_access_add")
+@callback_guard
 def cb_customer_requests_access_add(c):
     if not is_admin(c.from_user.id):
         return
@@ -12194,6 +12350,7 @@ def cb_customer_requests_access_add(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cust_req_access_disable:"))
+@callback_guard
 def cb_customer_requests_access_disable(c):
     if not is_admin(c.from_user.id):
         return
@@ -12213,6 +12370,7 @@ def cb_customer_requests_access_disable(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("toggle_customer_request_user:"))
+@callback_guard
 def toggle_customer_request_user(c):
     if not is_admin(c.from_user.id):
         return
@@ -12363,6 +12521,7 @@ def show_user_profile(chat_id: int, user_id: int):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("admin_send_message:"))
+@callback_guard
 def admin_start_message(c):
     if not is_admin(c.from_user.id):
         return
@@ -12695,6 +12854,7 @@ def cancel_demo_for_user(user_id: int):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("demo_users|"))
+@callback_guard
 def cb_demo_users_actions(c):
     if not is_admin(c.message.chat.id):
         return
@@ -12870,6 +13030,7 @@ def start_admin_update_db(chat_id: int, callback_id: Optional[str] = None):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "admin_update_db")
+@callback_guard
 def cb_admin_update_db(c):
     start_admin_update_db(c.message.chat.id, callback_id=c.id)
 
@@ -12913,18 +13074,30 @@ def handle_admin_db_upload(message):
         )
         return
 
+    if not acquire_db_update_lock(chat_id):
+        safe_admin_step(chat_id, "⏳ Hal-hazırda baza yenilənir. Zəhmət olmasa gözləyin.")
+        return
+
     safe_admin_step(chat_id, "✅ Link alındı. ⏳ Yenilənir…")
     logger.info("Admin db update link received chat_id=%s url=%s", chat_id, url)
     admin_update_state[chat_id] = "updating_db"
     set_db_update_state(chat_id, "running")
-    threading.Thread(
-        target=run_db_update_pipeline,
-        args=(chat_id, url),
-        daemon=True,
-    ).start()
+    try:
+        threading.Thread(
+            target=run_db_update_pipeline,
+            args=(chat_id, url),
+            daemon=True,
+        ).start()
+    except Exception:
+        release_db_update_lock(chat_id)
+        admin_update_state.pop(chat_id, None)
+        clear_db_update_state(chat_id)
+        logger.exception("Failed to start db update thread chat_id=%s", chat_id)
+        safe_admin_step(chat_id, "❌ Yenilənmə başladılmadı. Zəhmət olmasa yenidən yoxlayın.")
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm|"))
+@callback_guard
 def cb_admin(c):
     if not is_admin(c.message.chat.id):
         return
@@ -13235,6 +13408,7 @@ def show_admin_promo_stats(chat_id: int, page: int = 1):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("prm|"))
+@callback_guard
 def cb_admin_promo(c):
     if not is_admin(c.message.chat.id):
         return
@@ -13542,6 +13716,7 @@ def show_user_payment_details(admin_chat_id: int, target_id: int, page: int = 1,
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("payhist|"))
+@callback_guard
 def cb_pay_history_list(c):
     if not is_admin(c.message.chat.id):
         return
@@ -13560,6 +13735,7 @@ def cb_pay_history_list(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("paydetail|"))
+@callback_guard
 def cb_pay_user_detail(c):
     if not is_admin(c.message.chat.id):
         return
@@ -13587,6 +13763,7 @@ def cb_pay_user_detail(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("subctl|"))
+@callback_guard
 def cb_subscription_control(c):
     if not is_admin(c.message.chat.id):
         return
@@ -13857,6 +14034,7 @@ def show_unverified_users(chat_id: int, page: int = 1, message=None, force_new: 
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "unverified_users")
+@callback_guard
 def cb_unverified_users(c):
     if not is_admin(c.message.chat.id):
         return
@@ -13870,6 +14048,7 @@ def cb_unverified_users(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("unverified_users_page|"))
+@callback_guard
 def cb_unverified_users_page(c):
     if not is_admin(c.message.chat.id):
         return
@@ -13889,6 +14068,7 @@ def cb_unverified_users_page(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("userlist|"))
+@callback_guard
 def cb_userlist(c):
     if not is_admin(c.message.chat.id):
         return
@@ -13901,6 +14081,7 @@ def cb_userlist(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_u:"))
+@callback_guard
 def cb_admin_user_pagination(c):
     if not is_admin(c.message.chat.id):
         return
@@ -13918,6 +14099,7 @@ def cb_admin_user_pagination(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_search|"))
+@callback_guard
 def cb_user_search(c):
     if not is_admin(c.message.chat.id):
         return
@@ -14340,6 +14522,7 @@ def build_admin_msg_back_markup(list_type: str, page: int) -> types.InlineKeyboa
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_msg:"))
+@callback_guard
 def cb_admin_start_user_message(c):
     if not is_admin(c.message.chat.id):
         return
@@ -14394,6 +14577,7 @@ def cb_admin_start_user_message(c):
     func=lambda c: c.data.startswith("adm_msg_back:")
     or c.data.startswith("adm_msg_cancel:")
 )
+@callback_guard
 def cb_admin_cancel_user_message(c):
     if not is_admin(c.message.chat.id):
         return
@@ -14488,6 +14672,7 @@ def handle_admin_user_message_text(message):
     )
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_stop:"))
+@callback_guard
 def cb_admin_stop_user(c):
     if not is_admin(c.message.chat.id):
         return
@@ -14529,6 +14714,7 @@ def cb_admin_stop_user(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_block|"))
+@callback_guard
 def cb_user_block_action(c):
     if not is_admin(c.message.chat.id):
         return
@@ -14565,6 +14751,7 @@ def cb_user_block_action(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_approve|"))
+@callback_guard
 def cb_user_approve_action(c):
     if not is_admin(c.message.chat.id):
         return
@@ -14611,6 +14798,7 @@ def cb_user_approve_action(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_demo|"))
+@callback_guard
 def cb_user_demo_action(c):
     if not is_admin(c.message.chat.id):
         return
@@ -14641,6 +14829,7 @@ def cb_user_demo_action(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_free|"))
+@callback_guard
 def cb_user_set_free(c):
     if not is_admin(c.message.chat.id):
         return
@@ -14665,6 +14854,7 @@ def cb_user_set_free(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_to_paid|"))
+@callback_guard
 def cb_user_to_paid(c):
     if not is_admin(c.message.chat.id):
         return
@@ -14689,6 +14879,7 @@ def cb_user_to_paid(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_reject|"))
+@callback_guard
 def cb_user_reject(c):
     if not is_admin(c.message.chat.id):
         return
@@ -14709,6 +14900,7 @@ def cb_user_reject(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_restore|"))
+@callback_guard
 def cb_user_restore_action(c):
     if not is_admin(c.message.chat.id):
         return
@@ -14728,6 +14920,7 @@ def cb_user_restore_action(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_delete|"))
+@callback_guard
 def cb_user_delete_action(c):
     if not is_admin(c.message.chat.id):
         return
@@ -14806,6 +14999,7 @@ def show_pending_listings(chat_id):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("admin_approve:"))
+@callback_guard
 def handle_admin_approve(c):
     try:
         ad_id = int(c.data.split(":")[1])
@@ -14873,6 +15067,7 @@ def handle_admin_approve(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("admin_delete:"))
+@callback_guard
 def handle_admin_delete(c):
     try:
         ad_id = int(c.data.split(":")[1])
@@ -14953,6 +15148,7 @@ def show_pending_users(chat_id):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("uappr|"))
+@callback_guard
 def cb_user_approve(c):
     if not is_admin(c.message.chat.id):
         return
@@ -14988,6 +15184,7 @@ def cb_user_approve(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ublock|"))
+@callback_guard
 def cb_user_block_pending(c):
     if not is_admin(c.message.chat.id):
         return
@@ -15066,6 +15263,7 @@ def refresh_button_message(message):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "bot_refresh")
+@callback_guard
 def cb_bot_refresh(c):
     try:
         bot.answer_callback_query(c.id, "✅ Yeniləndi.")
@@ -15075,6 +15273,7 @@ def cb_bot_refresh(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "refresh_bot")
+@callback_guard
 def cb_refresh_bot(c):
     """İstifadəçi 'Botu yenilə' düyməsinə basanda /start işə düşür."""
     try:
@@ -15127,6 +15326,7 @@ def agents_button(message):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "pub_agents_kw")
+@callback_guard
 def cb_pub_agents_kw(c):
     if not ensure_allowed_cb(c):
         return
@@ -15171,6 +15371,7 @@ def build_agent_request_rayon_markup():
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "agent_requests")
+@callback_guard
 def cb_agent_requests(c):
     if not ensure_allowed_cb(c):
         return
@@ -15191,6 +15392,7 @@ def cb_agent_requests(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "cust_req_ops")
+@callback_guard
 def cb_customer_requests_ops(c):
     if not ensure_allowed_cb(c):
         return
@@ -15205,6 +15407,7 @@ def cb_customer_requests_ops(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "cust_req_back")
+@callback_guard
 def cb_customer_requests_back(c):
     if not ensure_allowed_cb(c):
         return
@@ -15216,6 +15419,7 @@ def cb_customer_requests_back(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cust_req_op:"))
+@callback_guard
 def cb_customer_requests_op(c):
     if not ensure_allowed_cb(c):
         return
@@ -15233,6 +15437,7 @@ def cb_customer_requests_op(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cr_rule_rayon_"))
+@callback_guard
 def cb_customer_request_rule_rayon(c):
     if not ensure_allowed_cb(c):
         return
@@ -15343,6 +15548,7 @@ def show_agent_requests_by_rayon(
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("agt_req:"))
+@callback_guard
 def cb_agent_request_page(c):
     if not ensure_allowed_cb(c):
         return
@@ -15378,6 +15584,7 @@ def cb_agent_request_page(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cust_req_save:"))
+@callback_guard
 def cb_customer_request_save(c):
     if not ensure_allowed_cb(c):
         return
@@ -15399,6 +15606,7 @@ def cb_customer_request_save(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cust_req_arch:"))
+@callback_guard
 def cb_customer_request_archive(c):
     if not ensure_allowed_cb(c):
         return
@@ -15420,6 +15628,7 @@ def cb_customer_request_archive(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cust_req_unarch:"))
+@callback_guard
 def cb_customer_request_unarchive(c):
     if not ensure_allowed_cb(c):
         return
@@ -15441,6 +15650,7 @@ def cb_customer_request_unarchive(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cust_req_archived:"))
+@callback_guard
 def cb_customer_request_archived(c):
     if not ensure_allowed_cb(c):
         return
@@ -15459,6 +15669,7 @@ def cb_customer_request_archived(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "cust_req_rules")
+@callback_guard
 def cb_customer_request_rules(c):
     if not ensure_allowed_cb(c):
         return
@@ -15473,6 +15684,7 @@ def cb_customer_request_rules(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "cust_req_rules_new")
+@callback_guard
 def cb_customer_request_rules_new(c):
     if not ensure_allowed_cb(c):
         return
@@ -15487,6 +15699,7 @@ def cb_customer_request_rules_new(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cust_req_rule_toggle:"))
+@callback_guard
 def cb_customer_request_rule_toggle(c):
     if not ensure_allowed_cb(c):
         return
@@ -15510,6 +15723,7 @@ def cb_customer_request_rule_toggle(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cust_req_alerts:"))
+@callback_guard
 def cb_customer_request_alerts(c):
     if not ensure_allowed_cb(c):
         return
@@ -15540,6 +15754,7 @@ def cb_customer_request_alerts(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cr_alert_view:"))
+@callback_guard
 def cb_customer_request_alert_view(c):
     if not ensure_allowed_cb(c):
         return
@@ -15587,6 +15802,7 @@ def cb_customer_request_alert_view(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cr_rule_stop:"))
+@callback_guard
 def cb_customer_request_rule_stop(c):
     if not ensure_allowed_cb(c):
         return
@@ -15606,6 +15822,7 @@ def cb_customer_request_rule_stop(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cr_alert_delete:"))
+@callback_guard
 def cb_customer_request_alert_delete(c):
     if not ensure_allowed_cb(c):
         return
@@ -15738,6 +15955,7 @@ def show_agent_my_customers(
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("agt_my:"))
+@callback_guard
 def cb_agent_my_customers(c):
     if not ensure_allowed_cb(c):
         return
@@ -15762,6 +15980,7 @@ def cb_agent_my_customers(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("agt_int:"))
+@callback_guard
 def cb_agent_interest(c):
     if not ensure_allowed_cb(c):
         return
@@ -16366,6 +16585,7 @@ def show_admin_stats(chat_id, period: Optional[str] = None, message_id: Optional
 
 
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("stats_period:"))
+@callback_guard
 def handle_stats_period_callback(c):
     period = c.data.split(":", 1)[1] if c.data else "day"
     if period not in STATS_PERIOD_MAP:
