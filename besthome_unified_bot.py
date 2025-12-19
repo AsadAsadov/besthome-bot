@@ -14079,9 +14079,16 @@ def cb_unverified_users_page(c):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("userlist|"))
 @callback_guard
 def cb_userlist(c):
-    if not is_admin(c.message.chat.id):
-        return
     safe_answer_callback_query(c.id)
+    if not is_admin(c.from_user.id):
+        safe_answer_callback_query(c.id, "⛔ İcazə yoxdur")
+        return
+    logger.info(
+        "userlist callback chat_id=%s from=%s data=%s",
+        c.message.chat.id,
+        c.from_user.id,
+        c.data,
+    )
     try:
         status = c.data.split("|", 1)[1]
     except Exception:
@@ -14275,276 +14282,284 @@ def delete_user_fully(chat_id: int):
 
 
 def show_all_users(chat_id, status="active", page: int = 1, message=None, force_new: bool = False):
-    page = max(1, int(page or 1))
-    if status == "pending":
-        show_unverified_users(chat_id, page=page, message=message, force_new=force_new)
-        return
-    if status not in USERLIST_STATUS_FILTERS:
-        status = "active"
-
-    conn = get_local_conn()
-    cur = conn.cursor()
-
-    def _status_where_clause(list_status: str) -> Tuple[str, Tuple]:
-        statuses = USERLIST_STATUS_FILTERS.get(list_status, USERLIST_STATUS_FILTERS["active"])
-        if list_status == "active":
-            placeholders = ", ".join(["?"] * len(statuses))
-            return f"status IN ({placeholders})", statuses
-        return "status=?", (statuses[0],)
-
-    query_parts = {
-        "active": {
-            "where": _status_where_clause("active")[0],
-            "params": _status_where_clause("active")[1],
-            "title": "✅ Aktiv istifadəçilər",
-            "order": "ORDER BY datetime(joined_at) DESC",
-        },
-        "blocked": {
-            "where": _status_where_clause("blocked")[0],
-            "params": _status_where_clause("blocked")[1],
-            "title": "🚫 Bloklanmış istifadəçilər",
-            "order": "ORDER BY datetime(blocked_at) DESC",
-        },
-        "pending": {
-            "where": _status_where_clause("pending")[0],
-            "params": _status_where_clause("pending")[1],
-            "title": "⏳ Təsdiqlənməmiş istifadəçilər",
-            "order": "ORDER BY datetime(joined_at) ASC",
-        },
-        "demo": {
-            "where": _status_where_clause("demo")[0],
-            "params": _status_where_clause("demo")[1],
-            "title": "🎁 Demo istifadəçilər",
-            "order": "ORDER BY datetime(joined_at) DESC",
-        },
-        "free": {
-            "where": _status_where_clause("free")[0],
-            "params": _status_where_clause("free")[1],
-            "title": "♾ Limitsiz istifadəçilər",
-            "order": "ORDER BY datetime(joined_at) DESC",
-        },
-        "rejected": {
-            "where": _status_where_clause("rejected")[0],
-            "params": _status_where_clause("rejected")[1],
-            "title": "❌ Rədd edilmiş istifadəçilər",
-            "order": "ORDER BY datetime(joined_at) DESC",
-        },
-    }
-
-    parts = query_parts.get(status)
-    if not parts:
-        parts = query_parts["active"]
-        status = "active"
-
-    base_query = "SELECT * FROM users"
-
+    conn = None
     try:
+        logger.info("show_all_users start chat_id=%s status=%s page=%s", chat_id, status, page)
+        page = max(1, int(page or 1))
+        if status == "pending":
+            show_unverified_users(chat_id, page=page, message=message, force_new=force_new)
+            return
+        if status not in USERLIST_STATUS_FILTERS:
+            status = "active"
+
+        conn = get_local_conn()
+        cur = conn.cursor()
+
+        def _status_where_clause(list_status: str) -> Tuple[str, Tuple]:
+            statuses = USERLIST_STATUS_FILTERS.get(list_status, USERLIST_STATUS_FILTERS["active"])
+            if list_status == "active":
+                placeholders = ", ".join(["?"] * len(statuses))
+                return f"status IN ({placeholders})", statuses
+            return "status=?", (statuses[0],)
+
+        query_parts = {
+            "active": {
+                "where": _status_where_clause("active")[0],
+                "params": _status_where_clause("active")[1],
+                "title": "✅ Aktiv istifadəçilər",
+                "order": "ORDER BY datetime(joined_at) DESC",
+            },
+            "blocked": {
+                "where": _status_where_clause("blocked")[0],
+                "params": _status_where_clause("blocked")[1],
+                "title": "🚫 Bloklanmış istifadəçilər",
+                "order": "ORDER BY datetime(blocked_at) DESC",
+            },
+            "pending": {
+                "where": _status_where_clause("pending")[0],
+                "params": _status_where_clause("pending")[1],
+                "title": "⏳ Təsdiqlənməmiş istifadəçilər",
+                "order": "ORDER BY datetime(joined_at) ASC",
+            },
+            "demo": {
+                "where": _status_where_clause("demo")[0],
+                "params": _status_where_clause("demo")[1],
+                "title": "🎁 Demo istifadəçilər",
+                "order": "ORDER BY datetime(joined_at) DESC",
+            },
+            "free": {
+                "where": _status_where_clause("free")[0],
+                "params": _status_where_clause("free")[1],
+                "title": "♾ Limitsiz istifadəçilər",
+                "order": "ORDER BY datetime(joined_at) DESC",
+            },
+            "rejected": {
+                "where": _status_where_clause("rejected")[0],
+                "params": _status_where_clause("rejected")[1],
+                "title": "❌ Rədd edilmiş istifadəçilər",
+                "order": "ORDER BY datetime(joined_at) DESC",
+            },
+        }
+
+        parts = query_parts.get(status)
+        if not parts:
+            parts = query_parts["active"]
+            status = "active"
+
+        base_query = "SELECT * FROM users"
+
         cur.execute(
             f"SELECT COUNT(*) FROM users WHERE {parts['where']}",
             parts["params"],
         )
         total = cur.fetchone()[0] or 0
-    except Exception:
-        conn.close()
-        logger.exception("Failed to count users status=%s chat_id=%s", status, chat_id)
-        safe_admin_step(
-            chat_id,
-            "⚠️ Aktiv/Demo istifadəçilər yüklənərkən xəta oldu. Loglara baxın.",
-        )
-        return
 
-    if total == 0:
-        conn.close()
-        try:
-            bot.send_message(chat_id, f"❌ {parts['title']} tapılmadı.")
-        except Exception:
-            pass
-        return
+        if total == 0:
+            safe_send(chat_id, f"❌ {parts['title']} tapılmadı.")
+            return
 
-    total_pages = max(1, math.ceil(total / PAGE_SIZE_USERS))
-    if page > total_pages:
-        page = total_pages
+        total_pages = max(1, math.ceil(total / PAGE_SIZE_USERS))
+        if page > total_pages:
+            page = total_pages
 
-    offset = (page - 1) * PAGE_SIZE_USERS
-    try:
+        offset = (page - 1) * PAGE_SIZE_USERS
         cur.execute(
             base_query
             + f" WHERE {parts['where']} {parts['order']} LIMIT ? OFFSET ?",
             (*parts["params"], PAGE_SIZE_USERS, offset),
         )
         rows = cur.fetchall()
-    except Exception:
-        conn.close()
-        logger.exception("Failed to fetch users status=%s chat_id=%s", status, chat_id)
-        safe_admin_step(
-            chat_id,
-            "⚠️ Aktiv/Demo istifadəçilər yüklənərkən xəta oldu. Loglara baxın.",
-        )
-        return
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        columns = [desc[0] for desc in (cur.description or [])]
 
-    admin_user_page_state[(chat_id, status)] = page
+        admin_user_page_state[(chat_id, status)] = page
 
-    def fmt_dt(dt_raw):
-        dt = parse_dt_safe(dt_raw)
-        if not dt:
-            return "-", "-"
-        return dt.strftime("%d.%m.%Y"), dt.strftime("%H:%M")
+        def fmt_dt(dt_raw):
+            dt = parse_dt_safe(dt_raw)
+            if not dt:
+                return "-", "-"
+            return dt.strftime("%d.%m.%Y"), dt.strftime("%H:%M")
 
-    text_lines = [f"{parts['title']} ({total} nəfər)", f"Səhifə: {page} / {total_pages}", ""]
+        def row_value(row_obj, key, default=None):
+            if isinstance(row_obj, sqlite3.Row):
+                try:
+                    return row_obj[key]
+                except Exception:
+                    return default
+            return row_obj.get(key, default)
 
-    mk = types.InlineKeyboardMarkup()
-
-    for r in rows:
-        row = dict(r)
-        uid = row.get("chat_id")
-        name = row.get("full_name") or "—"
-        username_value = f"@{row['username']}" if row.get("username") else "—"
-        profile_url = (
-            f"https://t.me/{row['username']}"
-            if row.get("username")
-            else f"tg://user?id={uid}"
-        )
-        join_date, join_time = fmt_dt(row.get("joined_at"))
-
-        entry_lines = [
-            f"👤 Ad: {name}",
-            f"🆔 ID: <a href=\"{profile_url}\">{uid}</a>",
-            f"👤 Username: {username_value}",
+        text_lines = [
+            f"{parts['title']} ({total} nəfər)",
+            f"Səhifə: {page} / {total_pages}",
+            "",
         ]
 
-        if status == "pending":
-            req_date, req_time = fmt_dt(row.get("request_sent_at") or row.get("joined_at"))
-            entry_lines.append(f"📅 Sorğu tarixi: {req_date} {req_time}")
-        elif status == "active":
-            expiry = parse_dt_safe(row.get("paid_until")) or parse_dt_safe(
-                row.get("demo_end_at") or row.get("demo_expires_at")
-            )
-            entry_lines.append(f"📅 Qoşulma tarixi: {join_date} {join_time}")
-            entry_lines.append(f"⏳ Bitmə tarixi: {format_display_date(expiry)}")
-            entry_lines.append(f"🕒 Qalan gün: {format_remaining_time(expiry)}")
-        elif status == "demo":
-            expiry = parse_dt_safe(row.get("demo_end_at") or row.get("demo_expires_at"))
-            entry_lines.append(f"📅 Qoşulma tarixi: {join_date} {join_time}")
-            entry_lines.append(f"⏳ Bitmə tarixi: {format_display_date(expiry)}")
-            entry_lines.append(f"🕒 Qalan gün: {format_remaining_time(expiry)}")
-        elif status == "blocked":
-            blocked_date, blocked_time = fmt_dt(row.get("blocked_at") or row.get("last_status_change_at"))
-            entry_lines.append(f"📅 Bloklanma: {blocked_date} {blocked_time}")
+        mk = types.InlineKeyboardMarkup()
 
-        text_lines.append("\n".join(entry_lines))
-
-        mk.add(types.InlineKeyboardButton(f"🆔 ID: {uid}", url=profile_url))
-        mk.add(types.InlineKeyboardButton("👤 Profilə bax", url=profile_url))
-
-        msg_button = types.InlineKeyboardButton(
-            "💬 Mesaj göndər", callback_data=f"adm_msg:{status}:{uid}:{page}"
-        )
-        stop_button = types.InlineKeyboardButton(
-            "⛔ Dayandır", callback_data=f"adm_stop:{status}:{uid}:{page}"
-        )
-
-        if status == "pending":
-            mk.row(
-                types.InlineKeyboardButton(
-                    "✅ Aktiv et", callback_data=f"user_approve|{uid}|{status}|{page}"
-                ),
-                types.InlineKeyboardButton(
-                    "🎁 Demo ver", callback_data=f"user_demo|{uid}|{status}|{page}"
-                ),
-            )
-            mk.add(
-                types.InlineKeyboardButton(
-                    "♾ Limitsiz et", callback_data=f"user_free|{uid}|{status}|{page}"
-                )
-            )
-            mk.add(
-                types.InlineKeyboardButton(
-                    "❌ Rədd et", callback_data=f"user_reject|{uid}|{status}|{page}"
-                )
-            )
-            mk.row(msg_button, stop_button)
-        elif status == "active":
-            if row.get("status") == STATUS_ACTIVE_FREE:
-                mk.add(
-                    types.InlineKeyboardButton(
-                        "💳 Ödənişliyə keçir",
-                        callback_data=f"user_to_paid|{uid}|{status}|{page}",
-                    )
-                )
+        for r in rows:
+            if isinstance(r, sqlite3.Row):
+                row = r
             else:
+                row = dict(zip(columns, r)) if columns else {}
+            uid = row["chat_id"] if isinstance(row, sqlite3.Row) else row.get("chat_id")
+            name = row_value(row, "full_name", "—") or "—"
+            username = row_value(row, "username")
+            username_value = f"@{username}" if username else "—"
+            profile_url = (
+                f"https://t.me/{username}"
+                if username
+                else f"tg://user?id={uid}"
+            )
+            join_date, join_time = fmt_dt(row_value(row, "joined_at"))
+
+            entry_lines = [
+                f"👤 Ad: {name}",
+                f"🆔 ID: <a href=\"{profile_url}\">{uid}</a>",
+                f"👤 Username: {username_value}",
+            ]
+
+            if status == "pending":
+                req_date, req_time = fmt_dt(
+                    row_value(row, "request_sent_at") or row_value(row, "joined_at")
+                )
+                entry_lines.append(f"📅 Sorğu tarixi: {req_date} {req_time}")
+            elif status == "active":
+                expiry = parse_dt_safe(row_value(row, "paid_until")) or parse_dt_safe(
+                    row_value(row, "demo_end_at") or row_value(row, "demo_expires_at")
+                )
+                entry_lines.append(f"📅 Qoşulma tarixi: {join_date} {join_time}")
+                entry_lines.append(f"⏳ Bitmə tarixi: {format_display_date(expiry)}")
+                entry_lines.append(f"🕒 Qalan gün: {format_remaining_time(expiry)}")
+            elif status == "demo":
+                expiry = parse_dt_safe(row_value(row, "demo_end_at") or row_value(row, "demo_expires_at"))
+                entry_lines.append(f"📅 Qoşulma tarixi: {join_date} {join_time}")
+                entry_lines.append(f"⏳ Bitmə tarixi: {format_display_date(expiry)}")
+                entry_lines.append(f"🕒 Qalan gün: {format_remaining_time(expiry)}")
+            elif status == "blocked":
+                blocked_date, blocked_time = fmt_dt(
+                    row_value(row, "blocked_at") or row_value(row, "last_status_change_at")
+                )
+                entry_lines.append(f"📅 Bloklanma: {blocked_date} {blocked_time}")
+
+            text_lines.append("\n".join(entry_lines))
+
+            mk.add(types.InlineKeyboardButton(f"🆔 ID: {uid}", url=profile_url))
+            mk.add(types.InlineKeyboardButton("👤 Profilə bax", url=profile_url))
+
+            msg_button = types.InlineKeyboardButton(
+                "💬 Mesaj göndər", callback_data=f"adm_msg:{status}:{uid}:{page}"
+            )
+            stop_button = types.InlineKeyboardButton(
+                "⛔ Dayandır", callback_data=f"adm_stop:{status}:{uid}:{page}"
+            )
+
+            if status == "pending":
+                mk.row(
+                    types.InlineKeyboardButton(
+                        "✅ Aktiv et", callback_data=f"user_approve|{uid}|{status}|{page}"
+                    ),
+                    types.InlineKeyboardButton(
+                        "🎁 Demo ver", callback_data=f"user_demo|{uid}|{status}|{page}"
+                    ),
+                )
                 mk.add(
                     types.InlineKeyboardButton(
                         "♾ Limitsiz et", callback_data=f"user_free|{uid}|{status}|{page}"
                     )
                 )
-            mk.row(msg_button, stop_button)
-        elif status == "demo":
-            mk.add(
-                types.InlineKeyboardButton(
-                    "♾ Limitsiz et", callback_data=f"user_free|{uid}|{status}|{page}"
+                mk.add(
+                    types.InlineKeyboardButton(
+                        "❌ Rədd et", callback_data=f"user_reject|{uid}|{status}|{page}"
+                    )
                 )
-            )
-            mk.row(msg_button, stop_button)
-        elif status == "blocked":
-            mk.row(
-                types.InlineKeyboardButton(
-                    "🔄 Geri qaytar", callback_data=f"user_restore|{uid}|{status}|{page}"
-                ),
-                types.InlineKeyboardButton(
-                    "🗑 Tam sil", callback_data=f"user_delete|{uid}|{status}|{page}"
-                ),
-            )
-            mk.row(msg_button, stop_button)
-        elif status == "rejected":
-            mk.row(
-                types.InlineKeyboardButton(
-                    "↩️ Gözləməyə qaytar", callback_data=f"user_restore|{uid}|{status}|{page}"
-                ),
-                types.InlineKeyboardButton(
-                    "🗑 Tam sil", callback_data=f"user_delete|{uid}|{status}|{page}"
-                ),
-            )
-            mk.row(msg_button, stop_button)
-        else:
-            mk.row(msg_button, stop_button)
+                mk.row(msg_button, stop_button)
+            elif status == "active":
+                if row_value(row, "status") == STATUS_ACTIVE_FREE:
+                    mk.add(
+                        types.InlineKeyboardButton(
+                            "💳 Ödənişliyə keçir",
+                            callback_data=f"user_to_paid|{uid}|{status}|{page}",
+                        )
+                    )
+                else:
+                    mk.add(
+                        types.InlineKeyboardButton(
+                            "♾ Limitsiz et", callback_data=f"user_free|{uid}|{status}|{page}"
+                        )
+                    )
+                mk.row(msg_button, stop_button)
+            elif status == "demo":
+                mk.add(
+                    types.InlineKeyboardButton(
+                        "♾ Limitsiz et", callback_data=f"user_free|{uid}|{status}|{page}"
+                    )
+                )
+                mk.row(msg_button, stop_button)
+            elif status == "blocked":
+                mk.row(
+                    types.InlineKeyboardButton(
+                        "🔄 Geri qaytar", callback_data=f"user_restore|{uid}|{status}|{page}"
+                    ),
+                    types.InlineKeyboardButton(
+                        "🗑 Tam sil", callback_data=f"user_delete|{uid}|{status}|{page}"
+                    ),
+                )
+                mk.row(msg_button, stop_button)
+            elif status == "rejected":
+                mk.row(
+                    types.InlineKeyboardButton(
+                        "↩️ Gözləməyə qaytar", callback_data=f"user_restore|{uid}|{status}|{page}"
+                    ),
+                    types.InlineKeyboardButton(
+                        "🗑 Tam sil", callback_data=f"user_delete|{uid}|{status}|{page}"
+                    ),
+                )
+                mk.row(msg_button, stop_button)
+            else:
+                mk.row(msg_button, stop_button)
 
-    nav_buttons = [
-        types.InlineKeyboardButton("⏮ İlk", callback_data=f"adm_u:{status}:1"),
-        types.InlineKeyboardButton(
-            "◀️ Geri", callback_data=f"adm_u:{status}:{max(1, page - 1)}"
-        ),
-        types.InlineKeyboardButton(
-            f"📄 {page} / {total_pages}", callback_data=f"adm_u:{status}:{page}"
-        ),
-        types.InlineKeyboardButton(
-            "▶️ İrəli",
-            callback_data=f"adm_u:{status}:{min(total_pages, page + 1)}",
-        ),
-        types.InlineKeyboardButton("⏭ Son", callback_data=f"adm_u:{status}:{total_pages}"),
-    ]
-    mk.row(*nav_buttons)
+        nav_buttons = [
+            types.InlineKeyboardButton("⏮ İlk", callback_data=f"adm_u:{status}:1"),
+            types.InlineKeyboardButton(
+                "◀️ Geri", callback_data=f"adm_u:{status}:{max(1, page - 1)}"
+            ),
+            types.InlineKeyboardButton(
+                f"📄 {page} / {total_pages}", callback_data=f"adm_u:{status}:{page}"
+            ),
+            types.InlineKeyboardButton(
+                "▶️ İrəli",
+                callback_data=f"adm_u:{status}:{min(total_pages, page + 1)}",
+            ),
+            types.InlineKeyboardButton("⏭ Son", callback_data=f"adm_u:{status}:{total_pages}"),
+        ]
+        mk.row(*nav_buttons)
 
-    text = "\n\n".join(text_lines)
+        text = "\n\n".join(text_lines)
 
-    try:
-        if message and not force_new:
-            bot.edit_message_text(
-                text,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-                parse_mode="HTML",
-            )
-        else:
-            bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=mk)
-    except Exception:
         try:
-            bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=mk)
+            if message and not force_new:
+                bot.edit_message_text(
+                    text,
+                    chat_id=message.chat.id,
+                    message_id=message.message_id,
+                    reply_markup=mk,
+                    parse_mode="HTML",
+                )
+            else:
+                bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=mk)
+        except Exception:
+            try:
+                bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=mk)
+            except Exception:
+                pass
+    except Exception as e:
+        logger.exception("show_all_users failed")
+        safe_send(
+            chat_id,
+            f"⚠️ İstifadəçilər siyahısı yüklənərkən xəta oldu. Loglara baxın. {e}",
+        )
+    finally:
+        try:
+            conn.close()
         except Exception:
             pass
 
@@ -17112,6 +17127,17 @@ def main_menu(chat_id):
     mk.add(MENU_REFRESH_BUTTON)
 
     send_with_reply_keyboard(chat_id, "📋 Əsas menyudan seçim et:", mk)
+
+
+@bot.callback_query_handler(func=lambda c: True)
+def cb_unhandled_callback(c):
+    logger.warning(
+        "UNHANDLED CALLBACK chat_id=%s from=%s data=%s",
+        c.message.chat.id if c.message else None,
+        c.from_user.id if c.from_user else None,
+        c.data,
+    )
+    safe_answer_callback_query(c.id)
 
 
 if __name__ == "__main__":
