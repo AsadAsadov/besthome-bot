@@ -2875,9 +2875,7 @@ def send_logo_if_exists(chat_id: int):
 MENU_REFRESH_BUTTON = "🔄 Botu yenilə"
 MENU_VISIBILITY_HINT_TEXT = (
     "ℹ️ Əsas menyu görünmür?\n"
-    "➡️ /start yazın\n"
-    "və ya\n"
-    "🔄 “Botu yenilə” düyməsinə klik edin."
+    "➡️ /start yazın."
 )
 MENU_VISIBILITY_HINT_COOLDOWN_SECONDS = 300
 menu_visibility_hint_last_sent = {}
@@ -2906,13 +2904,10 @@ def send_menu_visibility_hint(chat_id: int):
     if now - last_ts < MENU_VISIBILITY_HINT_COOLDOWN_SECONDS:
         return
     menu_visibility_hint_last_sent[chat_id] = now
-    mk = types.InlineKeyboardMarkup()
-    mk.add(types.InlineKeyboardButton(MENU_REFRESH_BUTTON, callback_data="bot_refresh"))
-    bot.send_message(chat_id, MENU_VISIBILITY_HINT_TEXT, reply_markup=mk)
+    bot.send_message(chat_id, MENU_VISIBILITY_HINT_TEXT)
 
 
 def send_with_reply_keyboard(chat_id: int, text: str, keyboard: types.ReplyKeyboardMarkup):
-    ensure_refresh_button(keyboard)
     bot.send_message(chat_id, text, reply_markup=keyboard)
     send_menu_visibility_hint(chat_id)
 
@@ -2950,7 +2945,6 @@ def build_search_menu_keyboard():
     kb.row("🔍 Açar sözlə axtar", "📞 Nömrə ilə axtar")
     kb.row("⭐ Favorilərim", "🔔 Bildirişlərim")
     kb.row("⬅️ Əsas menyuya qayıt")
-    ensure_refresh_button(kb)
     return kb
 
 
@@ -3315,7 +3309,6 @@ def build_request_rayon_keyboard(include_back: bool = True) -> types.ReplyKeyboa
         kb.row(*row)
     if include_back:
         kb.row("⬅️ Geri (Əsas menyu)")
-    ensure_refresh_button(kb)
     return kb
 
 
@@ -3324,7 +3317,6 @@ def build_request_rooms_keyboard() -> types.ReplyKeyboardMarkup:
     kb.row("1", "2")
     kb.row("3", "4+")
     kb.row("⬅️ Geri (Əsas menyu)")
-    ensure_refresh_button(kb)
     return kb
 
 
@@ -3808,7 +3800,6 @@ def build_complaint_categories_keyboard():
     for cat in COMPLAINT_CATEGORIES:
         kb.row(cat)
     kb.row(COMPLAINT_BACK)
-    ensure_refresh_button(kb)
     return kb
 
 
@@ -4275,7 +4266,6 @@ def new_listing_keyboard(extra=None):
     if extra:
         for row in extra:
             kb.row(*row)
-    ensure_refresh_button(kb)
     return kb
 
 
@@ -4913,7 +4903,6 @@ def status_menu_keyboard():
     kb.row("🏠 Satılan elanlar", "🏢 Kirayə verilən elanlar")
     kb.row("⛔ Qara siyahı")
     kb.row("⬅️ Geri")
-    ensure_refresh_button(kb)
     return kb
 
 
@@ -7828,7 +7817,6 @@ def build_admin_panel_keyboard(chat_id: int, page: int = 1):
     else:
         mk.row(ADMIN_PANEL_NAV_PREV, ADMIN_PANEL_BACK_MAIN)
     admin_panel_page_state[chat_id] = page
-    ensure_refresh_button(mk)
     return mk
 
 
@@ -10959,21 +10947,12 @@ def broadcast_bot_update(admin_chat_id):
         bot.send_message(admin_chat_id, "❌ Aktiv istifadəçi tapılmadı.")
         return
 
-    mk = types.InlineKeyboardMarkup()
-    mk.add(
-        types.InlineKeyboardButton(
-            MENU_REFRESH_BUTTON,
-            callback_data="bot_refresh",
-        )
-    )
-
     sent = 0
     for (uid,) in rows:
         try:
             bot.send_message(
                 uid,
-                f"🚀 Bot yeniləndi ({CURRENT_VERSION}). Davam etmək üçün aşağıdakı düyməyə bas:",
-                reply_markup=mk,
+                f"🚀 Bot yeniləndi ({CURRENT_VERSION}). Davam etmək üçün /start yazın.",
             )
             sent += 1
         except:
