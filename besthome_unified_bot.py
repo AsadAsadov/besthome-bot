@@ -440,7 +440,8 @@ def init_local_db():
             demo_start_at TEXT,
             demo_end_at TEXT,
             paid_until TEXT,
-            last_status_change_at TEXT
+            last_status_change_at TEXT,
+            customer_requests_enabled INTEGER DEFAULT 0
         )
         """
     )
@@ -463,6 +464,7 @@ def init_local_db():
         "ALTER TABLE users ADD COLUMN paid_until TEXT",
         "ALTER TABLE users ADD COLUMN last_status_change_at TEXT",
         "ALTER TABLE users ADD COLUMN is_first_start INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN customer_requests_enabled INTEGER DEFAULT 0",
     ]:
         try:
             cur.execute(alter_stmt)
@@ -1009,6 +1011,64 @@ def get_user_record(chat_id: int) -> Optional[dict]:
     data = dict(row)
     data["status"] = derive_status_from_legacy(row, datetime.utcnow())
     return data
+
+
+def get_customer_requests_enabled(chat_id: int) -> bool:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT customer_requests_enabled FROM users WHERE chat_id=?",
+            (chat_id,),
+        )
+    except sqlite3.OperationalError:
+        conn.close()
+        return False
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return False
+    value = row[0] if not isinstance(row, dict) else row.get("customer_requests_enabled")
+    return bool(value)
+
+
+def set_customer_requests_enabled(chat_id: int, enabled: bool):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    now = datetime.utcnow().isoformat()
+    try:
+        cur.execute(
+            "UPDATE users SET customer_requests_enabled=? WHERE chat_id=?",
+            (1 if enabled else 0, chat_id),
+        )
+        if cur.rowcount == 0:
+            cur.execute(
+                """
+                INSERT INTO users (chat_id, customer_requests_enabled, joined_at, status, last_status_change_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    chat_id,
+                    1 if enabled else 0,
+                    now,
+                    STATUS_PENDING,
+                    now,
+                ),
+            )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        conn.close()
+
+
+def ensure_customer_requests_enabled(chat_id: int) -> bool:
+    if is_admin(chat_id):
+        return True
+    if not get_customer_requests_enabled(chat_id):
+        bot.send_message(chat_id, "❌ Bu funksiya sizin üçün aktiv deyil.")
+        return False
+    return True
 
 
 def get_first_start_flag(chat_id: int) -> bool:
@@ -2647,7 +2707,6 @@ def send_main_menu(chat_id: int):
         "📝 Yeni elan əlavə et",
         "🔎 Axtarış sistemi",
         "🆕 Bu gün daxil olan elanlar",
-        "📝 Ev axtarıram",
         "📂 Elan statusları",
         "⭐ Favorilərim",
         "📋 Elanlarım",
@@ -2655,6 +2714,8 @@ def send_main_menu(chat_id: int):
         "ℹ️ Haqqında",
         "📩 Şikayət və təkliflər",
     ]
+    if get_customer_requests_enabled(chat_id):
+        buttons.insert(3, "📝 Ev axtarıram")
     if not is_admin(chat_id):
         buttons.append("🤝 Dostunu dəvət et")
     if is_admin(chat_id):
@@ -3331,9 +3392,11 @@ def show_request_type_menu(chat_id: int):
 
 @bot.message_handler(func=lambda m: m.text == "📝 Ev axtarıram")
 def start_customer_request_flow(message):
+    chat_id = message.chat.id
+    if not ensure_customer_requests_enabled(chat_id):
+        return
     if not ensure_allowed(message):
         return
-    chat_id = message.chat.id
     if not is_user_allowed(chat_id):
         bot.send_message(chat_id, "🛑 Sorğu göndərmək üçün hesabınız təsdiqlənməlidir.")
         return
@@ -3353,9 +3416,12 @@ def customer_request_back(message):
     func=lambda m: m.text in ["🏠 Almaq istəyirəm", "🏢 Kirayə götürmək istəyirəm"]
 )
 def handle_request_type_selection(message):
+    chat_id = message.chat.id
+    if not ensure_customer_requests_enabled(chat_id):
+        reset_customer_request(chat_id)
+        return
     if not ensure_allowed(message):
         return
-    chat_id = message.chat.id
     if not is_user_allowed(chat_id):
         bot.send_message(chat_id, "🛑 Sorğu göndərmək üçün hesabınız təsdiqlənməlidir.")
         return
@@ -3380,9 +3446,12 @@ def handle_request_type_selection(message):
 
 @bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "rayon")
 def handle_request_rayon(message):
+    chat_id = message.chat.id
+    if not ensure_customer_requests_enabled(chat_id):
+        reset_customer_request(chat_id)
+        return
     if not ensure_allowed(message):
         return
-    chat_id = message.chat.id
     if handle_customer_request_nav(message):
         return
     val = (message.text or "").strip()
@@ -3401,9 +3470,12 @@ def handle_request_rayon(message):
 
 @bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "rooms")
 def handle_request_rooms(message):
+    chat_id = message.chat.id
+    if not ensure_customer_requests_enabled(chat_id):
+        reset_customer_request(chat_id)
+        return
     if not ensure_allowed(message):
         return
-    chat_id = message.chat.id
     if handle_customer_request_nav(message):
         return
     val = (message.text or "").strip()
@@ -3420,9 +3492,12 @@ def handle_request_rooms(message):
 
 @bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "budget")
 def handle_request_budget(message):
+    chat_id = message.chat.id
+    if not ensure_customer_requests_enabled(chat_id):
+        reset_customer_request(chat_id)
+        return
     if not ensure_allowed(message):
         return
-    chat_id = message.chat.id
     if handle_customer_request_nav(message):
         return
     val = (message.text or "").strip()
@@ -3444,9 +3519,12 @@ def handle_request_budget(message):
 
 @bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "notes")
 def handle_request_notes(message):
+    chat_id = message.chat.id
+    if not ensure_customer_requests_enabled(chat_id):
+        reset_customer_request(chat_id)
+        return
     if not ensure_allowed(message):
         return
-    chat_id = message.chat.id
     if handle_customer_request_nav(message):
         return
     val = (message.text or "").strip()
@@ -3460,9 +3538,12 @@ def handle_request_notes(message):
 
 @bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "phone")
 def handle_request_phone(message):
+    chat_id = message.chat.id
+    if not ensure_customer_requests_enabled(chat_id):
+        reset_customer_request(chat_id)
+        return
     if not ensure_allowed(message):
         return
-    chat_id = message.chat.id
     if handle_customer_request_nav(message):
         return
     phone = (message.text or "").strip()
@@ -7961,6 +8042,31 @@ def admin_open_user_profile(c):
         pass
 
 
+@bot.callback_query_handler(func=lambda c: c.data.startswith("toggle_customer_requests:"))
+def toggle_customer_requests(c):
+    if not is_admin(c.from_user.id):
+        return
+    parts = c.data.split(":", 1)
+    if len(parts) < 2:
+        return
+    try:
+        user_id = int(parts[1])
+    except Exception:
+        return
+    current = get_customer_requests_enabled(user_id)
+    set_customer_requests_enabled(user_id, not current)
+    status = "AKTİV" if not current else "DEAKTİV"
+    bot.send_message(
+        c.message.chat.id,
+        f"✅ Müştəri istəkləri {status} edildi (ID: {user_id})",
+    )
+    show_user_profile(c.message.chat.id, user_id)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
 def get_user_phone_for_admin(user_id: int) -> Optional[str]:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -8033,6 +8139,7 @@ def show_user_profile(chat_id: int, user_id: int):
     profile_url = get_profile_url_for_user(user_id)
     phone_raw = get_user_phone_for_admin(user_id)
     wa_url = build_admin_whatsapp_url(phone_raw)
+    customer_requests_enabled = get_customer_requests_enabled(user_id)
     joined_at = record.get("joined_at")
     join_date, join_time = parse_join_datetime(joined_at)
     username = record.get("username")
@@ -8058,6 +8165,17 @@ def show_user_profile(chat_id: int, user_id: int):
     ]
     if wa_url:
         buttons.append(types.InlineKeyboardButton("💬 WhatsApp-da yaz", url=wa_url))
+    toggle_text = (
+        "🔴 Müştəri istəkləri: Söndür"
+        if customer_requests_enabled
+        else "🟢 Müştəri istəkləri: Aktiv et"
+    )
+    buttons.append(
+        types.InlineKeyboardButton(
+            toggle_text,
+            callback_data=f"toggle_customer_requests:{user_id}",
+        )
+    )
     markup.add(*buttons)
 
     bot.send_message(
