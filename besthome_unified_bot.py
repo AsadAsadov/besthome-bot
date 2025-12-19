@@ -105,6 +105,7 @@ admin_user_message_state = {}
 admin_message_state = {}
 ui_state = defaultdict(list)
 customer_request_rule_state = {}
+keyword_alert_state = {}
 BLOCKED_MESSAGE_TEXT = "Hesabınız müvəqqəti olaraq dayandırıldı."
 STATUS_PENDING = "pending"
 STATUS_ACTIVE_PAID = "active_paid"
@@ -221,6 +222,26 @@ def get_agents_conn():
     conn = sqlite3.connect(AGENTS_DB, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def normalize_text(text: str) -> str:
+    if not text:
+        return ""
+    text = text.lower()
+    replace_map = {
+        "ə": "e",
+        "ı": "i",
+        "ö": "o",
+        "ü": "u",
+        "ş": "s",
+        "ç": "c",
+        "ğ": "g",
+    }
+    for k, v in replace_map.items():
+        text = text.replace(k, v)
+    text = re.sub(r"[^\w\s%]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
 def get_user_step(chat_id: int):
@@ -770,6 +791,40 @@ def init_local_db():
         """
     )
     cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS keyword_alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            keywords TEXT,
+            regions TEXT,
+            is_active INTEGER DEFAULT 1,
+            created_at DATETIME
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS keyword_alert_hits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            alert_id INTEGER,
+            user_id INTEGER,
+            target_type TEXT,
+            target_id INTEGER,
+            source TEXT DEFAULT '',
+            created_at DATETIME,
+            UNIQUE(user_id, alert_id, target_type, target_id, source)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS keyword_alert_state (
+            key TEXT PRIMARY KEY,
+            last_checked_at TEXT
+        )
+        """
+    )
+    cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_customer_request_favorites_user ON customer_request_favorites(user_id)"
     )
     cur.execute(
@@ -780,6 +835,12 @@ def init_local_db():
     )
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_customer_request_alerts_user ON customer_request_alerts(user_id)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_keyword_alerts_user ON keyword_alerts(user_id)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_keyword_alert_hits_user ON keyword_alert_hits(user_id)"
     )
 
     # Axtarış logları
@@ -3081,6 +3142,7 @@ def build_search_menu_keyboard():
     kb.row("🏠 Satılır", "🏢 Kirayə verilir")
     kb.row("🔍 Açar sözlə axtar", "📞 Nömrə ilə axtar")
     kb.row("⭐ Favorilərim", "🔔 Bildirişlərim")
+    kb.row("🔔 Açar söz bildirişləri")
     kb.row("⬅️ Əsas menyuya qayıt")
     return kb
 
@@ -3998,6 +4060,276 @@ def notify_users_for_customer_request(req_row: Optional[dict]):
             pass
 
 
+def fetch_active_keyword_alerts() -> List[dict]:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT * FROM keyword_alerts
+        WHERE is_active=1
+        """
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_keyword_alert_last_checked(key: str) -> Optional[datetime]:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT last_checked_at FROM keyword_alert_state WHERE key=?",
+        (key,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    last_raw = row[0] if not isinstance(row, dict) else row.get("last_checked_at")
+    if not last_raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(last_raw))
+    except Exception:
+        return None
+
+
+def set_keyword_alert_last_checked(key: str, value: datetime):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO keyword_alert_state (key, last_checked_at)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET last_checked_at=excluded.last_checked_at
+        """,
+        (key, value.isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def parse_keyword_regions(regions_raw: Optional[str]) -> List[str]:
+    return [
+        normalize_text(r) for r in (regions_raw or "").split(",") if r.strip()
+    ]
+
+
+def keyword_region_matches(rayon_raw: str, regions_raw: str) -> bool:
+    regions = parse_keyword_regions(regions_raw)
+    if not regions:
+        return True
+    rayon_norm = normalize_text(rayon_raw or "")
+    if not rayon_norm:
+        return False
+    return any(region in rayon_norm for region in regions)
+
+
+def build_listing_text_blob(ev: dict) -> str:
+    title = ev.get("title") or ev.get("prop_type") or ev.get("Emlakin_novu") or ""
+    description = (
+        ev.get("description")
+        or ev.get("summary")
+        or ev.get("Umumi_melumat")
+        or ""
+    )
+    address = ev.get("address") or ev.get("Unvan") or ""
+    notes = ev.get("notes") or ""
+    parts = [title, description, address, notes]
+    return normalize_text(" ".join([str(p) for p in parts if p]))
+
+
+def build_request_text_blob(req_row: dict) -> str:
+    return normalize_text(req_row.get("notes") or "")
+
+
+def record_keyword_alert_hit(
+    alert_id: int,
+    user_id: int,
+    target_type: str,
+    target_id: int,
+    source: str = "",
+) -> bool:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO keyword_alert_hits
+        (alert_id, user_id, target_type, target_id, source, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (alert_id, user_id, target_type, target_id, source or "", datetime.utcnow().isoformat()),
+    )
+    inserted = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return inserted
+
+
+def process_keyword_alerts_for_listing(ev: dict, source: str = "main"):
+    if not ev:
+        return
+    alerts = fetch_active_keyword_alerts()
+    if not alerts:
+        return
+    listing_text = build_listing_text_blob(ev)
+    listing_rayon = (
+        ev.get("rayon") or ev.get("Rayon_Qesebe") or ev.get("address") or ev.get("Unvan") or ""
+    )
+    listing_id = ev.get("id") or ev.get("ID") or ev.get("Elan_kodu")
+    try:
+        listing_id = int(listing_id)
+    except Exception:
+        return
+
+    for alert in alerts:
+        user_id = alert.get("user_id")
+        if not user_id or not is_user_allowed(user_id):
+            continue
+        keyword_raw = (alert.get("keywords") or "").strip()
+        if not keyword_raw:
+            continue
+        keyword_norm = normalize_text(keyword_raw)
+        if not keyword_norm or keyword_norm not in listing_text:
+            continue
+        if not keyword_region_matches(listing_rayon, alert.get("regions") or ""):
+            continue
+        if not record_keyword_alert_hit(
+            alert.get("id"), user_id, "listing", listing_id, source=source
+        ):
+            continue
+        try:
+            bot.send_message(
+                user_id,
+                f"🔔 Açar söz bildirişi: \"{keyword_raw}\"",
+            )
+            send_listing_card(
+                user_id,
+                ev,
+                source=source,
+                with_fav_button=True,
+                status_controls=False,
+                track_view=False,
+                viewer_id=user_id,
+            )
+        except Exception:
+            continue
+
+
+def process_keyword_alerts_for_request(req_row: dict):
+    if not req_row:
+        return
+    alerts = fetch_active_keyword_alerts()
+    if not alerts:
+        return
+    request_text = build_request_text_blob(req_row)
+    request_rayon = req_row.get("rayon") or ""
+    req_id = req_row.get("id")
+    try:
+        req_id = int(req_id)
+    except Exception:
+        return
+
+    for alert in alerts:
+        user_id = alert.get("user_id")
+        if not user_id or not has_customer_requests_access(user_id):
+            continue
+        if not is_user_allowed(user_id):
+            continue
+        keyword_raw = (alert.get("keywords") or "").strip()
+        if not keyword_raw:
+            continue
+        keyword_norm = normalize_text(keyword_raw)
+        if not keyword_norm or keyword_norm not in request_text:
+            continue
+        if not keyword_region_matches(request_rayon, alert.get("regions") or ""):
+            continue
+        if not record_keyword_alert_hit(
+            alert.get("id"), user_id, "request", req_id, source=""
+        ):
+            continue
+        try:
+            bot.send_message(
+                user_id,
+                f"🔔 Açar söz bildirişi: \"{keyword_raw}\"",
+            )
+            send_public_request_card(user_id, req_row)
+        except Exception:
+            continue
+
+
+def process_keyword_alerts_for_existing_requests(alert_id: int):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT * FROM keyword_alerts
+        WHERE id=? AND is_active=1
+        """,
+        (alert_id,),
+    )
+    alert = cur.fetchone()
+    if not alert:
+        conn.close()
+        return
+    alert = dict(alert)
+    user_id = alert.get("user_id")
+    if not user_id or not has_customer_requests_access(user_id) or not is_user_allowed(user_id):
+        conn.close()
+        return
+    cur.execute(
+        """
+        SELECT * FROM customer_requests
+        WHERE status='active'
+        ORDER BY datetime(created_at) DESC
+        """
+    )
+    requests = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    if not requests:
+        return
+    keyword_norm = normalize_text((alert.get("keywords") or "").strip())
+    if not keyword_norm:
+        return
+    for req_row in requests:
+        request_text = build_request_text_blob(req_row)
+        if keyword_norm not in request_text:
+            continue
+        if not keyword_region_matches(req_row.get("rayon") or "", alert.get("regions") or ""):
+            continue
+        req_id = req_row.get("id")
+        try:
+            req_id = int(req_id)
+        except Exception:
+            continue
+        if not record_keyword_alert_hit(
+            alert.get("id"), user_id, "request", req_id, source=""
+        ):
+            continue
+        try:
+            bot.send_message(
+                user_id,
+                f"🔔 Açar söz bildirişi: \"{alert.get('keywords')}\"",
+            )
+            send_public_request_card(user_id, req_row)
+        except Exception:
+            continue
+
+
+def process_keyword_alerts_for_new_listings():
+    last_checked = get_keyword_alert_last_checked("listings")
+    if last_checked is None:
+        set_keyword_alert_last_checked("listings", datetime.utcnow())
+        return
+    candidates = load_recent_listings(last_checked)
+    if not candidates:
+        set_keyword_alert_last_checked("listings", datetime.utcnow())
+        return
+    for ev in candidates:
+        process_keyword_alerts_for_listing(ev, source=ev.get("__source", "main"))
+    set_keyword_alert_last_checked("listings", datetime.utcnow())
+
+
 def show_request_type_menu(chat_id: int):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("🏠 Almaq istəyirəm")
@@ -4168,6 +4500,7 @@ def handle_request_phone(message):
         req_row = fetch_customer_request_by_id(req_id)
         notify_agents_for_request(req_row)
         notify_users_for_customer_request(req_row)
+        process_keyword_alerts_for_request(req_row)
     except Exception:
         pass
     return_to_main_menu(chat_id)
@@ -5788,6 +6121,11 @@ def show_notifications_inbox(chat_id: int, page: int = 1, message=None):
         mk_empty.add(
             types.InlineKeyboardButton("⚙️ Kriteriyalar", callback_data="notif_crit")
         )
+        mk_empty.add(
+            types.InlineKeyboardButton(
+                "🔔 Açar söz bildirişləri", callback_data="kw_alert_menu"
+            )
+        )
         if has_customer_requests_access(chat_id):
             mk_empty.add(
                 types.InlineKeyboardButton(
@@ -5862,6 +6200,9 @@ def show_notifications_inbox(chat_id: int, page: int = 1, message=None):
                 "👥 Müştəri istəkləri", callback_data="agent_notif:1"
             )
         )
+    mk.add(
+        types.InlineKeyboardButton("🔔 Açar söz bildirişləri", callback_data="kw_alert_menu")
+    )
     mk.add(types.InlineKeyboardButton("⚙️ Kriteriyalar", callback_data="notif_crit"))
 
     header_text = "\n".join(header_lines)
@@ -6076,6 +6417,411 @@ def send_criteria_list(chat_id: int, message=None):
         pass
 
 
+def show_keyword_alert_menu(chat_id: int, message=None):
+    mk = types.InlineKeyboardMarkup()
+    mk.add(
+        types.InlineKeyboardButton("➕ Açar söz əlavə et", callback_data="kw_alert_add")
+    )
+    mk.add(
+        types.InlineKeyboardButton("📋 Açar sözlərim", callback_data="kw_alert_list:1")
+    )
+    mk.add(
+        types.InlineKeyboardButton("🔔 Bildirişlər", callback_data="kw_hits_menu")
+    )
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kw_alert_back"))
+    text = "🔔 Açar söz bildirişləri"
+    try:
+        if message:
+            bot.edit_message_text(
+                text,
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=mk,
+            )
+        else:
+            bot.send_message(chat_id, text, reply_markup=mk)
+    except Exception:
+        pass
+
+
+def save_keyword_alert(user_id: int, keyword: str, regions: List[str]) -> int:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO keyword_alerts (user_id, keywords, regions, is_active, created_at)
+        VALUES (?, ?, ?, 1, ?)
+        """,
+        (
+            user_id,
+            keyword.strip(),
+            ", ".join([r.strip() for r in regions if r.strip()]),
+            datetime.utcnow().isoformat(),
+        ),
+    )
+    alert_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return alert_id
+
+
+def fetch_keyword_alerts_page(user_id: int, page: int = 1):
+    page = max(1, int(page or 1))
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM keyword_alerts WHERE user_id=?", (user_id,))
+    total = cur.fetchone()[0] or 0
+    total_pages = max(1, math.ceil(total / PAGE_SIZE_NOTIFICATIONS))
+    if page > total_pages:
+        page = total_pages
+    offset = (page - 1) * PAGE_SIZE_NOTIFICATIONS
+    cur.execute(
+        """
+        SELECT * FROM keyword_alerts
+        WHERE user_id=?
+        ORDER BY datetime(created_at) DESC
+        LIMIT ? OFFSET ?
+        """,
+        (user_id, PAGE_SIZE_NOTIFICATIONS, offset),
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows, total, total_pages, page
+
+
+def toggle_keyword_alert(user_id: int, alert_id: int) -> bool:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT is_active FROM keyword_alerts WHERE id=? AND user_id=?",
+        (alert_id, user_id),
+    )
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return False
+    is_active = row[0] if not isinstance(row, dict) else row.get("is_active")
+    new_val = 0 if str(is_active) in {"1", "True", "true"} else 1
+    cur.execute(
+        "UPDATE keyword_alerts SET is_active=? WHERE id=? AND user_id=?",
+        (new_val, alert_id, user_id),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def delete_keyword_alert(user_id: int, alert_id: int) -> bool:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM keyword_alerts WHERE id=? AND user_id=?",
+        (alert_id, user_id),
+    )
+    deleted = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
+
+
+def format_keyword_alert_entry(row: dict) -> str:
+    keyword = row.get("keywords") or "-"
+    regions = row.get("regions") or "Hamısı"
+    status_txt = (
+        "🟢 Aktiv" if str(row.get("is_active", 1)) in {"1", "True", "true"} else "⚪️ Deaktiv"
+    )
+    return f"{status_txt} | 🔎 {keyword} | 📍 {regions}"
+
+
+def show_keyword_alert_list(chat_id: int, page: int = 1, message=None):
+    rows, total, total_pages, current_page = fetch_keyword_alerts_page(chat_id, page)
+    if total == 0:
+        mk = types.InlineKeyboardMarkup()
+        mk.add(types.InlineKeyboardButton("➕ Açar söz əlavə et", callback_data="kw_alert_add"))
+        mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kw_alert_menu"))
+        try:
+            if message:
+                bot.edit_message_text(
+                    "🔔 Açar söz bildirişi yoxdur.",
+                    chat_id=message.chat.id,
+                    message_id=message.message_id,
+                    reply_markup=mk,
+                )
+            else:
+                bot.send_message(chat_id, "🔔 Açar söz bildirişi yoxdur.", reply_markup=mk)
+        except Exception:
+            pass
+        return
+
+    header = (
+        f"🔔 Açar sözlər\nSəhifə: {current_page} / {total_pages}\nCəmi: {total}"
+    )
+    mk = types.InlineKeyboardMarkup()
+    nav_buttons = [
+        types.InlineKeyboardButton("⏮ İlk", callback_data="kw_alert_list:1"),
+        types.InlineKeyboardButton(
+            "◀️ Geri", callback_data=f"kw_alert_list:{max(1, current_page - 1)}"
+        ),
+        types.InlineKeyboardButton(
+            f"📄 {current_page} / {total_pages}", callback_data=f"kw_alert_list:{current_page}"
+        ),
+        types.InlineKeyboardButton(
+            "▶️ İrəli", callback_data=f"kw_alert_list:{min(total_pages, current_page + 1)}"
+        ),
+        types.InlineKeyboardButton("⏭ Son", callback_data=f"kw_alert_list:{total_pages}"),
+    ]
+    mk.row(*nav_buttons)
+    mk.add(types.InlineKeyboardButton("➕ Açar söz əlavə et", callback_data="kw_alert_add"))
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kw_alert_menu"))
+    try:
+        if message:
+            bot.edit_message_text(
+                header,
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=mk,
+            )
+        else:
+            bot.send_message(chat_id, header, reply_markup=mk)
+    except Exception:
+        pass
+
+    for row in rows:
+        alert_id = row.get("id")
+        entry = format_keyword_alert_entry(row)
+        mk_row = types.InlineKeyboardMarkup()
+        mk_row.row(
+            types.InlineKeyboardButton("🔄 Aktiv/Deaktiv", callback_data=f"kw_alert_toggle:{alert_id}"),
+            types.InlineKeyboardButton("🗑 Sil", callback_data=f"kw_alert_delete:{alert_id}"),
+        )
+        try:
+            bot.send_message(chat_id, entry, reply_markup=mk_row)
+        except Exception:
+            continue
+
+
+def build_keyword_alert_rayon_markup(selected: List[str]):
+    mk = types.InlineKeyboardMarkup()
+    row = []
+    for rayon in REQUEST_RAYONS:
+        label = f"✅ {rayon}" if rayon in selected else rayon
+        row.append(
+            types.InlineKeyboardButton(
+                label, callback_data=f"kw_alert_rayon_toggle:{quote(rayon)}"
+            )
+        )
+        if len(row) == 3:
+            mk.row(*row)
+            row = []
+    if row:
+        mk.row(*row)
+    mk.add(types.InlineKeyboardButton("✅ Tamamla", callback_data="kw_alert_rayon_done"))
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kw_alert_rayon_back"))
+    return mk
+
+
+def send_keyword_alert_rayon_prompt(chat_id: int, message=None):
+    selected = keyword_alert_state.get(chat_id, {}).get("regions", [])
+    text = "📍 Açar söz üçün rayonları seçin (çoxlu seçim mümkündür):"
+    mk = build_keyword_alert_rayon_markup(selected)
+    try:
+        if message:
+            bot.edit_message_text(
+                text,
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=mk,
+            )
+        else:
+            bot.send_message(chat_id, text, reply_markup=mk)
+    except Exception:
+        pass
+
+
+def period_start(period: str) -> Optional[datetime]:
+    now = datetime.utcnow()
+    if period == "today":
+        return datetime(now.year, now.month, now.day)
+    if period == "week":
+        start_day = now - timedelta(days=now.weekday())
+        return datetime(start_day.year, start_day.month, start_day.day)
+    if period == "month":
+        return datetime(now.year, now.month, 1)
+    if period == "older":
+        return datetime(now.year, now.month, 1)
+    return None
+
+
+def fetch_keyword_alert_hits_page(user_id: int, period: str, page: int = 1):
+    period = period or "today"
+    page = max(1, int(page or 1))
+    start_dt = period_start(period)
+    conn = get_local_conn()
+    cur = conn.cursor()
+    params = [user_id]
+    where = "kah.user_id=?"
+    if start_dt:
+        if period == "older":
+            where += " AND datetime(kah.created_at) < datetime(?)"
+        else:
+            where += " AND datetime(kah.created_at) >= datetime(?)"
+        params.append(start_dt.isoformat())
+    cur.execute(
+        f"SELECT COUNT(*) FROM keyword_alert_hits kah WHERE {where}",
+        params,
+    )
+    total = cur.fetchone()[0] or 0
+    total_pages = max(1, math.ceil(total / PAGE_SIZE_NOTIFICATIONS))
+    if page > total_pages:
+        page = total_pages
+    offset = (page - 1) * PAGE_SIZE_NOTIFICATIONS
+    cur.execute(
+        f"""
+        SELECT kah.*, ka.keywords, ka.regions
+        FROM keyword_alert_hits kah
+        JOIN keyword_alerts ka ON ka.id = kah.alert_id
+        WHERE {where}
+        ORDER BY datetime(kah.created_at) DESC
+        LIMIT ? OFFSET ?
+        """,
+        params + [PAGE_SIZE_NOTIFICATIONS, offset],
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows, total, total_pages, page
+
+
+def show_keyword_alert_hits(chat_id: int, period: str, page: int = 1, message=None):
+    rows, total, total_pages, current_page = fetch_keyword_alert_hits_page(
+        chat_id, period, page
+    )
+    period_labels = {
+        "today": "Bu gün",
+        "week": "Bu həftə",
+        "month": "Bu ay",
+        "older": "Arxiv",
+    }
+    period_label = period_labels.get(period, "Bu gün")
+    if total == 0:
+        mk = types.InlineKeyboardMarkup()
+        mk.add(types.InlineKeyboardButton("🗓 Filtr seç", callback_data="kw_hits_menu"))
+        mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kw_alert_menu"))
+        try:
+            if message:
+                bot.edit_message_text(
+                    f"🔔 {period_label} üçün bildiriş yoxdur.",
+                    chat_id=message.chat.id,
+                    message_id=message.message_id,
+                    reply_markup=mk,
+                )
+            else:
+                bot.send_message(
+                    chat_id, f"🔔 {period_label} üçün bildiriş yoxdur.", reply_markup=mk
+                )
+        except Exception:
+            pass
+        return
+
+    header = (
+        f"🔔 Açar söz bildirişləri ({period_label})\n"
+        f"Səhifə: {current_page} / {total_pages}\n"
+        f"Cəmi: {total}"
+    )
+    mk = types.InlineKeyboardMarkup()
+    nav_buttons = [
+        types.InlineKeyboardButton("⏮ İlk", callback_data=f"kw_hits:{period}:1"),
+        types.InlineKeyboardButton(
+            "◀️ Geri", callback_data=f"kw_hits:{period}:{max(1, current_page - 1)}"
+        ),
+        types.InlineKeyboardButton(
+            f"📄 {current_page} / {total_pages}",
+            callback_data=f"kw_hits:{period}:{current_page}",
+        ),
+        types.InlineKeyboardButton(
+            "▶️ İrəli", callback_data=f"kw_hits:{period}:{min(total_pages, current_page + 1)}"
+        ),
+        types.InlineKeyboardButton("⏭ Son", callback_data=f"kw_hits:{period}:{total_pages}"),
+    ]
+    mk.row(*nav_buttons)
+    mk.add(types.InlineKeyboardButton("🗓 Filtr seç", callback_data="kw_hits_menu"))
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kw_alert_menu"))
+    try:
+        if message:
+            bot.edit_message_text(
+                header,
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=mk,
+            )
+        else:
+            bot.send_message(chat_id, header, reply_markup=mk)
+    except Exception:
+        pass
+
+    for row in rows:
+        target_type = row.get("target_type")
+        target_id = row.get("target_id")
+        source = row.get("source") or "main"
+        if target_type == "listing":
+            listing = fetch_listing_by_source(source, target_id)
+            if listing:
+                try:
+                    send_listing_card(
+                        chat_id,
+                        listing,
+                        source=source,
+                        with_fav_button=True,
+                        status_controls=False,
+                        track_view=False,
+                        viewer_id=chat_id,
+                    )
+                except Exception:
+                    continue
+            else:
+                try:
+                    bot.send_message(chat_id, f"🗂 Elan tapılmadı: ID {target_id}")
+                except Exception:
+                    pass
+        elif target_type == "request":
+            req_row = fetch_customer_request_by_id(target_id)
+            if req_row:
+                try:
+                    send_public_request_card(chat_id, req_row)
+                except Exception:
+                    continue
+            else:
+                try:
+                    bot.send_message(chat_id, f"🗂 Sorğu tapılmadı: ID {target_id}")
+                except Exception:
+                    pass
+
+
+def show_keyword_hits_filter_menu(chat_id: int, message=None):
+    mk = types.InlineKeyboardMarkup()
+    mk.row(
+        types.InlineKeyboardButton("Bu gün", callback_data="kw_hits:today:1"),
+        types.InlineKeyboardButton("Bu həftə", callback_data="kw_hits:week:1"),
+    )
+    mk.row(
+        types.InlineKeyboardButton("Bu ay", callback_data="kw_hits:month:1"),
+        types.InlineKeyboardButton("Arxiv", callback_data="kw_hits:older:1"),
+    )
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kw_alert_menu"))
+    text = "🗓 Bildirişlər üçün tarix filteri seçin:"
+    try:
+        if message:
+            bot.edit_message_text(
+                text,
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=mk,
+            )
+        else:
+            bot.send_message(chat_id, text, reply_markup=mk)
+    except Exception:
+        pass
+
+
 def set_saved_search_active(chat_id: int, criteria_id: int, active: bool):
     conn = get_local_conn()
     cur = conn.cursor()
@@ -6110,6 +6856,185 @@ def show_saved_notifications(message):
         return
     chat_id = message.chat.id
     show_notifications_inbox(chat_id, page=1, message=None)
+
+
+@bot.message_handler(func=lambda m: m.text == "🔔 Açar söz bildirişləri")
+def show_keyword_alerts_menu_message(message):
+    if not ensure_allowed(message):
+        return
+    show_keyword_alert_menu(message.chat.id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "kw_alert_menu")
+def cb_keyword_alert_menu(c):
+    if not ensure_allowed_cb(c):
+        return
+    show_keyword_alert_menu(c.message.chat.id, message=c.message)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "kw_alert_back")
+def cb_keyword_alert_back(c):
+    if not ensure_allowed_cb(c):
+        return
+    send_search_menu(c.message.chat.id)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "kw_alert_add")
+def cb_keyword_alert_add(c):
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id
+    keyword_alert_state[chat_id] = {"step": "keyword", "regions": []}
+    msg = bot.send_message(chat_id, "🔎 Açar sözü yazın:")
+    bot.register_next_step_handler(msg, handle_keyword_alert_keyword)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+def handle_keyword_alert_keyword(message):
+    if not ensure_allowed(message):
+        return
+    chat_id = message.chat.id
+    text = (message.text or "").strip()
+    if not text:
+        msg = bot.send_message(chat_id, "⚠️ Açar söz boş ola bilməz. Yenidən yazın:")
+        bot.register_next_step_handler(msg, handle_keyword_alert_keyword)
+        return
+    state = keyword_alert_state.get(chat_id, {})
+    state["keyword"] = text
+    state["step"] = "regions"
+    keyword_alert_state[chat_id] = state
+    send_keyword_alert_rayon_prompt(chat_id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("kw_alert_rayon_"))
+def cb_keyword_alert_rayon(c):
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id
+    state = keyword_alert_state.get(chat_id)
+    if not state or state.get("step") != "regions":
+        return
+    action = c.data.split(":", 1)[0].replace("kw_alert_rayon_", "")
+    if action == "toggle":
+        try:
+            rayon = unquote(c.data.split(":", 1)[1])
+        except Exception:
+            rayon = c.data.split(":", 1)[1]
+        selected = state.get("regions", [])
+        if rayon in selected:
+            selected.remove(rayon)
+        else:
+            selected.append(rayon)
+        state["regions"] = selected
+        keyword_alert_state[chat_id] = state
+        send_keyword_alert_rayon_prompt(chat_id, message=c.message)
+    elif action == "done":
+        selected = state.get("regions", [])
+        if not selected:
+            bot.answer_callback_query(c.id, "⚠️ Ən azı bir rayon seçin.", show_alert=True)
+            return
+        keyword = (state.get("keyword") or "").strip()
+        keyword_alert_state.pop(chat_id, None)
+        alert_id = save_keyword_alert(chat_id, keyword, selected)
+        bot.send_message(chat_id, f"✅ Açar söz əlavə edildi (ID: {alert_id}).")
+        process_keyword_alerts_for_existing_requests(alert_id)
+        show_keyword_alert_menu(chat_id)
+    elif action == "back":
+        keyword_alert_state.pop(chat_id, None)
+        show_keyword_alert_menu(chat_id, message=c.message)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("kw_alert_list:"))
+def cb_keyword_alert_list(c):
+    if not ensure_allowed_cb(c):
+        return
+    try:
+        page = int(c.data.split(":", 1)[1])
+    except Exception:
+        page = 1
+    show_keyword_alert_list(c.message.chat.id, page=page, message=c.message)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("kw_alert_toggle:"))
+def cb_keyword_alert_toggle(c):
+    if not ensure_allowed_cb(c):
+        return
+    try:
+        alert_id = int(c.data.split(":", 1)[1])
+    except Exception:
+        return
+    toggle_keyword_alert(c.message.chat.id, alert_id)
+    show_keyword_alert_list(c.message.chat.id, page=1, message=c.message)
+    try:
+        bot.answer_callback_query(c.id, "✅ Yeniləndi")
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("kw_alert_delete:"))
+def cb_keyword_alert_delete(c):
+    if not ensure_allowed_cb(c):
+        return
+    try:
+        alert_id = int(c.data.split(":", 1)[1])
+    except Exception:
+        return
+    deleted = delete_keyword_alert(c.message.chat.id, alert_id)
+    if deleted:
+        try:
+            bot.answer_callback_query(c.id, "🗑 Silindi")
+        except Exception:
+            pass
+    show_keyword_alert_list(c.message.chat.id, page=1, message=c.message)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "kw_hits_menu")
+def cb_keyword_hits_menu(c):
+    if not ensure_allowed_cb(c):
+        return
+    show_keyword_hits_filter_menu(c.message.chat.id, message=c.message)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("kw_hits:"))
+def cb_keyword_hits(c):
+    if not ensure_allowed_cb(c):
+        return
+    parts = c.data.split(":")
+    if len(parts) < 3:
+        return
+    period = parts[1]
+    try:
+        page = int(parts[2])
+    except Exception:
+        page = 1
+    show_keyword_alert_hits(c.message.chat.id, period, page=page, message=c.message)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ss|"))
@@ -10697,6 +11622,10 @@ def handle_admin_db_upload(message):
             sale_active = count_main_active_listings(op_code="sat", use_direct_conn=True)
             rent_active = count_main_active_listings(op_code="kir", use_direct_conn=True)
             today_active = count_main_active_listings(only_today=True, use_direct_conn=True)
+            try:
+                process_keyword_alerts_for_new_listings()
+            except Exception as e:
+                print("⚠️ keyword alert listing scan error:", e)
 
             report = (
                 "✅ Baza uğurla yeniləndi.\n"
@@ -12457,6 +13386,7 @@ def handle_admin_approve(c):
             status_controls=False,
             track_view=False,
         )
+        process_keyword_alerts_for_listing(ev, source="local")
 
         bot.answer_callback_query(c.id, "Elan təsdiqləndi ✅")
 
@@ -12638,6 +13568,7 @@ def handle_bot_refresh(message):
     search_state.pop(chat_id, None)
     customer_request_state.pop(chat_id, None)
     customer_request_rule_state.pop(chat_id, None)
+    keyword_alert_state.pop(chat_id, None)
     agent_request_lookup_state.pop(chat_id, None)
     today_flow_state.pop(chat_id, None)
     complaint_flow_state.pop(chat_id, None)
