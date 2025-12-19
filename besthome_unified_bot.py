@@ -136,6 +136,15 @@ STATUS_ACTIVE_FREE = "active_free"
 STATUS_BLOCKED = "blocked"
 STATUS_REJECTED = "rejected"
 ACTIVE_STATUSES = {STATUS_ACTIVE_PAID, STATUS_ACTIVE_DEMO, STATUS_ACTIVE_FREE}
+
+USERLIST_STATUS_FILTERS = {
+    "active": (STATUS_ACTIVE_PAID, STATUS_ACTIVE_DEMO, STATUS_ACTIVE_FREE),
+    "demo": (STATUS_ACTIVE_DEMO,),
+    "free": (STATUS_ACTIVE_FREE,),
+    "blocked": (STATUS_BLOCKED,),
+    "rejected": (STATUS_REJECTED,),
+    "pending": (STATUS_PENDING,),
+}
 FINANCIAL_REPORTS_BUTTON = "💰 Maliyyə hesabatları"
 FINANCIAL_REPORTS_BACK = "⬅️ Geri (Admin Panel)"
 FINANCIAL_REPORTS_MENU = [
@@ -14072,8 +14081,13 @@ def cb_unverified_users_page(c):
 def cb_userlist(c):
     if not is_admin(c.message.chat.id):
         return
-    status = c.data.split("|")[1]
     safe_answer_callback_query(c.id)
+    try:
+        status = c.data.split("|", 1)[1]
+    except Exception:
+        status = "active"
+    if status not in USERLIST_STATUS_FILTERS:
+        status = "active"
     if status == "pending":
         show_unverified_users(c.message.chat.id, page=1, message=c.message, force_new=True)
         return
@@ -14265,44 +14279,53 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
     if status == "pending":
         show_unverified_users(chat_id, page=page, message=message, force_new=force_new)
         return
+    if status not in USERLIST_STATUS_FILTERS:
+        status = "active"
 
     conn = get_local_conn()
     cur = conn.cursor()
 
+    def _status_where_clause(list_status: str) -> Tuple[str, Tuple]:
+        statuses = USERLIST_STATUS_FILTERS.get(list_status, USERLIST_STATUS_FILTERS["active"])
+        if list_status == "active":
+            placeholders = ", ".join(["?"] * len(statuses))
+            return f"status IN ({placeholders})", statuses
+        return "status=?", (statuses[0],)
+
     query_parts = {
         "active": {
-            "where": "status IN (?, ?, ?)",
-            "params": (STATUS_ACTIVE_PAID, STATUS_ACTIVE_DEMO, STATUS_ACTIVE_FREE),
+            "where": _status_where_clause("active")[0],
+            "params": _status_where_clause("active")[1],
             "title": "✅ Aktiv istifadəçilər",
             "order": "ORDER BY datetime(joined_at) DESC",
         },
         "blocked": {
-            "where": "status=?",
-            "params": (STATUS_BLOCKED,),
+            "where": _status_where_clause("blocked")[0],
+            "params": _status_where_clause("blocked")[1],
             "title": "🚫 Bloklanmış istifadəçilər",
             "order": "ORDER BY datetime(blocked_at) DESC",
         },
         "pending": {
-            "where": "status=?",
-            "params": (STATUS_PENDING,),
+            "where": _status_where_clause("pending")[0],
+            "params": _status_where_clause("pending")[1],
             "title": "⏳ Təsdiqlənməmiş istifadəçilər",
             "order": "ORDER BY datetime(joined_at) ASC",
         },
         "demo": {
-            "where": "status=?",
-            "params": (STATUS_ACTIVE_DEMO,),
+            "where": _status_where_clause("demo")[0],
+            "params": _status_where_clause("demo")[1],
             "title": "🎁 Demo istifadəçilər",
             "order": "ORDER BY datetime(joined_at) DESC",
         },
         "free": {
-            "where": "status=?",
-            "params": (STATUS_ACTIVE_FREE,),
+            "where": _status_where_clause("free")[0],
+            "params": _status_where_clause("free")[1],
             "title": "♾ Limitsiz istifadəçilər",
             "order": "ORDER BY datetime(joined_at) DESC",
         },
         "rejected": {
-            "where": "status=?",
-            "params": (STATUS_REJECTED,),
+            "where": _status_where_clause("rejected")[0],
+            "params": _status_where_clause("rejected")[1],
             "title": "❌ Rədd edilmiş istifadəçilər",
             "order": "ORDER BY datetime(joined_at) DESC",
         },
@@ -14315,11 +14338,20 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
 
     base_query = "SELECT * FROM users"
 
-    cur.execute(
-        f"SELECT COUNT(*) FROM users WHERE {parts['where']}",
-        parts["params"],
-    )
-    total = cur.fetchone()[0] or 0
+    try:
+        cur.execute(
+            f"SELECT COUNT(*) FROM users WHERE {parts['where']}",
+            parts["params"],
+        )
+        total = cur.fetchone()[0] or 0
+    except Exception:
+        conn.close()
+        logger.exception("Failed to count users status=%s chat_id=%s", status, chat_id)
+        safe_admin_step(
+            chat_id,
+            "⚠️ Aktiv/Demo istifadəçilər yüklənərkən xəta oldu. Loglara baxın.",
+        )
+        return
 
     if total == 0:
         conn.close()
@@ -14334,13 +14366,26 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
         page = total_pages
 
     offset = (page - 1) * PAGE_SIZE_USERS
-    cur.execute(
-        base_query
-        + f" WHERE {parts['where']} {parts['order']} LIMIT ? OFFSET ?",
-        (*parts["params"], PAGE_SIZE_USERS, offset),
-    )
-    rows = cur.fetchall()
-    conn.close()
+    try:
+        cur.execute(
+            base_query
+            + f" WHERE {parts['where']} {parts['order']} LIMIT ? OFFSET ?",
+            (*parts["params"], PAGE_SIZE_USERS, offset),
+        )
+        rows = cur.fetchall()
+    except Exception:
+        conn.close()
+        logger.exception("Failed to fetch users status=%s chat_id=%s", status, chat_id)
+        safe_admin_step(
+            chat_id,
+            "⚠️ Aktiv/Demo istifadəçilər yüklənərkən xəta oldu. Loglara baxın.",
+        )
+        return
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
     admin_user_page_state[(chat_id, status)] = page
 
