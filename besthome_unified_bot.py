@@ -25,10 +25,11 @@ import shutil
 import tempfile
 import html
 import logging
-from datetime import datetime, date, timedelta
+import json
+from datetime import datetime, date, timedelta, timezone
 from collections import defaultdict
-from typing import Optional, Tuple, List
-from urllib.parse import quote, unquote
+from typing import Optional, Tuple, List, Dict, Any
+from urllib.parse import quote, unquote, urlsplit, urlunsplit, parse_qs, urlencode
 
 import requests
 from flask import Flask
@@ -103,6 +104,12 @@ today_flow_state = {}
 search_reminder_shown = set()  # Session-level reminder flag
 session_interactions = {}
 db_update_lock = threading.Lock()
+db_update_state_lock = threading.Lock()
+db_update_state: Dict[int, Dict[str, Any]] = {}
+DB_UPDATE_TTL_SECONDS = 600
+DB_UPDATE_MAX_ZIP_BYTES = 500 * 1024 * 1024
+DB_UPDATE_MIN_ZIP_BYTES = 1 * 1024 * 1024
+DB_UPDATE_STATE_PATH = os.path.join(DATA_DIR, "db_update_state.json")
 complaint_flow_state = {}
 complaint_records = {}
 admin_reply_state = {}
@@ -277,6 +284,101 @@ def safe_answer_callback_query(callback_id: Optional[str], text: Optional[str] =
         logger.exception("answer_callback_query failed callback_id=%s", callback_id)
 
 
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _load_db_update_state_file() -> Dict[str, Any]:
+    if not os.path.exists(DB_UPDATE_STATE_PATH):
+        return {}
+    try:
+        with open(DB_UPDATE_STATE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        logger.exception("Failed to read db update state file")
+        return {}
+
+
+def _save_db_update_state_file(state: Dict[str, Any]) -> None:
+    try:
+        with open(DB_UPDATE_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except Exception:
+        logger.exception("Failed to write db update state file")
+
+
+def load_last_update_max_id() -> Optional[int]:
+    data = _load_db_update_state_file()
+    try:
+        val = data.get("last_max_id")
+        return int(val) if val is not None else None
+    except Exception:
+        return None
+
+
+def save_last_update_max_id(max_id: int) -> None:
+    data = _load_db_update_state_file()
+    data["last_max_id"] = int(max_id)
+    data["updated_at"] = now_utc().isoformat()
+    _save_db_update_state_file(data)
+
+
+def cleanup_stale_db_updates() -> List[int]:
+    stale = []
+    now = now_utc()
+    with db_update_state_lock:
+        for admin_id, state in list(db_update_state.items()):
+            started_at = state.get("started_at")
+            if not started_at:
+                continue
+            elapsed = (now - started_at).total_seconds()
+            if elapsed > DB_UPDATE_TTL_SECONDS:
+                stale.append(admin_id)
+                db_update_state.pop(admin_id, None)
+    if stale:
+        logger.warning("Recovered stale db update locks: %s", stale)
+        for admin_id in stale:
+            admin_update_state.pop(admin_id, None)
+    return stale
+
+
+def get_running_db_update() -> Optional[Tuple[int, Dict[str, Any]]]:
+    with db_update_state_lock:
+        for admin_id, state in db_update_state.items():
+            if state.get("status") == "running":
+                return admin_id, dict(state)
+    return None
+
+
+def set_db_update_state(admin_id: int, status: str) -> None:
+    with db_update_state_lock:
+        db_update_state[admin_id] = {
+            "status": status,
+            "started_at": now_utc(),
+            "last_progress": now_utc(),
+        }
+
+
+def update_db_update_progress(admin_id: int) -> None:
+    with db_update_state_lock:
+        state = db_update_state.get(admin_id)
+        if state:
+            state["last_progress"] = now_utc()
+
+
+def clear_db_update_state(admin_id: int) -> None:
+    with db_update_state_lock:
+        db_update_state.pop(admin_id, None)
+
+
+def format_seconds(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    minutes, secs = divmod(seconds, 60)
+    if minutes:
+        return f"{minutes} dəq {secs} san"
+    return f"{secs} san"
+
+
 _users_schema_cache = None
 _users_schema_lock = threading.Lock()
 
@@ -331,7 +433,7 @@ def backup_main_db_file() -> Optional[str]:
     if not os.path.exists(MAIN_DB):
         return None
 
-    ts = datetime.utcnow().strftime("%Y-%m-%d_%H-%M")
+    ts = now_utc().strftime("%Y-%m-%d_%H-%M")
     backup_path = os.path.join(DATA_DIR, f"besthome_backup_{ts}.db")
     shutil.copy2(MAIN_DB, backup_path)
     return backup_path
@@ -360,22 +462,65 @@ DB_ALLOWED_MIME_TYPES = {
 }
 
 
-def download_main_db_zip(url: str) -> str:
-    fd, temp_path = tempfile.mkstemp(suffix=".zip")
-    os.close(fd)
-    try:
-        with requests.get(url, stream=True, timeout=300) as r:
-            if r.status_code != 200:
-                raise RuntimeError(f"HTTP status {r.status_code}")
-            with open(temp_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
+def normalize_dropbox_urls(url: str) -> List[str]:
+    url = url.strip()
+    if not url:
+        return []
+    parts = urlsplit(url)
+    query = parse_qs(parts.query)
+    query["dl"] = ["1"]
+    base = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query, doseq=True), ""))
+    candidates = [base]
+    if "dropbox.com" in parts.netloc:
+        alt_netloc = "dl.dropboxusercontent.com"
+        candidates.append(
+            urlunsplit((parts.scheme, alt_netloc, parts.path, "", ""))
+        )
+    return list(dict.fromkeys(candidates))
+
+
+def download_zip_stream(url: str) -> str:
+    last_error = None
+    for candidate in normalize_dropbox_urls(url):
+        fd, temp_path = tempfile.mkstemp(suffix=".zip")
+        os.close(fd)
+        try:
+            with requests.get(
+                candidate,
+                stream=True,
+                timeout=(10, 120),
+                allow_redirects=True,
+            ) as r:
+                if r.status_code != 200:
+                    raise RuntimeError(f"HTTP status {r.status_code}")
+                content_length = r.headers.get("Content-Length")
+                if content_length:
+                    try:
+                        size = int(content_length)
+                        if size > DB_UPDATE_MAX_ZIP_BYTES:
+                            raise RuntimeError("ZIP faylı çox böyükdür")
+                    except ValueError:
+                        pass
+                total = 0
+                with open(temp_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=1024 * 1024):
+                        if not chunk:
+                            continue
+                        total += len(chunk)
+                        if total > DB_UPDATE_MAX_ZIP_BYTES:
+                            raise RuntimeError("ZIP faylı çox böyükdür")
                         f.write(chunk)
-    except Exception:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-        raise
-    return temp_path
+                if total < DB_UPDATE_MIN_ZIP_BYTES:
+                    raise RuntimeError("ZIP fayl ölçüsü çox kiçikdir")
+            if not zipfile.is_zipfile(temp_path):
+                raise RuntimeError("Yüklənən fayl ZIP deyil")
+            return temp_path
+        except Exception as exc:
+            last_error = exc
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            logger.warning("Failed to download zip from %s: %s", candidate, exc)
+    raise RuntimeError(f"ZIP yükləmə alınmadı: {last_error}")
 
 
 def extract_main_db_from_zip(zip_path: str) -> Tuple[str, str]:
@@ -385,21 +530,185 @@ def extract_main_db_from_zip(zip_path: str) -> Tuple[str, str]:
     temp_dir = tempfile.mkdtemp()
     with zipfile.ZipFile(zip_path, "r") as zf:
         names = zf.namelist()
-        if "besthome.db" not in names:
-            raise RuntimeError("ZIP daxilində 'besthome.db' tapılmadı")
-        zf.extract("besthome.db", path=temp_dir)
-    return os.path.join(temp_dir, "besthome.db"), temp_dir
+        candidates = []
+        for name in names:
+            lower = name.lower()
+            if lower.endswith((".db", ".sqlite", ".db3")):
+                candidates.append(name)
+        if not candidates:
+            raise RuntimeError("ZIP daxilində DB faylı tapılmadı")
+        preferred = None
+        for name in candidates:
+            if "besthome" in name.lower():
+                preferred = name
+                break
+        target = preferred or candidates[0]
+        zf.extract(target, path=temp_dir)
+    extracted_path = os.path.join(temp_dir, target)
+    return extracted_path, temp_dir
 
 
 def validate_main_db_file(db_path: str) -> int:
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.cursor()
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='listings'"
+        )
+        row = cur.fetchone()
+        if not row:
+            raise RuntimeError("DB daxilində 'listings' cədvəli tapılmadı")
         cur.execute("SELECT COUNT(*) FROM listings")
         row = cur.fetchone()
         return int(row[0]) if row and row[0] is not None else 0
     finally:
         conn.close()
+
+
+def get_max_listing_id(db_path: str) -> int:
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT MAX(id) FROM listings")
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    finally:
+        conn.close()
+
+
+def count_new_listings_since(db_path: str, last_max_id: Optional[int]) -> int:
+    if last_max_id is None:
+        return 0
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM listings WHERE id > ?", (last_max_id,))
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    finally:
+        conn.close()
+
+
+def atomic_replace_main_db(new_db_path: str) -> Optional[str]:
+    backup_path = backup_main_db_file()
+    ts = now_utc().strftime("%Y-%m-%d_%H-%M-%S")
+    temp_target = os.path.join(DATA_DIR, f"besthome_update_{ts}.db")
+    shutil.copy2(new_db_path, temp_target)
+    last_error = None
+    for _ in range(3):
+        try:
+            os.replace(temp_target, MAIN_DB)
+            last_error = None
+            break
+        except Exception as exc:
+            last_error = exc
+            time.sleep(0.5)
+    if last_error:
+        raise last_error
+    with open(MAIN_DB, "rb") as f:
+        os.fsync(f.fileno())
+    return backup_path
+
+
+def send_db_update_progress(admin_id: int, message: str) -> None:
+    update_db_update_progress(admin_id)
+    safe_admin_step(admin_id, message)
+
+
+def run_db_update_pipeline(admin_id: int, url: str) -> None:
+    temp_zip_path = None
+    extracted_db_path = None
+    extracted_dir = None
+    backup_path = None
+    acquired = False
+    try:
+        acquired = db_update_lock.acquire(blocking=False)
+        if not acquired:
+            safe_admin_step(
+                admin_id,
+                "⏳ Hal-hazırda baza yenilənir. Zəhmət olmasa gözləyin.",
+            )
+            return
+
+        main_db_update_in_progress.set()
+        send_db_update_progress(admin_id, "⬇️ Zip yüklənir…")
+        temp_zip_path = download_zip_stream(url)
+        send_db_update_progress(admin_id, "📦 Zip açılır…")
+        extracted_db_path, extracted_dir = extract_main_db_from_zip(temp_zip_path)
+        send_db_update_progress(admin_id, "🗄️ DB yoxlanır…")
+        validate_main_db_file(extracted_db_path)
+
+        last_max_id = load_last_update_max_id()
+        if last_max_id is None and os.path.exists(MAIN_DB):
+            last_max_id = get_max_listing_id(MAIN_DB)
+
+        send_db_update_progress(admin_id, "🔁 DB əvəz olunur…")
+        close_all_main_conns()
+        prepare_main_db_for_swap()
+        backup_path = atomic_replace_main_db(extracted_db_path)
+
+        conn = sqlite3.connect(MAIN_DB)
+        try:
+            ensure_created_at_column(
+                conn,
+                "listings",
+                ("inserted_at", "date_read", "date_added", "Elanin_tarixi", "added_at"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        send_db_update_progress(admin_id, "📊 Statistika hesablanır…")
+        new_listings = count_new_listings_since(MAIN_DB, last_max_id)
+        new_max_id = get_max_listing_id(MAIN_DB)
+        save_last_update_max_id(new_max_id)
+
+        total_active = count_main_active_listings(use_direct_conn=True)
+        sale_active = count_main_active_listings(op_code="sat", use_direct_conn=True)
+        rent_active = count_main_active_listings(op_code="kir", use_direct_conn=True)
+        today_active = count_main_active_listings(only_today=True, use_direct_conn=True)
+        try:
+            process_keyword_alerts_for_new_listings()
+        except Exception as e:
+            logger.warning("keyword alert listing scan error: %s", e)
+
+        report = (
+            "✅ Baza uğurla yeniləndi.\n"
+            f"📦 Yeni elanlar: {new_listings}\n"
+            f"📊 Ümumi elan sayı: {total_active}\n"
+            f"1⃣ Satılır: {sale_active}\n"
+            f"2⃣ Kirayə verilir: {rent_active}\n"
+            f"🆕 Bu gün daxil olan elanlar: {today_active}"
+        )
+        safe_admin_step(admin_id, report)
+        logger.info(
+            "DB update completed chat_id=%s new=%s total=%s",
+            admin_id,
+            new_listings,
+            total_active,
+        )
+    except Exception as exc:
+        logger.exception("DB update failed chat_id=%s", admin_id)
+        safe_admin_step(admin_id, f"❌ Yenilənmə alınmadı: {exc}")
+        if backup_path:
+            restore_main_db_from_backup(backup_path)
+    finally:
+        main_db_update_in_progress.clear()
+        if acquired:
+            db_update_lock.release()
+        admin_update_state.pop(admin_id, None)
+        clear_db_update_state(admin_id)
+        for path in (temp_zip_path, extracted_db_path):
+            if path and os.path.exists(path):
+                try:
+                    if os.path.isdir(path):
+                        shutil.rmtree(path, ignore_errors=True)
+                    else:
+                        os.remove(path)
+                except Exception:
+                    pass
+        if extracted_dir and os.path.exists(extracted_dir):
+            shutil.rmtree(extracted_dir, ignore_errors=True)
 
 
 def sanity_check_main_db():
@@ -12530,18 +12839,29 @@ def start_admin_update_db(chat_id: int, callback_id: Optional[str] = None):
     if not is_admin(chat_id):
         return
 
-    if db_update_lock.locked():
+    stale = cleanup_stale_db_updates()
+    if stale:
+        safe_admin_step(chat_id, "⚠️ Köhnə yenilənmə stuck idi, yenidən başladım.")
+
+    running = get_running_db_update()
+    if running:
+        running_admin, state = running
+        started_at = state.get("started_at", now_utc())
+        remaining = DB_UPDATE_TTL_SECONDS - (now_utc() - started_at).total_seconds()
+        message = (
+            "⏳ Hal-hazırda baza yenilənir"
+            f" (qalan: təxmini {format_seconds(remaining)})."
+        )
         if callback_id:
             safe_answer_callback_query(callback_id, "⚠️ Baza yenilənir.")
-        safe_admin_step(
-            chat_id, "⚠️ Hal-hazırda baza yenilənir. Zəhmət olmasa gözləyin."
-        )
+        safe_admin_step(chat_id, message)
         return
 
     if callback_id:
         safe_answer_callback_query(callback_id, "📦 Baza yeniləmə")
 
     admin_update_state[chat_id] = "awaiting_db_link"
+    set_db_update_state(chat_id, "awaiting_link")
     logger.info("Admin requested db update chat_id=%s", chat_id)
     safe_admin_step(
         chat_id,
@@ -12568,105 +12888,40 @@ def handle_admin_db_upload(message):
     if admin_update_state.get(chat_id) != "awaiting_db_link":
         return
 
+    stale = cleanup_stale_db_updates()
+    if stale:
+        safe_admin_step(chat_id, "⚠️ Köhnə yenilənmə stuck idi, yenidən başladım.")
+
     url = message.text.strip() if message.text else ""
     url_lower = url.lower()
     if (
         not url
         or not re.match(r"https?://", url)
         or "dropbox" not in url_lower
-        or (".zip" not in url_lower and "dl=1" not in url_lower and "raw=1" not in url_lower)
     ):
         safe_admin_step(chat_id, "❌ Zəhmət olmasa Dropbox ZIP linki göndərin.")
         return
 
-    if db_update_lock.locked():
+    running = get_running_db_update()
+    if running:
+        started_at = running[1].get("started_at", now_utc())
+        remaining = DB_UPDATE_TTL_SECONDS - (now_utc() - started_at).total_seconds()
         safe_admin_step(
             chat_id,
-            "⚠️ Hal-hazırda baza yenilənir. Zəhmət olmasa gözləyin.",
+            "⏳ Hal-hazırda baza yenilənir"
+            f" (qalan: təxmini {format_seconds(remaining)}).",
         )
         return
 
-    safe_admin_step(chat_id, "⏳ Yenilənir...")
+    safe_admin_step(chat_id, "✅ Link alındı. ⏳ Yenilənir…")
     logger.info("Admin db update link received chat_id=%s url=%s", chat_id, url)
-
-    temp_zip_path = None
-    extracted_db_path = None
-    extracted_dir = None
-    with db_update_lock:
-        try:
-            main_db_update_in_progress.set()
-            admin_update_state[chat_id] = "updating_db"
-            temp_zip_path = download_main_db_zip(url)
-            extracted_db_path, extracted_dir = extract_main_db_from_zip(temp_zip_path)
-            validate_main_db_file(extracted_db_path)
-            old_count = validate_main_db_file(MAIN_DB)
-            close_all_main_conns()
-            prepare_main_db_for_swap()
-
-            shutil.copyfile(extracted_db_path, MAIN_DB)
-
-            with open(MAIN_DB, "rb") as f:
-                os.fsync(f.fileno())
-
-            conn = sqlite3.connect(MAIN_DB)
-            try:
-                ensure_created_at_column(
-                    conn,
-                    "listings",
-                    ("inserted_at", "date_read", "date_added", "Elanin_tarixi", "added_at"),
-                )
-                cur = conn.cursor()
-                cur.execute("SELECT COUNT(*) FROM listings")
-                row = cur.fetchone()
-                final_count = int(row[0]) if row and row[0] is not None else 0
-                conn.commit()
-            finally:
-                conn.close()
-
-            added = final_count - old_count
-            if added < 0:
-                added = 0
-            total_active = count_main_active_listings(use_direct_conn=True)
-            sale_active = count_main_active_listings(op_code="sat", use_direct_conn=True)
-            rent_active = count_main_active_listings(op_code="kir", use_direct_conn=True)
-            today_active = count_main_active_listings(only_today=True, use_direct_conn=True)
-            try:
-                process_keyword_alerts_for_new_listings()
-            except Exception as e:
-                logger.warning("keyword alert listing scan error: %s", e)
-
-            report = (
-                "✅ Baza uğurla yeniləndi.\n"
-                f"📦 Yeni elanlar: {added}\n"
-                f"📊 Ümumi elan sayı: {total_active}\n"
-                f"1⃣ Satılır: {sale_active}\n"
-                f"2⃣ Kirayə verilir: {rent_active}\n"
-                f"🆕 Bu gün daxil olan elanlar: {today_active}"
-            )
-            safe_admin_step(chat_id, report)
-            logger.info(
-                "DB update completed chat_id=%s added=%s total=%s",
-                chat_id,
-                added,
-                total_active,
-            )
-        except Exception as e:
-            logger.exception("DB update error chat_id=%s", chat_id)
-            safe_admin_step(chat_id, f"❌ Xəta baş verdi: {e}")
-        finally:
-            main_db_update_in_progress.clear()
-            admin_update_state.pop(chat_id, None)
-            for path in (temp_zip_path, extracted_db_path):
-                if path and os.path.exists(path):
-                    try:
-                        if os.path.isdir(path):
-                            shutil.rmtree(path, ignore_errors=True)
-                        else:
-                            os.remove(path)
-                    except Exception:
-                        pass
-            if extracted_dir and os.path.exists(extracted_dir):
-                shutil.rmtree(extracted_dir, ignore_errors=True)
+    admin_update_state[chat_id] = "updating_db"
+    set_db_update_state(chat_id, "running")
+    threading.Thread(
+        target=run_db_update_pipeline,
+        args=(chat_id, url),
+        daemon=True,
+    ).start()
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm|"))
