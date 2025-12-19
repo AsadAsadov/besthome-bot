@@ -84,7 +84,6 @@ search_state = {}  # Axtarış paging və filter state
 customer_request_state = {}
 agent_request_lookup_state = {}
 CUSTOMER_REQUEST_COOLDOWN_SECONDS = 300
-enabled_customer_request_users = set()
 
 bot = telebot.TeleBot(BOT_TOKEN)
 BOT_USERNAME = bot.get_me().username
@@ -137,6 +136,7 @@ ADMIN_PANEL_PAGE2 = [
     "🔥 Ən çox baxılan elanlar",
     "📦 Baza yenilə",
     "📨 İstifadəçiyə mesaj göndər",
+    "📌 Müştəri istəkləri icazələri",
 ]
 ADMIN_PANEL_NAV_NEXT = "▶️ Növbəti səhifə"
 ADMIN_PANEL_NAV_PREV = "◀️ Əvvəlki səhifə"
@@ -662,6 +662,15 @@ def init_local_db():
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS customer_requests_access (
+            user_id INTEGER PRIMARY KEY,
+            enabled INTEGER DEFAULT 0,
+            updated_at TEXT
+        )
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS agent_interests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             agent_chat_id INTEGER,
@@ -1014,62 +1023,53 @@ def get_user_record(chat_id: int) -> Optional[dict]:
     return data
 
 
-def get_customer_requests_enabled(chat_id: int) -> bool:
+def has_customer_requests_access(user_id: int) -> bool:
     conn = get_local_conn()
     cur = conn.cursor()
-    try:
-        cur.execute(
-            "SELECT customer_requests_enabled FROM users WHERE chat_id=?",
-            (chat_id,),
-        )
-    except sqlite3.OperationalError:
-        conn.close()
-        return chat_id in enabled_customer_request_users
+    cur.execute(
+        "SELECT enabled FROM customer_requests_access WHERE user_id = ?",
+        (user_id,),
+    )
     row = cur.fetchone()
     conn.close()
     if not row:
         return False
-    value = row[0] if not isinstance(row, dict) else row.get("customer_requests_enabled")
-    return bool(value)
+    value = row["enabled"] if isinstance(row, dict) else row[0]
+    return value == 1
+
+
+def get_customer_requests_enabled(chat_id: int) -> bool:
+    return has_customer_requests_access(chat_id)
 
 
 def set_customer_requests_enabled(chat_id: int, enabled: bool):
     conn = get_local_conn()
     cur = conn.cursor()
-    now = datetime.utcnow().isoformat()
-    try:
+    if enabled:
         cur.execute(
-            "UPDATE users SET customer_requests_enabled=? WHERE chat_id=?",
-            (1 if enabled else 0, chat_id),
+            """
+            INSERT OR REPLACE INTO customer_requests_access (user_id, enabled, updated_at)
+            VALUES (?, 1, CURRENT_TIMESTAMP)
+            """,
+            (chat_id,),
         )
-        if cur.rowcount == 0:
-            cur.execute(
-                """
-                INSERT INTO users (chat_id, customer_requests_enabled, joined_at, status, last_status_change_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    chat_id,
-                    1 if enabled else 0,
-                    now,
-                    STATUS_PENDING,
-                    now,
-                ),
-            )
-        conn.commit()
-    except sqlite3.OperationalError:
-        if enabled:
-            enabled_customer_request_users.add(chat_id)
-        else:
-            enabled_customer_request_users.discard(chat_id)
-    finally:
-        conn.close()
+    else:
+        cur.execute(
+            """
+            UPDATE customer_requests_access
+            SET enabled = 0, updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = ?
+            """,
+            (chat_id,),
+        )
+    conn.commit()
+    conn.close()
 
 
 def ensure_customer_requests_enabled(chat_id: int) -> bool:
     if is_admin(chat_id):
         return True
-    if not get_customer_requests_enabled(chat_id):
+    if not has_customer_requests_access(chat_id):
         bot.send_message(chat_id, "❌ Bu funksiya sizin üçün aktiv deyil.")
         return False
     return True
@@ -2711,6 +2711,7 @@ def send_main_menu(chat_id: int):
         "📝 Yeni elan əlavə et",
         "🔎 Axtarış sistemi",
         "📝 Ev axtarıram",
+        "📌 Müştəri istəkləri",
         "🆕 Bu gün daxil olan elanlar",
         "📂 Elan statusları",
         "⭐ Favorilərim",
@@ -3272,14 +3273,7 @@ def ensure_customer_request_action_allowed(admin_chat_id: int, req_id: str) -> b
     if not req:
         bot.send_message(admin_chat_id, "⚠️ Sorğu tapılmadı.")
         return False
-    customer_id = req.get("chat_id")
-    if not customer_id or get_customer_requests_enabled(customer_id):
-        return True
-    bot.send_message(
-        admin_chat_id,
-        "❌ Bu istifadəçi üçün müştəri istəkləri hələ aktiv edilməyib.",
-    )
-    return False
+    return True
 
 
 def format_agent_request_card(row: dict) -> str:
@@ -4908,6 +4902,21 @@ def phone_search_from_menu(message):
     bot.register_next_step_handler(msg, phone_search_handler)
 
 
+@bot.message_handler(func=lambda m: m.text == "📌 Müştəri istəkləri")
+def customer_requests_from_menu(message):
+    if not ensure_allowed(message):
+        return
+    chat_id = message.chat.id
+    if not has_customer_requests_access(chat_id):
+        bot.send_message(chat_id, "❌ Bu funksiya sizin üçün aktiv deyil.")
+        return
+    bot.send_message(
+        chat_id,
+        "📍 Rayon seçin:",
+        reply_markup=build_agent_request_rayon_markup(),
+    )
+
+
 def return_to_main_menu(chat_id: int):
     search_state.pop(chat_id, None)
     admin_panel_page_state.pop(chat_id, None)
@@ -4966,7 +4975,7 @@ def show_notifications_inbox(chat_id: int, page: int = 1, message=None):
         mk_empty.add(
             types.InlineKeyboardButton("⚙️ Kriteriyalar", callback_data="notif_crit")
         )
-        if is_agent_user(chat_id):
+        if has_customer_requests_access(chat_id):
             mk_empty.add(
                 types.InlineKeyboardButton(
                     "👥 Müştəri istəkləri", callback_data="agent_notif:1"
@@ -5034,7 +5043,7 @@ def show_notifications_inbox(chat_id: int, page: int = 1, message=None):
         ),
     ]
     mk.row(*nav_buttons)
-    if is_agent_user(chat_id):
+    if has_customer_requests_access(chat_id):
         mk.add(
             types.InlineKeyboardButton(
                 "👥 Müştəri istəkləri", callback_data="agent_notif:1"
@@ -5387,10 +5396,10 @@ def cb_agent_notifications(c):
     if not ensure_allowed_cb(c):
         return
     chat_id = c.message.chat.id
-    if not (is_admin(chat_id) or is_agent_user(chat_id)):
+    if not has_customer_requests_access(chat_id):
         try:
             bot.answer_callback_query(
-                c.id, "❌ Bu bölmə yalnız BestHome agentləri üçündür.", show_alert=True
+                c.id, "❌ Bu funksiya sizin üçün aktiv deyil", show_alert=True
             )
         except Exception:
             pass
@@ -7605,6 +7614,35 @@ def handle_admin_panel_action(message):
         start_direct_user_message_flow(chat_id)
     elif txt == "📌 Müştəri istəkləri":
         show_customer_requests_overview(chat_id, period="day")
+    elif txt == "📌 Müştəri istəkləri icazələri":
+        msg = bot.send_message(chat_id, "🆔 Telegram istifadəçi ID-sini daxil edin:")
+        bot.register_next_step_handler(msg, admin_customer_requests_access_step)
+
+
+def admin_customer_requests_access_step(message):
+    if not is_admin(message.chat.id):
+        return
+    text = (message.text or "").strip()
+    try:
+        user_id = int(text)
+    except Exception:
+        bot.send_message(message.chat.id, "❌ Düzgün istifadəçi ID daxil edin.")
+        return
+
+    mk = types.InlineKeyboardMarkup()
+    mk.row(
+        types.InlineKeyboardButton(
+            "✅ Aktiv et", callback_data=f"cust_req_access:on:{user_id}"
+        ),
+        types.InlineKeyboardButton(
+            "❌ Deaktiv et", callback_data=f"cust_req_access:off:{user_id}"
+        ),
+    )
+    bot.send_message(
+        message.chat.id,
+        f"🆔 {user_id} üçün müştəri istəkləri icazəsi:",
+        reply_markup=mk,
+    )
 
 
 def get_request_period_start(period: str) -> datetime:
@@ -8085,6 +8123,33 @@ def toggle_customer_requests(c):
         pass
 
 
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cust_req_access:"))
+def cb_customer_requests_access(c):
+    if not is_admin(c.from_user.id):
+        return
+    parts = c.data.split(":")
+    if len(parts) < 3:
+        return
+    action = parts[1]
+    try:
+        user_id = int(parts[2])
+    except Exception:
+        return
+    if action == "on":
+        set_customer_requests_enabled(user_id, True)
+        message = f"✅ ID {user_id} üçün müştəri istəkləri AKTİV edildi"
+    elif action == "off":
+        set_customer_requests_enabled(user_id, False)
+        message = f"🔴 ID {user_id} üçün müştəri istəkləri BAĞLANDI"
+    else:
+        return
+    bot.send_message(c.message.chat.id, message)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith("toggle_customer_request_user:"))
 def toggle_customer_request_user(c):
     if not is_admin(c.from_user.id):
@@ -8188,7 +8253,7 @@ def show_user_profile(chat_id: int, user_id: int):
     profile_url = get_profile_url_for_user(user_id)
     phone_raw = get_user_phone_for_admin(user_id)
     wa_url = build_admin_whatsapp_url(phone_raw)
-    customer_requests_enabled = get_customer_requests_enabled(user_id)
+    customer_requests_enabled = has_customer_requests_access(user_id)
     joined_at = record.get("joined_at")
     join_date, join_time = parse_join_datetime(joined_at)
     username = record.get("username")
@@ -10521,7 +10586,7 @@ def agents_button(message):
             callback_data="pub_agents_kw",
         )
     )
-    if is_admin(message.chat.id) or is_agent_user(message.chat.id):
+    if has_customer_requests_access(message.chat.id):
         mk.add(
             types.InlineKeyboardButton(
                 "🎯 Bu ərazidən maraqlanan müştərilər",
@@ -10529,9 +10594,7 @@ def agents_button(message):
             )
         )
         mk.add(
-            types.InlineKeyboardButton(
-                "👥 Mənim müştərilərim", callback_data="agt_my:1"
-            )
+            types.InlineKeyboardButton("👥 Mənim müştərilərim", callback_data="agt_my:1")
         )
     bot.send_message(
         message.chat.id,
@@ -10574,10 +10637,10 @@ def cb_agent_requests(c):
     if not ensure_allowed_cb(c):
         return
     chat_id = c.message.chat.id
-    if not (is_admin(chat_id) or is_agent_user(chat_id)):
+    if not has_customer_requests_access(chat_id):
         try:
             bot.answer_callback_query(
-                c.id, "❌ Bu bölmə yalnız BestHome agentləri üçündür.", show_alert=True
+                c.id, "❌ Bu funksiya sizin üçün aktiv deyil", show_alert=True
             )
         except Exception:
             pass
@@ -11888,6 +11951,7 @@ def main_menu(chat_id):
         "📝 Yeni elan əlavə et",
         "🔎 Axtarış sistemi",
         "📝 Ev axtarıram",
+        "📌 Müştəri istəkləri",
         "📂 Elan statusları",
         "⭐ Favorilərim",
         "📋 Elanlarım",
@@ -11902,11 +11966,8 @@ def main_menu(chat_id):
     if is_admin(chat_id):
         buttons.append("📊 Admin Panel")
 
-    mk.add(buttons[0], buttons[5])
-    mk.add(buttons[1], buttons[6])
-    mk.add(buttons[2], buttons[7])
-    mk.add(buttons[3], buttons[8])
-    mk.add(buttons[4], buttons[9])
+    for i in range(0, len(buttons), 2):
+        mk.row(*buttons[i : i + 2])
     mk.add("🔄 Botu yenilə")
 
     bot.send_message(chat_id, "📋 Əsas menyudan seçim et:", reply_markup=mk)
