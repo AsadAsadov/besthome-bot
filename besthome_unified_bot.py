@@ -23,6 +23,7 @@ import re
 import random
 import shutil
 import tempfile
+import html
 from datetime import datetime, date, timedelta
 from collections import defaultdict
 from typing import Optional, Tuple, List
@@ -150,6 +151,7 @@ PAGE_SIZE = 20
 NEW_LISTING_WINDOW_HOURS = 24
 HOT_VIEWS_THRESHOLD = 50
 PAGE_SIZE_REQ = 10
+PAGE_SIZE_DEMO_USERS = 5
 COMPLAINT_CATEGORIES = [
     "🐞 Texniki problem",
     "💡 Təklif",
@@ -8767,10 +8769,49 @@ def format_remaining_time(delta: timedelta) -> str:
     return " ".join(parts)
 
 
-def send_demo_users_report(chat_id: int):
-    if not is_admin(chat_id):
-        return
+def get_demo_profile_url(user_id: int, _username: Optional[str]) -> str:
+    return f"tg://user?id={user_id}"
 
+
+def resolve_demo_expiry(row: sqlite3.Row) -> Optional[datetime]:
+    expiry_raw = None
+    if row["sub_is_demo"]:
+        expiry_raw = row["sub_expires_at"]
+    if not expiry_raw:
+        expiry_raw = row["demo_end_at"] or row["demo_expires_at"]
+    return parse_dt_safe(expiry_raw)
+
+
+def normalize_demo_user_display(full_name: Optional[str], username: Optional[str], user_id: int) -> str:
+    name = full_name or ""
+    if username:
+        uname = f"@{username}"
+        name = f"{name} ({uname})" if name else uname
+    if not name:
+        name = f"ID: {user_id}"
+    return html.escape(name)
+
+
+def deactivate_expired_demo(user_id: int, expiry_dt: Optional[datetime], plan: Optional[str]):
+    if not expiry_dt:
+        return
+    record = get_user_record(user_id)
+    if record and record.get("status") == STATUS_ACTIVE_DEMO:
+        paid_until = parse_dt_safe(record.get("paid_until"))
+        update_user_status(
+            user_id,
+            STATUS_PENDING,
+            demo_start_at=parse_dt_safe(record.get("demo_start_at")),
+            demo_end_at=expiry_dt,
+            paid_until=paid_until,
+        )
+    ensure_subscription_record(user_id)
+    if plan is None:
+        plan = "demo"
+    set_subscription(user_id, plan, expiry_dt, is_active=0, is_demo=0, note="demo_expired")
+
+
+def build_demo_users_view(page: int = 1) -> Tuple[str, types.InlineKeyboardMarkup, int]:
     conn = get_local_conn()
     cur = conn.cursor()
     cur.execute(
@@ -8778,71 +8819,295 @@ def send_demo_users_report(chat_id: int):
         SELECT u.chat_id,
                u.full_name,
                u.username,
+               u.status,
+               u.demo_end_at,
                u.demo_expires_at,
-               s.expires_at AS sub_expires_at
+               u.demo_start_at,
+               u.paid_until,
+               s.plan AS sub_plan,
+               s.expires_at AS sub_expires_at,
+               COALESCE(s.is_demo, 0) AS sub_is_demo
         FROM users u
         LEFT JOIN subscriptions s ON s.chat_id = u.chat_id
-        WHERE u.demo_used=1 OR s.is_demo=1
-        """
+        WHERE COALESCE(s.is_demo, 0)=1
+           OR u.status=?
+           OR u.demo_end_at IS NOT NULL
+           OR u.demo_expires_at IS NOT NULL
+        """,
+        (STATUS_ACTIVE_DEMO,),
     )
     rows = cur.fetchall()
     conn.close()
 
     if not rows:
-        bot.send_message(chat_id, "❌ Demo istifadəçisi yoxdur.")
-        return
+        return "❌ Demo istifadəçisi yoxdur.", types.InlineKeyboardMarkup(), 1
 
     now = datetime.utcnow()
     entries = []
 
-    for r in rows:
-        expiry_raw = r["demo_expires_at"] or r["sub_expires_at"]
-        expiry_dt = None
-        if expiry_raw:
-            try:
-                expiry_dt = datetime.fromisoformat(str(expiry_raw))
-            except Exception:
-                try:
-                    expiry_dt = datetime.fromisoformat(str(expiry_raw).replace(" ", "T"))
-                except Exception:
-                    expiry_dt = None
+    for row in rows:
+        expiry_dt = resolve_demo_expiry(row)
+        is_active = bool(expiry_dt and expiry_dt > now)
+        if not is_active:
+            deactivate_expired_demo(row["chat_id"], expiry_dt, row["sub_plan"])
 
-        start_dt = expiry_dt - timedelta(days=3) if expiry_dt else None
+        remaining_days = 0
+        if expiry_dt and expiry_dt > now:
+            remaining_days = math.ceil((expiry_dt - now).total_seconds() / 86400)
 
-        name = r["full_name"] or ""
-        if r["username"]:
-            uname = f"@{r['username']}"
-            name = f"{name} ({uname})" if name else uname
-        if not name:
-            name = f"ID: {r['chat_id']}"
+        expiry_txt = expiry_dt.strftime("%Y-%m-%d %H:%M") if expiry_dt else "-"
+        status_txt = "🟢 Aktiv demo" if is_active else "🔴 Vaxtı bitmiş demo"
+        profile_url = get_demo_profile_url(row["chat_id"], row["username"])
+        display_name = normalize_demo_user_display(
+            row["full_name"], row["username"], row["chat_id"]
+        )
 
-        line = f"• {name}"
-        start_txt = start_dt.strftime("%d.%m.%Y") if start_dt else "-"
-        end_txt = expiry_dt.strftime("%d.%m.%Y") if expiry_dt else "-"
-        line += f" — start: {start_txt} — bitir: {end_txt}"
+        entry_text = (
+            f"👤 {display_name}\n"
+            f"🆔 <a href=\"{profile_url}\">{row['chat_id']}</a>\n"
+            f"⏳ Demo bitmə tarixi: {expiry_txt}\n"
+            f"⏱ Qalan gün: {remaining_days} gün\n"
+            f"🔄 Status: {status_txt}"
+        )
+        entries.append(
+            {
+                "user_id": row["chat_id"],
+                "is_active": is_active,
+                "expiry": expiry_dt,
+                "text": entry_text,
+                "profile_url": profile_url,
+            }
+        )
 
-        if expiry_dt:
-            if expiry_dt > now:
-                remaining_txt = format_remaining_time(expiry_dt - now)
-                line += f" — qalıq: {remaining_txt}"
-            else:
-                line += " — Bitib"
-        else:
-            line += " — Demo tarixi yoxdur"
+    active_entries = sorted(
+        (e for e in entries if e["is_active"]),
+        key=lambda e: e["expiry"] or datetime.max,
+    )
+    expired_entries = sorted(
+        (e for e in entries if not e["is_active"]),
+        key=lambda e: e["expiry"] or datetime.min,
+        reverse=True,
+    )
+    ordered_entries = active_entries + expired_entries
 
-        entries.append({"line": line, "expiry": expiry_dt or datetime.min})
+    total_pages = max(1, math.ceil(len(ordered_entries) / PAGE_SIZE_DEMO_USERS))
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * PAGE_SIZE_DEMO_USERS
+    end = start + PAGE_SIZE_DEMO_USERS
+    page_entries = ordered_entries[start:end]
 
-    entries.sort(key=lambda x: x["expiry"], reverse=True)
+    lines = [
+        "🧪 Demo istifadəçilər",
+        f"Səhifə: {page} / {total_pages}",
+        "",
+        "🔹 AKTİV DEMOLAR",
+    ]
+    active_in_page = [e for e in page_entries if e["is_active"]]
+    if not active_in_page:
+        lines.append("—")
+    else:
+        for entry in active_in_page:
+            lines.append(entry["text"])
+            lines.append("")
 
-    lines = ["🧪 Demo istifadəçilər"] + [item["line"] for item in entries]
-    chunk = ""
-    for line in lines:
-        if len(chunk) + len(line) + 1 > 3800:
-            bot.send_message(chat_id, chunk.strip())
-            chunk = ""
-        chunk += line + "\n"
-    if chunk.strip():
-        bot.send_message(chat_id, chunk.strip())
+    lines.append("🔹 VAXTI BİTMİŞ DEMOLAR")
+    expired_in_page = [e for e in page_entries if not e["is_active"]]
+    if not expired_in_page:
+        lines.append("—")
+    else:
+        for entry in expired_in_page:
+            lines.append(entry["text"])
+            lines.append("")
+
+    text = "\n".join(lines)
+
+    mk = types.InlineKeyboardMarkup()
+    for entry in page_entries:
+        uid = entry["user_id"]
+        mk.add(types.InlineKeyboardButton("🧑‍💼 Profilə bax", url=entry["profile_url"]))
+        mk.row(
+            types.InlineKeyboardButton(
+                "➕ +3 gün", callback_data=f"demo_users|add|{uid}|3|{page}"
+            ),
+            types.InlineKeyboardButton(
+                "➕ +5 gün", callback_data=f"demo_users|add|{uid}|5|{page}"
+            ),
+            types.InlineKeyboardButton(
+                "➕ +7 gün", callback_data=f"demo_users|add|{uid}|7|{page}"
+            ),
+        )
+        mk.add(
+            types.InlineKeyboardButton(
+                "❌ Demo ləğv et", callback_data=f"demo_users|cancel|{uid}|{page}"
+            )
+        )
+
+    if total_pages > 1:
+        nav = []
+        if page > 1:
+            nav.append(
+                types.InlineKeyboardButton(
+                    "⬅️ Əvvəlki", callback_data=f"demo_users|page|{page - 1}"
+                )
+            )
+        if page < total_pages:
+            nav.append(
+                types.InlineKeyboardButton(
+                    "➡️ Növbəti", callback_data=f"demo_users|page|{page + 1}"
+                )
+            )
+        if nav:
+            mk.row(*nav)
+
+    return text, mk, total_pages
+
+
+def send_demo_users_report(chat_id: int, page: int = 1, message=None):
+    if not is_admin(chat_id):
+        return
+
+    text, mk, _ = build_demo_users_view(page=page)
+    if message:
+        try:
+            bot.edit_message_text(
+                text,
+                chat_id=chat_id,
+                message_id=message.message_id,
+                reply_markup=mk,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            return
+        except Exception:
+            pass
+
+    bot.send_message(
+        chat_id,
+        text,
+        reply_markup=mk,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
+def extend_demo_for_user(user_id: int, days: int) -> Optional[datetime]:
+    record = get_user_record(user_id)
+    sub = get_subscription(user_id) or {}
+    now = datetime.utcnow()
+    expiry_dt = None
+    if sub.get("is_demo"):
+        expiry_dt = parse_dt_safe(sub.get("expires_at"))
+    if not expiry_dt and record:
+        expiry_dt = parse_dt_safe(record.get("demo_end_at") or record.get("demo_expires_at"))
+    base = expiry_dt if expiry_dt and expiry_dt > now else now
+    new_expiry = base + timedelta(days=days)
+
+    demo_start = parse_dt_safe(record.get("demo_start_at")) if record else None
+    if not demo_start:
+        demo_start = now
+    paid_until = parse_dt_safe(record.get("paid_until")) if record else None
+
+    update_user_status(
+        user_id,
+        STATUS_ACTIVE_DEMO,
+        demo_start_at=demo_start,
+        demo_end_at=new_expiry,
+        paid_until=paid_until,
+    )
+    set_subscription(
+        user_id,
+        sub.get("plan") or "demo",
+        new_expiry,
+        is_active=1,
+        is_demo=1,
+        note="admin_demo_extend",
+    )
+    return new_expiry
+
+
+def cancel_demo_for_user(user_id: int):
+    record = get_user_record(user_id)
+    paid_until = parse_dt_safe(record.get("paid_until")) if record else None
+    demo_start = parse_dt_safe(record.get("demo_start_at")) if record else None
+    update_user_status(
+        user_id,
+        STATUS_PENDING,
+        demo_start_at=demo_start,
+        demo_end_at=None,
+        paid_until=paid_until,
+    )
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET demo_end_at=NULL, demo_expires_at=NULL WHERE chat_id=?",
+        (user_id,),
+    )
+    conn.commit()
+    conn.close()
+    sub = get_subscription(user_id) or {}
+    set_subscription(
+        user_id,
+        sub.get("plan") or "demo",
+        datetime.utcnow(),
+        is_active=0,
+        is_demo=0,
+        note="admin_demo_cancel",
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("demo_users|"))
+def cb_demo_users_actions(c):
+    if not is_admin(c.message.chat.id):
+        return
+    parts = c.data.split("|")
+    if len(parts) < 2:
+        return
+    action = parts[1]
+    chat_id = c.message.chat.id
+
+    if action == "page" and len(parts) >= 3:
+        try:
+            page = int(parts[2])
+        except Exception:
+            page = 1
+        send_demo_users_report(chat_id, page=page, message=c.message)
+        try:
+            bot.answer_callback_query(c.id)
+        except Exception:
+            pass
+        return
+
+    if action == "add" and len(parts) >= 5:
+        try:
+            user_id = int(parts[2])
+            days = int(parts[3])
+            page = int(parts[4])
+        except Exception:
+            return
+        extend_demo_for_user(user_id, days)
+        bot.send_message(
+            chat_id, f"✅ {user_id} üçün demo müddəti +{days} gün uzadıldı."
+        )
+        send_demo_users_report(chat_id, page=page, message=c.message)
+        try:
+            bot.answer_callback_query(c.id)
+        except Exception:
+            pass
+        return
+
+    if action == "cancel" and len(parts) >= 4:
+        try:
+            user_id = int(parts[2])
+            page = int(parts[3])
+        except Exception:
+            return
+        cancel_demo_for_user(user_id)
+        bot.send_message(chat_id, f"✅ {user_id} üçün demo deaktiv edildi.")
+        send_demo_users_report(chat_id, page=page, message=c.message)
+        try:
+            bot.answer_callback_query(c.id)
+        except Exception:
+            pass
 
 
 def start_direct_user_message_flow(chat_id: int):
