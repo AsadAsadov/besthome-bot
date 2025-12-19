@@ -13513,6 +13513,7 @@ def show_users_menu(chat_id):
 
 def show_unverified_users(chat_id: int, page: int = 1, message=None):
     page = max(1, int(page or 1))
+    print("UNVERIFIED USERS QUERY START")
     conn = get_local_conn()
     cur = conn.cursor()
     cur.execute(
@@ -13610,50 +13611,52 @@ def show_unverified_users(chat_id: int, page: int = 1, message=None):
 
 @bot.callback_query_handler(func=lambda c: c.data == "unverified_users")
 def cb_unverified_users(c):
-    if not is_admin(c.message.chat.id):
-        return
-    show_unverified_users(c.message.chat.id, page=1, message=c.message)
     try:
         safe_answer_callback_query(c.id)
     except Exception:
         pass
+    print("CALLBACK DATA:", c.data)
+    if not is_admin(c.message.chat.id):
+        return
+    show_unverified_users(c.message.chat.id, page=1, message=c.message)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("unverified_users_page|"))
 def cb_unverified_users_page(c):
+    try:
+        safe_answer_callback_query(c.id)
+    except Exception:
+        pass
+    print("CALLBACK DATA:", c.data)
     if not is_admin(c.message.chat.id):
         return
     page_raw = c.data.split("|")[1]
     if page_raw == "noop":
-        try:
-            safe_answer_callback_query(c.id)
-        except Exception:
-            pass
         return
     try:
         page = int(page_raw)
     except Exception:
         page = 1
     show_unverified_users(c.message.chat.id, page=page, message=c.message)
-    try:
-        safe_answer_callback_query(c.id)
-    except Exception:
-        pass
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "unverified_back")
 def cb_unverified_back(c):
-    if not is_admin(c.message.chat.id):
-        return
-    show_users_menu(c.message.chat.id)
     try:
         safe_answer_callback_query(c.id)
     except Exception:
         pass
+    if not is_admin(c.message.chat.id):
+        return
+    show_users_menu(c.message.chat.id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("unverified_approve|"))
 def cb_unverified_approve(c):
+    try:
+        safe_answer_callback_query(c.id, "✅ Emal edilir...")
+    except Exception:
+        pass
     if not is_admin(c.message.chat.id):
         return
     parts = c.data.split("|")
@@ -13661,7 +13664,7 @@ def cb_unverified_approve(c):
     page = int(parts[2]) if len(parts) > 2 else 1
     new_status, expires_at = determine_activation_status(uid)
     if not new_status:
-        safe_answer_callback_query(c.id, "⚠️ Aktiv plan tapılmadı")
+        safe_send(c.message.chat.id, "⚠️ Aktiv plan tapılmadı")
         return
     if new_status == STATUS_ACTIVE_PAID:
         update_user_status(uid, STATUS_ACTIVE_PAID, paid_until=expires_at)
@@ -13677,14 +13680,14 @@ def cb_unverified_approve(c):
     except Exception:
         pass
     show_unverified_users(c.message.chat.id, page=page, message=c.message)
-    try:
-        safe_answer_callback_query(c.id, "✅ Təsdiqləndi")
-    except Exception:
-        pass
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("unverified_block|"))
 def cb_unverified_block(c):
+    try:
+        safe_answer_callback_query(c.id, "⛔ Emal edilir...")
+    except Exception:
+        pass
     if not is_admin(c.message.chat.id):
         return
     parts = c.data.split("|")
@@ -13692,10 +13695,6 @@ def cb_unverified_block(c):
     page = int(parts[2]) if len(parts) > 2 else 1
     block_user(uid)
     show_unverified_users(c.message.chat.id, page=page, message=c.message)
-    try:
-        safe_answer_callback_query(c.id, "⛔ Bloklandı")
-    except Exception:
-        pass
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("userlist|"))
