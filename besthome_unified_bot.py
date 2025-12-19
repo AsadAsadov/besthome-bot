@@ -24,6 +24,7 @@ import random
 import shutil
 import tempfile
 import html
+import logging
 from datetime import datetime, date, timedelta
 from collections import defaultdict
 from typing import Optional, Tuple, List
@@ -88,6 +89,13 @@ admin_customer_request_state = {}
 CUSTOMER_REQUEST_COOLDOWN_SECONDS = 300
 
 bot = telebot.TeleBot(BOT_TOKEN)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger("besthome_bot")
+
 BOT_USERNAME = bot.get_me().username
 user_state = {}  # Yeni elan proses state
 search_state = {}  # Açar sözlə axtarış paging state
@@ -103,6 +111,7 @@ admin_stats_period = {}
 admin_direct_message_state = {}
 admin_user_message_state = {}
 admin_message_state = {}
+admin_update_state = {}
 ui_state = defaultdict(list)
 customer_request_rule_state = {}
 keyword_alert_state = {}
@@ -246,6 +255,60 @@ def normalize_text(text: str) -> str:
     text = re.sub(r"[^\w\s]", " ", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
+
+
+def safe_send(chat_id: int, text: str, **kwargs):
+    return bot.send_message(chat_id, text, **kwargs)
+
+
+def safe_admin_step(chat_id: int, text: str, **kwargs):
+    try:
+        safe_send(chat_id, text, **kwargs)
+    except Exception:
+        logger.exception("Admin send failed chat_id=%s text=%s", chat_id, text)
+
+
+def safe_answer_callback_query(callback_id: Optional[str], text: Optional[str] = None, **kwargs):
+    if not callback_id:
+        return
+    try:
+        bot.answer_callback_query(callback_id, text, **kwargs)
+    except Exception:
+        logger.exception("answer_callback_query failed callback_id=%s", callback_id)
+
+
+_users_schema_cache = None
+_users_schema_lock = threading.Lock()
+
+
+def detect_users_schema():
+    global _users_schema_cache
+    if _users_schema_cache is not None:
+        return _users_schema_cache
+    with _users_schema_lock:
+        if _users_schema_cache is not None:
+            return _users_schema_cache
+        columns = set()
+        conn = None
+        try:
+            conn = get_local_conn()
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(users)")
+            for row in cur.fetchall():
+                try:
+                    name = row["name"]
+                except Exception:
+                    name = row[1] if len(row) > 1 else None
+                if name:
+                    columns.add(name)
+            logger.info("Detected users schema columns: %s", sorted(columns))
+        except Exception:
+            logger.exception("Failed to detect users schema")
+        finally:
+            if conn:
+                conn.close()
+        _users_schema_cache = {"columns": columns}
+        return _users_schema_cache
 
 
 def get_user_step(chat_id: int):
@@ -10231,6 +10294,8 @@ def admin_panel_back_to_main(message):
 def handle_admin_panel_action(message):
     chat_id = message.chat.id
     txt = message.text
+    if admin_update_state.get(chat_id) == "awaiting_db_link":
+        return
 
     if txt == "✅ Təsdiqlənməyən elanlar":
         show_pending_listings(chat_id)
@@ -12467,21 +12532,18 @@ def start_admin_update_db(chat_id: int, callback_id: Optional[str] = None):
 
     if db_update_lock.locked():
         if callback_id:
-            try:
-                bot.answer_callback_query(callback_id, "⚠️ Baza yenilənir.")
-            except Exception:
-                pass
-        bot.send_message(chat_id, "⚠️ Hal-hazırda baza yenilənir. Zəhmət olmasa gözləyin.")
+            safe_answer_callback_query(callback_id, "⚠️ Baza yenilənir.")
+        safe_admin_step(
+            chat_id, "⚠️ Hal-hazırda baza yenilənir. Zəhmət olmasa gözləyin."
+        )
         return
 
     if callback_id:
-        try:
-            bot.answer_callback_query(callback_id, "📦 Baza yeniləmə")
-        except Exception:
-            pass
+        safe_answer_callback_query(callback_id, "📦 Baza yeniləmə")
 
-    user_state[chat_id] = "WAITING_MAIN_DB"
-    bot.send_message(
+    admin_update_state[chat_id] = "awaiting_db_link"
+    logger.info("Admin requested db update chat_id=%s", chat_id)
+    safe_admin_step(
         chat_id,
         "🔗 Yeni besthome.zip yükləmə linkini göndərin.",
     )
@@ -12495,28 +12557,37 @@ def cb_admin_update_db(c):
 @bot.message_handler(
     content_types=["text"],
     func=lambda m: m.from_user
-    and m.from_user.id == ADMIN_ID
-    and user_state.get(m.chat.id) == "WAITING_MAIN_DB",
+    and is_admin(m.chat.id)
+    and admin_update_state.get(m.chat.id) == "awaiting_db_link",
 )
 def handle_admin_db_upload(message):
     chat_id = message.chat.id
-    if not message.from_user or message.from_user.id != ADMIN_ID:
+    if not message.from_user or not is_admin(chat_id):
         return
 
-    if user_state.get(chat_id) != "WAITING_MAIN_DB":
+    if admin_update_state.get(chat_id) != "awaiting_db_link":
         return
 
     url = message.text.strip() if message.text else ""
-    if not url or not re.match(r"https?://", url):
-        bot.send_message(chat_id, "❌ Zəhmət olmasa keçərli link göndərin.")
+    url_lower = url.lower()
+    if (
+        not url
+        or not re.match(r"https?://", url)
+        or "dropbox" not in url_lower
+        or (".zip" not in url_lower and "dl=1" not in url_lower and "raw=1" not in url_lower)
+    ):
+        safe_admin_step(chat_id, "❌ Zəhmət olmasa Dropbox ZIP linki göndərin.")
         return
 
     if db_update_lock.locked():
-        bot.send_message(
+        safe_admin_step(
             chat_id,
             "⚠️ Hal-hazırda baza yenilənir. Zəhmət olmasa gözləyin.",
         )
         return
+
+    safe_admin_step(chat_id, "⏳ Yenilənir...")
+    logger.info("Admin db update link received chat_id=%s url=%s", chat_id, url)
 
     temp_zip_path = None
     extracted_db_path = None
@@ -12524,7 +12595,7 @@ def handle_admin_db_upload(message):
     with db_update_lock:
         try:
             main_db_update_in_progress.set()
-            user_state[chat_id] = "UPDATING_MAIN_DB"
+            admin_update_state[chat_id] = "updating_db"
             temp_zip_path = download_main_db_zip(url)
             extracted_db_path, extracted_dir = extract_main_db_from_zip(temp_zip_path)
             validate_main_db_file(extracted_db_path)
@@ -12562,7 +12633,7 @@ def handle_admin_db_upload(message):
             try:
                 process_keyword_alerts_for_new_listings()
             except Exception as e:
-                print("⚠️ keyword alert listing scan error:", e)
+                logger.warning("keyword alert listing scan error: %s", e)
 
             report = (
                 "✅ Baza uğurla yeniləndi.\n"
@@ -12572,16 +12643,19 @@ def handle_admin_db_upload(message):
                 f"2⃣ Kirayə verilir: {rent_active}\n"
                 f"🆕 Bu gün daxil olan elanlar: {today_active}"
             )
-            bot.send_message(ADMIN_ID, report)
-        except Exception as e:
-            print("DB update error:", e)
-            bot.send_message(
+            safe_admin_step(chat_id, report)
+            logger.info(
+                "DB update completed chat_id=%s added=%s total=%s",
                 chat_id,
-                f"❌ Xəta baş verdi: {e}",
+                added,
+                total_active,
             )
+        except Exception as e:
+            logger.exception("DB update error chat_id=%s", chat_id)
+            safe_admin_step(chat_id, f"❌ Xəta baş verdi: {e}")
         finally:
             main_db_update_in_progress.clear()
-            user_state.pop(chat_id, None)
+            admin_update_state.pop(chat_id, None)
             for path in (temp_zip_path, extracted_db_path):
                 if path and os.path.exists(path):
                     try:
@@ -13340,7 +13414,7 @@ def show_users_menu(chat_id):
     )
     mk.add(
         types.InlineKeyboardButton(
-            "⏳ Təsdiqlənməmiş", callback_data="userlist|pending"
+            "⏳ Təsdiqlənməmiş", callback_data="unverified_users"
         )
     )
     mk.add(
@@ -13353,16 +13427,222 @@ def show_users_menu(chat_id):
     )
 
 
+def _select_first_column(columns: set, choices: List[str], fallback: Optional[str] = None) -> Optional[str]:
+    for col in choices:
+        if col in columns:
+            return col
+    if fallback and fallback in columns:
+        return fallback
+    return None
+
+
+def _unverified_filter_from_schema(schema: dict) -> Tuple[str, Tuple]:
+    columns = schema.get("columns", set())
+    if "status" in columns:
+        return "status=?", (STATUS_PENDING,)
+    if "approved" in columns:
+        return "approved=0", ()
+    if "verified" in columns:
+        return "verified=0", ()
+    return "1=0", ()
+
+
+def show_unverified_users(chat_id: int, page: int = 1, message=None, force_new: bool = False):
+    page = max(1, int(page or 1))
+    schema = detect_users_schema()
+    columns = schema.get("columns", set())
+    where_clause, params = _unverified_filter_from_schema(schema)
+    order_col = _select_first_column(
+        columns,
+        ["request_sent_at", "joined_at", "created_at", "id"],
+        fallback="chat_id",
+    )
+    order_clause = f"ORDER BY datetime({order_col}) ASC" if order_col else ""
+
+    conn = get_local_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(f"SELECT COUNT(*) FROM users WHERE {where_clause}", params)
+        total = cur.fetchone()[0] or 0
+        logger.info(
+            "Unverified users count=%s chat_id=%s where=%s",
+            total,
+            chat_id,
+            where_clause,
+        )
+    except Exception:
+        conn.close()
+        logger.exception("Failed to count unverified users chat_id=%s", chat_id)
+        safe_admin_step(chat_id, "⚠️ Siyahını yükləmək mümkün olmadı.")
+        return
+
+    if total == 0:
+        conn.close()
+        mk = types.InlineKeyboardMarkup()
+        mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="adm|users"))
+        text = "❗ Təsdiqlənməmiş istifadəçi tapılmadı."
+        try:
+            if message and not force_new:
+                bot.edit_message_text(
+                    text,
+                    chat_id=message.chat.id,
+                    message_id=message.message_id,
+                    reply_markup=mk,
+                )
+            else:
+                bot.send_message(chat_id, text, reply_markup=mk)
+        except Exception:
+            safe_admin_step(chat_id, text, reply_markup=mk)
+        return
+
+    total_pages = max(1, math.ceil(total / PAGE_SIZE_USERS))
+    if page > total_pages:
+        page = total_pages
+
+    offset = (page - 1) * PAGE_SIZE_USERS
+    try:
+        cur.execute(
+            f"SELECT * FROM users WHERE {where_clause} {order_clause} LIMIT ? OFFSET ?",
+            (*params, PAGE_SIZE_USERS, offset),
+        )
+        rows = cur.fetchall()
+    except Exception:
+        conn.close()
+        logger.exception("Failed to fetch unverified users chat_id=%s", chat_id)
+        safe_admin_step(chat_id, "⚠️ Siyahını yükləmək mümkün olmadı.")
+        return
+    finally:
+        conn.close()
+
+    admin_user_page_state[(chat_id, "pending")] = page
+
+    text_lines = [
+        f"⏳ Təsdiqlənməmiş istifadəçilər ({total} nəfər)",
+        f"Səhifə: {page} / {total_pages}",
+        "",
+    ]
+
+    mk = types.InlineKeyboardMarkup()
+
+    for r in rows:
+        row = dict(r)
+        uid = row.get("chat_id")
+        name = row.get("full_name") or "—"
+        username_value = f"@{row.get('username')}" if row.get("username") else "—"
+        profile_url = (
+            f"https://t.me/{row['username']}"
+            if row.get("username")
+            else f"tg://user?id={uid}"
+        )
+        req_dt_raw = row.get("request_sent_at") or row.get("joined_at")
+        req_date, req_time = parse_join_datetime(req_dt_raw)
+
+        entry_lines = [
+            f"👤 Ad: {name}",
+            f"🆔 ID: <a href=\"{profile_url}\">{uid}</a>",
+            f"👤 Username: {username_value}",
+            f"📅 Sorğu tarixi: {req_date} {req_time}",
+        ]
+        text_lines.append("\n".join(entry_lines))
+
+        mk.row(
+            types.InlineKeyboardButton(
+                "✅ Aktiv et", callback_data=f"user_approve|{uid}|pending|{page}"
+            ),
+            types.InlineKeyboardButton(
+                "🎁 Demo ver", callback_data=f"user_demo|{uid}|pending|{page}"
+            ),
+        )
+        mk.add(
+            types.InlineKeyboardButton(
+                "♾ Limitsiz et", callback_data=f"user_free|{uid}|pending|{page}"
+            )
+        )
+        mk.add(
+            types.InlineKeyboardButton(
+                "❌ Rədd et", callback_data=f"user_reject|{uid}|pending|{page}"
+            )
+        )
+        mk.row(
+            types.InlineKeyboardButton(
+                "💬 Mesaj göndər", callback_data=f"adm_msg:pending:{uid}:{page}"
+            ),
+            types.InlineKeyboardButton(
+                "⛔ Dayandır", callback_data=f"adm_stop:pending:{uid}:{page}"
+            ),
+        )
+
+    nav_buttons = [
+        types.InlineKeyboardButton(
+            "⬅️ Əvvəlki", callback_data=f"unverified_users_page|{max(1, page - 1)}"
+        ),
+        types.InlineKeyboardButton(
+            "➡️ Növbəti",
+            callback_data=f"unverified_users_page|{min(total_pages, page + 1)}",
+        ),
+    ]
+    mk.row(*nav_buttons)
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="adm|users"))
+
+    text = "\n\n".join(text_lines)
+
+    try:
+        if message and not force_new:
+            bot.edit_message_text(
+                text,
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=mk,
+                parse_mode="HTML",
+            )
+        else:
+            bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=mk)
+    except Exception:
+        safe_admin_step(chat_id, text, parse_mode="HTML", reply_markup=mk)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "unverified_users")
+def cb_unverified_users(c):
+    if not is_admin(c.message.chat.id):
+        return
+    safe_answer_callback_query(c.id)
+    logger.info("unverified_users callback chat_id=%s data=%s", c.message.chat.id, c.data)
+    try:
+        show_unverified_users(c.message.chat.id, page=1, message=c.message)
+    except Exception:
+        logger.exception("unverified users handler failed chat_id=%s", c.message.chat.id)
+        safe_admin_step(c.message.chat.id, "⚠️ Siyahını yükləmək mümkün olmadı.")
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("unverified_users_page|"))
+def cb_unverified_users_page(c):
+    if not is_admin(c.message.chat.id):
+        return
+    safe_answer_callback_query(c.id)
+    try:
+        page = int(c.data.split("|")[1])
+    except Exception:
+        page = 1
+    logger.info(
+        "unverified_users_page callback chat_id=%s page=%s", c.message.chat.id, page
+    )
+    try:
+        show_unverified_users(c.message.chat.id, page=page, message=c.message)
+    except Exception:
+        logger.exception("unverified users page handler failed chat_id=%s", c.message.chat.id)
+        safe_admin_step(c.message.chat.id, "⚠️ Siyahını yükləmək mümkün olmadı.")
+
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith("userlist|"))
 def cb_userlist(c):
     if not is_admin(c.message.chat.id):
         return
     status = c.data.split("|")[1]
+    safe_answer_callback_query(c.id)
+    if status == "pending":
+        show_unverified_users(c.message.chat.id, page=1, message=c.message, force_new=True)
+        return
     show_all_users(c.message.chat.id, status, page=1, force_new=True)
-    try:
-        bot.answer_callback_query(c.id)
-    except Exception:
-        pass
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_u:"))
@@ -13545,6 +13825,9 @@ def delete_user_fully(chat_id: int):
 
 def show_all_users(chat_id, status="active", page: int = 1, message=None, force_new: bool = False):
     page = max(1, int(page or 1))
+    if status == "pending":
+        show_unverified_users(chat_id, page=page, message=message, force_new=force_new)
+        return
 
     conn = get_local_conn()
     cur = conn.cursor()
@@ -16276,7 +16559,7 @@ def run_bot():
                 skip_pending=True,
             )
         except Exception as e:
-            print("Polling error:", e)
+            logger.exception("Polling error: %s", e)
             time.sleep(5)
 
 
