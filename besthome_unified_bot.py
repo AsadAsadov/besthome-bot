@@ -12694,18 +12694,18 @@ def cb_admin_update_db(c):
 
 @bot.message_handler(
     content_types=["text"],
-    func=lambda m: m.from_user
-    and m.from_user.id == ADMIN_ID
+    func=lambda m: is_admin(m.chat.id)
     and user_state.get(m.chat.id) == "WAITING_MAIN_DB",
 )
 def handle_admin_db_upload(message):
     chat_id = message.chat.id
-    if not message.from_user or message.from_user.id != ADMIN_ID:
+    if not is_admin(chat_id):
         return
 
     if user_state.get(chat_id) != "WAITING_MAIN_DB":
         return
 
+    print(f"DB UPDATE: link received from chat_id={chat_id}")
     url = message.text.strip() if message.text else ""
     if not url or not re.match(r"https?://", url):
         send_with_menu(chat_id, "❌ Zəhmət olmasa keçərli link göndərin.")
@@ -12725,18 +12725,24 @@ def handle_admin_db_upload(message):
         try:
             main_db_update_in_progress.set()
             user_state[chat_id] = "UPDATING_MAIN_DB"
+            print("DB UPDATE: starting download")
             temp_zip_path = download_main_db_zip(url)
+            print(f"DB UPDATE: download complete: {temp_zip_path}")
+            print("DB UPDATE: extracting zip")
             extracted_db_path, extracted_dir = extract_main_db_from_zip(temp_zip_path)
+            print(f"DB UPDATE: extraction complete: {extracted_db_path}")
             validate_main_db_file(extracted_db_path)
             old_count = validate_main_db_file(MAIN_DB)
             close_all_main_conns()
             prepare_main_db_for_swap()
 
+            print("DB UPDATE: swapping main database")
             shutil.copyfile(extracted_db_path, MAIN_DB)
 
             with open(MAIN_DB, "rb") as f:
                 os.fsync(f.fileno())
 
+            print("DB UPDATE: counting listings")
             conn = sqlite3.connect(MAIN_DB)
             try:
                 ensure_created_at_column(
@@ -12755,6 +12761,7 @@ def handle_admin_db_upload(message):
             added = final_count - old_count
             if added < 0:
                 added = 0
+            print("DB UPDATE: preparing statistics")
             total_active = count_main_active_listings(use_direct_conn=True)
             sale_active = count_main_active_listings(op_code="sat", use_direct_conn=True)
             rent_active = count_main_active_listings(op_code="kir", use_direct_conn=True)
@@ -12772,7 +12779,8 @@ def handle_admin_db_upload(message):
                 f"2⃣ Kirayə verilir: {rent_active}\n"
                 f"🆕 Bu gün daxil olan elanlar: {today_active}"
             )
-            send_with_menu(ADMIN_ID, report)
+            send_with_menu(chat_id, report)
+            print("DB UPDATE: completed successfully")
         except Exception as e:
             print("DB update error:", e)
             send_with_menu(
@@ -13561,6 +13569,7 @@ def show_all_users(chat_id, status="active", page=1, message=None):
 def cb_unverified_users(c):
     if not is_admin(c.message.chat.id):
         return
+    safe_answer_callback_query(c.id)
     show_all_users(
         c.message.chat.id,
         status="pending",
@@ -13811,11 +13820,20 @@ def show_users_by_status(chat_id, status, page: int, message=None):
 
     base_query = "SELECT * FROM users"
 
-    cur.execute(
-        f"SELECT COUNT(*) FROM users WHERE {parts['where']}",
-        parts["params"],
-    )
-    total = cur.fetchone()[0] or 0
+    try:
+        cur.execute(
+            f"SELECT COUNT(*) FROM users WHERE {parts['where']}",
+            parts["params"],
+        )
+        total = cur.fetchone()[0] or 0
+    except Exception as e:
+        conn.close()
+        print("USER LIST QUERY ERROR:", e)
+        try:
+            send_with_menu(chat_id, "❌ İstifadəçi siyahısı yüklənmədi.")
+        except Exception:
+            pass
+        return
 
     if total == 0:
         conn.close()
@@ -13833,12 +13851,21 @@ def show_users_by_status(chat_id, status, page: int, message=None):
         page = total_pages
 
     offset = (page - 1) * PAGE_SIZE_USERS
-    cur.execute(
-        base_query
-        + f" WHERE {parts['where']} {parts['order']} LIMIT ? OFFSET ?",
-        (*parts["params"], PAGE_SIZE_USERS, offset),
-    )
-    rows = cur.fetchall()
+    try:
+        cur.execute(
+            base_query
+            + f" WHERE {parts['where']} {parts['order']} LIMIT ? OFFSET ?",
+            (*parts["params"], PAGE_SIZE_USERS, offset),
+        )
+        rows = cur.fetchall()
+    except Exception as e:
+        conn.close()
+        print("USER LIST FETCH ERROR:", e)
+        try:
+            send_with_menu(chat_id, "❌ İstifadəçi siyahısı yüklənmədi.")
+        except Exception:
+            pass
+        return
     conn.close()
 
     admin_user_page_state[(chat_id, status)] = page
