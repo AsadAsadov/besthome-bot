@@ -736,6 +736,12 @@ def init_local_db():
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_customer_requests_status ON customer_requests(status)"
     )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_customer_requests_type_status ON customer_requests(request_type, status)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_customer_requests_rayon_status ON customer_requests(rayon, status)"
+    )
     try:
         cur.execute(
             "ALTER TABLE customer_requests ADD COLUMN flagged INTEGER DEFAULT 0"
@@ -3146,7 +3152,6 @@ def build_search_menu_keyboard():
     kb.row("🏠 Satılır", "🏢 Kirayə verilir")
     kb.row("🔍 Açar sözlə axtar", "📞 Nömrə ilə axtar")
     kb.row("⭐ Favorilərim", "🔔 Bildirişlərim")
-    kb.row("🔔 Açar söz bildirişləri")
     kb.row("⬅️ Əsas menyuya qayıt")
     return kb
 
@@ -3797,17 +3802,17 @@ def format_agent_request_card(row: dict) -> str:
 
 def fetch_agent_requests_page(
     rayon: str,
+    request_type: str,
     page: int,
     page_size: int = PAGE_SIZE_REQ,
     user_id: Optional[int] = None,
 ):
     conn = get_local_conn()
     cur = conn.cursor()
-    like_val = f"%{rayon.strip()}%"
-    params = [like_val]
+    params = [request_type, rayon.strip()]
     count_query = (
         "SELECT COUNT(*) FROM customer_requests "
-        "WHERE status='active' AND LOWER(rayon) LIKE LOWER(?)"
+        "WHERE status='active' AND request_type=? AND LOWER(rayon) = LOWER(?)"
     )
     if user_id:
         count_query += (
@@ -3819,10 +3824,10 @@ def fetch_agent_requests_page(
     total_pages = max(1, math.ceil(total / page_size)) if total else 1
     page = max(1, min(page, total_pages))
     offset = (page - 1) * page_size
-    list_params = [like_val]
+    list_params = [request_type, rayon.strip()]
     list_query = (
         "SELECT * FROM customer_requests "
-        "WHERE status='active' AND LOWER(rayon) LIKE LOWER(?)"
+        "WHERE status='active' AND request_type=? AND LOWER(rayon) = LOWER(?)"
     )
     if user_id:
         list_query += (
@@ -3835,6 +3840,137 @@ def fetch_agent_requests_page(
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return rows, total, total_pages, page
+
+
+def fetch_customer_request_type_counts(user_id: Optional[int]) -> dict:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    params: List = []
+    where = "status='active' AND request_type IN ('buy', 'rent')"
+    if user_id:
+        where += (
+            " AND id NOT IN (SELECT request_id FROM customer_request_archives WHERE user_id=?)"
+        )
+        params.append(user_id)
+    cur.execute(
+        f"""
+        SELECT request_type, COUNT(*) as cnt
+        FROM customer_requests
+        WHERE {where}
+        GROUP BY request_type
+        """,
+        params,
+    )
+    counts = {row["request_type"]: row["cnt"] for row in cur.fetchall()}
+    conn.close()
+    return counts
+
+
+def fetch_customer_request_district_counts(
+    request_type: str, user_id: Optional[int]
+) -> List[Tuple[str, int]]:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    params: List = [request_type]
+    where = "status='active' AND request_type=? AND TRIM(COALESCE(rayon, '')) != ''"
+    if user_id:
+        where += (
+            " AND id NOT IN (SELECT request_id FROM customer_request_archives WHERE user_id=?)"
+        )
+        params.append(user_id)
+    cur.execute(
+        f"""
+        SELECT MIN(rayon) as rayon, COUNT(*) as cnt
+        FROM customer_requests
+        WHERE {where}
+        GROUP BY LOWER(rayon)
+        ORDER BY cnt DESC, rayon ASC
+        """,
+        params,
+    )
+    rows = [(row["rayon"], row["cnt"]) for row in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def build_customer_requests_operation_menu(
+    chat_id: int, message: Optional[types.Message] = None
+):
+    counts = fetch_customer_request_type_counts(chat_id)
+    sale_count = counts.get("buy", 0)
+    rent_count = counts.get("rent", 0)
+    mk = types.InlineKeyboardMarkup()
+    row = []
+    if sale_count:
+        row.append(
+            types.InlineKeyboardButton(
+                f"🏠 Satılır ({sale_count})", callback_data="cust_req_op:buy"
+            )
+        )
+    if rent_count:
+        row.append(
+            types.InlineKeyboardButton(
+                f"🏢 Kirayə verilir ({rent_count})",
+                callback_data="cust_req_op:rent",
+            )
+        )
+    if row:
+        mk.row(*row)
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="cust_req_back"))
+    text = "📌 Müştəri istəkləri"
+    if not row:
+        text = "😕 Aktiv müştəri istəyi yoxdur."
+    try:
+        if message:
+            bot.edit_message_text(
+                text,
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=mk,
+            )
+        else:
+            bot.send_message(chat_id, text, reply_markup=mk)
+    except Exception:
+        pass
+
+
+def show_customer_request_district_menu(
+    chat_id: int, request_type: str, message: Optional[types.Message] = None
+):
+    districts = fetch_customer_request_district_counts(request_type, chat_id)
+    mk = types.InlineKeyboardMarkup()
+    row = []
+    for rayon, cnt in districts:
+        if not cnt:
+            continue
+        row.append(
+            types.InlineKeyboardButton(
+                f"📍 {rayon} ({cnt})",
+                callback_data=f"agt_req:{request_type}:{quote(rayon)}:1",
+            )
+        )
+        if len(row) == 2:
+            mk.row(*row)
+            row = []
+    if row:
+        mk.row(*row)
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="cust_req_ops"))
+    title = "🏠 Satılır" if request_type == "buy" else "🏢 Kirayə verilir"
+    text = f"{title} — rayon seçin:"
+    if not districts:
+        text = f"😕 {title} üzrə aktiv sorğu yoxdur."
+    try:
+        if message:
+            bot.edit_message_text(
+                text,
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=mk,
+            )
+        else:
+            bot.send_message(chat_id, text, reply_markup=mk)
+    except Exception:
+        pass
 
 
 def agent_has_interest(agent_chat_id: int, request_id: int) -> bool:
@@ -5938,11 +6074,7 @@ def customer_requests_from_menu(message):
     if not has_customer_requests_access(chat_id):
         bot.send_message(chat_id, "❌ Bu funksiya sizin üçün aktiv deyil.")
         return
-    bot.send_message(
-        chat_id,
-        "📍 Rayon seçin:",
-        reply_markup=build_agent_request_rayon_markup(),
-    )
+    build_customer_requests_operation_menu(chat_id)
 
 
 @bot.message_handler(
@@ -7050,13 +7182,6 @@ def show_saved_notifications(message):
     show_notifications_menu(chat_id)
 
 
-@bot.message_handler(func=lambda m: m.text == "🔔 Açar söz bildirişləri")
-def show_keyword_alerts_menu_message(message):
-    if not ensure_allowed(message):
-        return
-    show_keyword_alert_menu(message.chat.id)
-
-
 @bot.callback_query_handler(func=lambda c: c.data == "kw_alert_menu")
 def cb_keyword_alert_menu(c):
     if not ensure_allowed_cb(c):
@@ -7072,7 +7197,7 @@ def cb_keyword_alert_menu(c):
 def cb_keyword_alert_back(c):
     if not ensure_allowed_cb(c):
         return
-    send_search_menu(c.message.chat.id)
+    show_notifications_menu(c.message.chat.id, message=c.message)
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -7426,9 +7551,7 @@ def cb_notifications_period(c):
 def cb_notifications_keyword_hits(c):
     if not ensure_allowed_cb(c):
         return
-    period = notification_menu_state.get(c.message.chat.id, {}).get("period", "today")
-    keyword_hits_context[c.message.chat.id] = {"back": "notif_menu"}
-    show_keyword_alert_hits(c.message.chat.id, period, page=1, message=c.message)
+    show_keyword_alert_menu(c.message.chat.id, message=c.message)
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -10403,6 +10526,12 @@ def build_whatsapp_link(req: dict) -> Optional[str]:
     return f"https://wa.me/{target}?text={quote(msg)}"
 
 
+def build_telegram_user_link(user_id: Optional[int]) -> Optional[str]:
+    if not user_id:
+        return None
+    return f"tg://user?id={int(user_id)}"
+
+
 def format_request_card(req: dict) -> str:
     created_dt = parse_dt_safe(req.get("created_at"))
     created_at = created_dt.strftime("%Y-%m-%d %H:%M") if created_dt else "bilinmir"
@@ -10431,6 +10560,7 @@ def format_public_request_card(req: dict) -> str:
     return "\n".join(
         [
             "👥 Müştəri istəyi",
+            f"🆔 Sorğu ID: {req.get('id')}",
             f"📅 Tarix: {created_at}",
             f"📄 Tip: {req_type}",
             f"📍 Rayon: {req.get('rayon') or '-'}",
@@ -10438,6 +10568,7 @@ def format_public_request_card(req: dict) -> str:
             f"💰 Büdcə: {req.get('budget') or '-'}",
             f"📝 Qeyd: {req.get('notes') or '-'}",
             f"📞 Telefon: {req.get('phone') or '-'}",
+            f"🆔 Müştəri ID: {req.get('chat_id') or '-'}",
         ]
     )
 
@@ -10447,19 +10578,25 @@ def build_public_request_actions(
 ) -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup()
     wa_link = build_whatsapp_link(req)
+    tg_link = build_telegram_user_link(req.get("chat_id"))
+    row = []
+    if tg_link:
+        row.append(types.InlineKeyboardButton("💬 Telegram yaz", url=tg_link))
     if wa_link:
-        mk.add(types.InlineKeyboardButton("💬 WhatsApp-da yaz", url=wa_link))
-
-    fav_label = "⭐ Yadda saxla"
-    if is_customer_request_favorited(user_id, req.get("id")):
-        fav_label = "⭐ Yadda saxlanıb"
-    mk.row(
+        row.append(types.InlineKeyboardButton("📱 WhatsApp yaz", url=wa_link))
+    if row:
+        mk.row(*row)
+    if tg_link:
+        mk.add(
+            types.InlineKeyboardButton(
+                f"🆔 Müştəri ID: {req.get('chat_id')}",
+                url=tg_link,
+            )
+        )
+    mk.add(
         types.InlineKeyboardButton(
-            fav_label, callback_data=f"cust_req_save:{req.get('id')}"
-        ),
-        types.InlineKeyboardButton(
-            "📦 Arxivlə", callback_data=f"cust_req_arch:{req.get('id')}"
-        ),
+            "⭐ Arxivlə", callback_data=f"cust_req_arch:{req.get('id')}"
+        )
     )
     if extra_buttons:
         for btn in extra_buttons:
@@ -14220,6 +14357,16 @@ def agents_button(message):
         mk.add(
             types.InlineKeyboardButton("👥 Mənim müştərilərim", callback_data="agt_my:1")
         )
+        mk.add(
+            types.InlineKeyboardButton(
+                "📦 Arxivlənmiş istəklər", callback_data="cust_req_archived:1"
+            )
+        )
+        mk.add(
+            types.InlineKeyboardButton(
+                "🔔 Bildiriş qaydaları", callback_data="cust_req_rules"
+            )
+        )
     bot.send_message(
         message.chat.id,
         "🧑‍💼 Vasitəçi elanları bölməsi:",
@@ -14288,11 +14435,49 @@ def cb_agent_requests(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-    bot.send_message(
-        chat_id,
-        "📍 Rayon seçin:",
-        reply_markup=build_agent_request_rayon_markup(),
-    )
+    build_customer_requests_operation_menu(chat_id, message=c.message)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "cust_req_ops")
+def cb_customer_requests_ops(c):
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id
+    if not has_customer_requests_access(chat_id):
+        return
+    build_customer_requests_operation_menu(chat_id, message=c.message)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "cust_req_back")
+def cb_customer_requests_back(c):
+    if not ensure_allowed_cb(c):
+        return
+    return_to_main_menu(c.message.chat.id)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cust_req_op:"))
+def cb_customer_requests_op(c):
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id
+    if not has_customer_requests_access(chat_id):
+        return
+    request_type = c.data.split(":", 1)[1]
+    if request_type not in {"buy", "rent"}:
+        return
+    show_customer_request_district_menu(chat_id, request_type, message=c.message)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cr_rule_rayon_"))
@@ -14339,39 +14524,44 @@ def cb_customer_request_rule_rayon(c):
 
 
 def show_agent_requests_by_rayon(
-    chat_id: int, rayon: str, page: int = 1, message: Optional[types.Message] = None
+    chat_id: int,
+    request_type: str,
+    rayon: str,
+    page: int = 1,
+    message: Optional[types.Message] = None,
 ):
     rows, total, total_pages, current_page = fetch_agent_requests_page(
-        rayon, page, user_id=chat_id
+        rayon, request_type, page, user_id=chat_id
     )
+    title = "🏠 Satılır" if request_type == "buy" else "🏢 Kirayə verilir"
     header = (
-        f"🎯 {rayon} üzrə aktiv müştəri istəkləri\n"
+        f"{title} — {rayon} üzrə aktiv müştəri istəkləri\n"
         f"Səhifə: {current_page} / {total_pages}\n"
         f"Cəmi: {total}"
     )
     mk = types.InlineKeyboardMarkup()
     nav_buttons = [
         types.InlineKeyboardButton(
-            "⏮ İlk", callback_data=f"agt_req:{quote(rayon)}:1"
+            "⏮ İlk", callback_data=f"agt_req:{request_type}:{quote(rayon)}:1"
         ),
         types.InlineKeyboardButton(
             "◀️ Geri",
-            callback_data=f"agt_req:{quote(rayon)}:{max(1, current_page - 1)}",
+            callback_data=f"agt_req:{request_type}:{quote(rayon)}:{max(1, current_page - 1)}",
         ),
         types.InlineKeyboardButton(
             f"📄 {current_page} / {total_pages}",
-            callback_data=f"agt_req:{quote(rayon)}:{current_page}",
+            callback_data=f"agt_req:{request_type}:{quote(rayon)}:{current_page}",
         ),
         types.InlineKeyboardButton(
             "▶️ İrəli",
-            callback_data=f"agt_req:{quote(rayon)}:{min(total_pages, current_page + 1)}",
+            callback_data=f"agt_req:{request_type}:{quote(rayon)}:{min(total_pages, current_page + 1)}",
         ),
         types.InlineKeyboardButton(
-            "⏭ Son", callback_data=f"agt_req:{quote(rayon)}:{total_pages}"
+            "⏭ Son", callback_data=f"agt_req:{request_type}:{quote(rayon)}:{total_pages}"
         ),
     ]
     mk.row(*nav_buttons)
-    mk.add(types.InlineKeyboardButton("👥 Mənim müştərilərim", callback_data="agt_my:1"))
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data=f"cust_req_op:{request_type}"))
 
     try:
         if message:
@@ -14414,15 +14604,21 @@ def cb_agent_request_page(c):
             pass
         return
     try:
-        _, rayon_enc, page_raw = c.data.split(":", 2)
+        _, request_type, rayon_enc, page_raw = c.data.split(":", 3)
     except ValueError:
+        build_customer_requests_operation_menu(chat_id, message=c.message)
+        return
+    if request_type not in {"buy", "rent"}:
+        build_customer_requests_operation_menu(chat_id, message=c.message)
         return
     rayon = unquote(rayon_enc)
     try:
         page = int(page_raw)
     except Exception:
         page = 1
-    show_agent_requests_by_rayon(chat_id, rayon, page=page, message=c.message)
+    show_agent_requests_by_rayon(
+        chat_id, request_type, rayon, page=page, message=c.message
+    )
     try:
         bot.answer_callback_query(c.id)
     except Exception:
