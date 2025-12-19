@@ -2485,8 +2485,11 @@ def build_saved_search_from_structured(filters: dict):
     elif op_code:
         op_norm = normalize_operation_value(op_code)
 
-    price_code = filters.get("price", "s0")
-    price_min, price_max = decode_price_range(price_code)
+    price_min = filters.get("min_price")
+    price_max = filters.get("max_price")
+    if price_min is None and price_max is None:
+        price_code = filters.get("price", "s0")
+        price_min, price_max = decode_price_range(price_code)
 
     room_code = filters.get("rooms")
     rooms_val = None
@@ -6020,11 +6023,12 @@ def start_structured_search_from_menu(chat_id: int, op_code: str):
         "filters": {},
         "history": [],
         "awaiting_floor_range": False,
+        "awaiting_price_min": False,
+        "awaiting_price_max": False,
         "step": "op",
     }
     search_state[chat_id]["filters"]["op"] = op_code
-    structured_push_history(chat_id)
-    render_prop_step(chat_id)
+    render_date_range_step(chat_id)
 
 
 @bot.message_handler(func=lambda m: m.text in ["🏠 Satılır", "🏢 Kirayə verilir"])
@@ -6047,7 +6051,8 @@ def keyword_search_from_menu(message):
     if not check_limit(chat_id, "keyword", 30):
         bot.send_message(chat_id, "Günlük açar sözlə axtarış limitiniz bitib.")
         return
-    search_state[chat_id] = {"mode": "keyword", "operation": None}
+    reset_search_state(chat_id)
+    search_state[chat_id] = {"mode": "keyword", "operation": None, "date_selected": False}
     send_keyword_operation_prompt(chat_id)
 
 
@@ -7944,6 +7949,35 @@ def send_keyword_operation_prompt(chat_id: int):
     )
 
 
+def send_keyword_date_prompt(chat_id: int, message=None):
+    st = search_state.setdefault(chat_id, {})
+    op = st.get("operation")
+    mk = types.InlineKeyboardMarkup()
+    options = get_date_range_options(op)
+    row = []
+    for label, code in options:
+        row.append(types.InlineKeyboardButton(label, callback_data=f"kwdr|{code}"))
+        if len(row) == 2:
+            mk.row(*row)
+            row = []
+    if row:
+        mk.row(*row)
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kwdr|back"))
+    text = "📆 Tarix aralığını seçin:"
+    if message:
+        try:
+            bot.edit_message_text(
+                text,
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=mk,
+            )
+            return
+        except Exception:
+            pass
+    bot.send_message(chat_id, text, reply_markup=mk)
+
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith("kwop|"))
 def cb_keyword_operation(c):
     if not ensure_allowed_cb(c):
@@ -7952,7 +7986,11 @@ def cb_keyword_operation(c):
     chat_id = c.message.chat.id
 
     if action == "back":
-        search_state[chat_id] = {"mode": "keyword", "operation": None}
+        search_state[chat_id] = {
+            "mode": "keyword",
+            "operation": None,
+            "date_selected": False,
+        }
         send_keyword_operation_prompt(chat_id)
         try:
             bot.answer_callback_query(c.id)
@@ -7969,6 +8007,34 @@ def cb_keyword_operation(c):
 
     st = search_state.get(chat_id, {})
     st.update({"mode": "keyword", "operation": normalize_operation_value(action) or action})
+    search_state[chat_id] = st
+    send_keyword_date_prompt(chat_id, c.message)
+
+    try:
+        bot.answer_callback_query(c.id)
+    except:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("kwdr|"))
+def cb_keyword_date_range(c):
+    if not ensure_allowed_cb(c):
+        return
+    action = c.data.split("|")[1]
+    chat_id = c.message.chat.id
+
+    if action == "back":
+        search_state[chat_id] = {"mode": "keyword", "operation": None, "date_selected": False}
+        send_keyword_operation_prompt(chat_id)
+        try:
+            bot.answer_callback_query(c.id)
+        except:
+            pass
+        return
+
+    date_days = DATE_RANGE_DAYS.get(action)
+    st = search_state.get(chat_id, {})
+    st.update({"date_days": date_days, "date_selected": True})
     search_state[chat_id] = st
 
     mk = types.InlineKeyboardMarkup()
@@ -8176,6 +8242,7 @@ REGION_OPTIONS = {
 }
 ROOM_CODES = [("1", "r1"), ("2", "r2"), ("3", "r3"), ("4", "r4"), ("5+", "r5"), ("Hamısı", "r0")]
 FLOOR_PRESETS = {"f13": (1, 3), "f49": (4, 9), "f10": (10, None), "fall": None}
+DATE_RANGE_DAYS = {"d7": 7, "d30": 30, "d60": 60, "d90": 90, "all": None}
 
 
 def structured_send(chat_id, message, text, markup):
@@ -8205,6 +8272,46 @@ def parse_number(val):
 
     nums = _re.findall(r"\d+", str(val or ""))
     return int(nums[0]) if nums else None
+
+
+def normalize_date_range_op(op_code: Optional[str]) -> str:
+    if op_code in {"kir", "rent"}:
+        return "kir"
+    if op_code in {"sat", "sale"}:
+        return "sat"
+    return "sat"
+
+
+def get_date_range_options(op_code: Optional[str]):
+    op = normalize_date_range_op(op_code)
+    if op == "kir":
+        return [
+            ("📆 Son 1 həftə", "d7"),
+            ("📆 Son 1 ay", "d30"),
+            ("📦 Hamısı", "all"),
+        ]
+    return [
+        ("📆 Son 1 ay", "d30"),
+        ("📆 Son 2 ay", "d60"),
+        ("📆 Son 3 ay", "d90"),
+        ("📦 Hamısı", "all"),
+    ]
+
+
+def is_within_date_range(ev: dict, date_days: Optional[int]) -> bool:
+    if not date_days:
+        return True
+    ev_dt = safe_date(ev)
+    if ev_dt == datetime.min:
+        return False
+    cutoff = datetime.utcnow() - timedelta(days=date_days)
+    return ev_dt >= cutoff
+
+
+def build_back_reply_keyboard() -> types.ReplyKeyboardMarkup:
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row("⬅️ Geri")
+    return kb
 
 
 def parse_floor_value(ev: dict):
@@ -8520,8 +8627,12 @@ def favorite_price_worker():
 def query_structured_results(filters: dict, offset: int = 0, limit: int = None):
     op_code = filters.get("op", "all")
     prop_code = filters.get("prop", "all")
-    price_code = filters.get("price", "s0")
-    min_p, max_p = decode_price_range(price_code)
+    date_days = filters.get("date_days")
+    min_p = filters.get("min_price")
+    max_p = filters.get("max_price")
+    if min_p is None and max_p is None:
+        price_code = filters.get("price", "s0")
+        min_p, max_p = decode_price_range(price_code)
     results = []
 
     if os.path.exists(MAIN_DB):
@@ -8554,6 +8665,8 @@ def query_structured_results(filters: dict, offset: int = 0, limit: int = None):
     status_map = get_status_map()
     filtered = []
     for ev in results:
+        if not is_within_date_range(ev, date_days):
+            continue
         if not is_listing_active(ev, status_map):
             continue
         if not matches_region_rayon(ev, filters):
@@ -8661,7 +8774,9 @@ def build_fts_match(words: list) -> str:
     return " ".join(tokens)
 
 
-def query_keyword_results(selected_op: str, words: list, offset: int = 0, limit: int = None):
+def query_keyword_results(
+    selected_op: str, words: list, date_days: Optional[int] = None, offset: int = 0, limit: int = None
+):
     if not words:
         return [], 0
 
@@ -8954,6 +9069,8 @@ def query_smart_results(criteria: dict, offset: int = 0, limit: int = None):
     status_map = get_status_map()
     filtered = []
     for ev in results:
+        if not is_within_date_range(ev, date_days):
+            continue
         if not is_listing_active(ev, status_map):
             continue
         if not passes_room(ev):
@@ -9077,7 +9194,11 @@ def fetch_page_results(chat_id: int, mode: str, params: dict, page: int):
         return query_structured_results(filters, offset=offset, limit=PAGE_SIZE)
     if mode == "keyword":
         return query_keyword_results(
-            params.get("operation"), params.get("words", []), offset=offset, limit=PAGE_SIZE
+            params.get("operation"),
+            params.get("words", []),
+            params.get("date_days"),
+            offset=offset,
+            limit=PAGE_SIZE,
         )
     if mode == "smart":
         return query_smart_results(
@@ -9251,6 +9372,24 @@ def render_op_step(chat_id, message=None):
     structured_send(chat_id, message, "🔍 Əməliyyat növünü seç:", mk)
 
 
+def render_date_range_step(chat_id, message=None):
+    st = search_state.setdefault(chat_id, {})
+    st["step"] = "date"
+    op = st.get("filters", {}).get("op")
+    mk = types.InlineKeyboardMarkup()
+    options = get_date_range_options(op)
+    row = []
+    for label, code in options:
+        row.append(types.InlineKeyboardButton(label, callback_data=f"fs|dt|{code}"))
+        if len(row) == 2:
+            mk.row(*row)
+            row = []
+    if row:
+        mk.row(*row)
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="fs|bk"))
+    structured_send(chat_id, message, "📆 Tarix aralığını seç:", mk)
+
+
 def render_prop_step(chat_id, message=None):
     st = search_state.setdefault(chat_id, {})
     st["step"] = "prop"
@@ -9307,28 +9446,9 @@ def render_rayon_step(chat_id, message=None):
 def render_price_step(chat_id, message=None):
     st = search_state.setdefault(chat_id, {})
     st["step"] = "price"
-    op = st.get("filters", {}).get("op", "sat")
     mk = types.InlineKeyboardMarkup()
-    if op == "kir":
-        mk.add(
-            types.InlineKeyboardButton("0-500", callback_data="fs|pr|k1"),
-            types.InlineKeyboardButton("520-1000", callback_data="fs|pr|k2"),
-        )
-        mk.add(
-            types.InlineKeyboardButton("1050-1500", callback_data="fs|pr|k3"),
-            types.InlineKeyboardButton("1550-2000", callback_data="fs|pr|k4"),
-        )
-        mk.add(types.InlineKeyboardButton("2000+", callback_data="fs|pr|k5"))
-    else:
-        mk.add(
-            types.InlineKeyboardButton("Hamısı", callback_data="fs|pr|s0"),
-            types.InlineKeyboardButton("0-50,000", callback_data="fs|pr|s1"),
-        )
-        mk.add(
-            types.InlineKeyboardButton("50,000-100,000", callback_data="fs|pr|s2"),
-            types.InlineKeyboardButton("100,000-200,000", callback_data="fs|pr|s3"),
-        )
-        mk.add(types.InlineKeyboardButton("200,000+", callback_data="fs|pr|s4"))
+    mk.add(types.InlineKeyboardButton("💰 Qiymət aralığı seç", callback_data="fs|prm"))
+    mk.add(types.InlineKeyboardButton("📦 Hamısı", callback_data="fs|pr|all"))
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="fs|bk"))
     structured_send(chat_id, message, "💰 Qiymət aralığını seç:", mk)
 
@@ -9371,6 +9491,8 @@ def send_structured_start(chat_id, message=None):
         "filters": {},
         "history": [],
         "awaiting_floor_range": False,
+        "awaiting_price_min": False,
+        "awaiting_price_max": False,
         "step": "op",
     }
     render_op_step(chat_id, message)
@@ -9400,6 +9522,8 @@ def structured_go_back(chat_id, message=None):
     step = st["step"]
     if step == "op":
         render_op_step(chat_id, message)
+    elif step == "date":
+        render_date_range_step(chat_id, message)
     elif step == "prop":
         render_prop_step(chat_id, message)
     elif step == "region":
@@ -9426,6 +9550,8 @@ def cb_structured(c):
         "filters": {},
         "history": [],
         "awaiting_floor_range": False,
+        "awaiting_price_min": False,
+        "awaiting_price_max": False,
     })
 
     if action == "cancel":
@@ -9454,6 +9580,12 @@ def cb_structured(c):
     if action == "op":
         st.setdefault("filters", {})["op"] = parts[2]
         structured_push_history(chat_id)
+        render_date_range_step(chat_id, c.message)
+    elif action == "dt":
+        date_code = parts[2]
+        date_days = DATE_RANGE_DAYS.get(date_code)
+        st.setdefault("filters", {})["date_days"] = date_days
+        structured_push_history(chat_id)
         render_prop_step(chat_id, c.message)
     elif action == "tp":
         st.setdefault("filters", {})["prop"] = parts[2]
@@ -9478,9 +9610,22 @@ def cb_structured(c):
         structured_push_history(chat_id)
         render_price_step(chat_id, c.message)
     elif action == "pr":
-        st.setdefault("filters", {})["price"] = parts[2]
-        structured_push_history(chat_id)
-        render_room_step(chat_id, c.message)
+        if parts[2] == "all":
+            st.setdefault("filters", {})["min_price"] = None
+            st.setdefault("filters", {})["max_price"] = None
+            st.setdefault("filters", {}).pop("price", None)
+            structured_push_history(chat_id)
+            render_room_step(chat_id, c.message)
+    elif action == "prm":
+        st.setdefault("filters", {})["min_price"] = None
+        st.setdefault("filters", {})["max_price"] = None
+        st["awaiting_price_min"] = True
+        st["step"] = "price_min"
+        bot.send_message(
+            chat_id,
+            "💰 Minimum qiymət yazın (rəqəm ilə):",
+            reply_markup=build_back_reply_keyboard(),
+        )
     elif action == "rm":
         st.setdefault("filters", {})["rooms"] = parts[2]
         structured_push_history(chat_id)
@@ -9535,6 +9680,72 @@ def handle_floor_range_input(message):
     st.setdefault("filters", {})["floor_range"] = (mn, mx)
     st["awaiting_floor_range"] = False
     perform_structured_search(chat_id, offset=0, edit_msg=None)
+
+
+@bot.message_handler(func=lambda m: search_state.get(m.chat.id, {}).get("awaiting_price_min"))
+def handle_price_min_input(message):
+    if not ensure_allowed(message):
+        return
+    chat_id = message.chat.id
+    st = search_state.get(chat_id, {})
+    text = (message.text or "").strip()
+    if not st:
+        return
+    if text == "⬅️ Geri":
+        st["awaiting_price_min"] = False
+        bot.send_message(chat_id, "↩️ Qiymət seçiminə qayıdıldı.", reply_markup=types.ReplyKeyboardRemove())
+        render_price_step(chat_id)
+        return
+    value = parse_number(text)
+    if value is None:
+        bot.send_message(chat_id, "⚠️ Minimum qiyməti rəqəm ilə yazın.", reply_markup=build_back_reply_keyboard())
+        return
+    st.setdefault("filters", {})["min_price"] = value
+    st["awaiting_price_min"] = False
+    st["awaiting_price_max"] = True
+    bot.send_message(
+        chat_id,
+        "💰 Maksimum qiymət yazın (rəqəm ilə):",
+        reply_markup=build_back_reply_keyboard(),
+    )
+
+
+@bot.message_handler(func=lambda m: search_state.get(m.chat.id, {}).get("awaiting_price_max"))
+def handle_price_max_input(message):
+    if not ensure_allowed(message):
+        return
+    chat_id = message.chat.id
+    st = search_state.get(chat_id, {})
+    text = (message.text or "").strip()
+    if not st:
+        return
+    if text == "⬅️ Geri":
+        st["awaiting_price_max"] = False
+        st["awaiting_price_min"] = True
+        bot.send_message(
+            chat_id,
+            "💰 Minimum qiymət yazın (rəqəm ilə):",
+            reply_markup=build_back_reply_keyboard(),
+        )
+        return
+    value = parse_number(text)
+    if value is None:
+        bot.send_message(chat_id, "⚠️ Maksimum qiyməti rəqəm ilə yazın.", reply_markup=build_back_reply_keyboard())
+        return
+    min_price = st.get("filters", {}).get("min_price")
+    if min_price is not None and value < min_price:
+        bot.send_message(
+            chat_id,
+            "⚠️ Maksimum qiymət minimumdan kiçik ola bilməz.",
+            reply_markup=build_back_reply_keyboard(),
+        )
+        return
+    st.setdefault("filters", {})["max_price"] = value
+    st["awaiting_price_max"] = False
+    st["step"] = "price"
+    structured_push_history(chat_id)
+    bot.send_message(chat_id, "✅ Qiymət aralığı seçildi.", reply_markup=types.ReplyKeyboardRemove())
+    render_room_step(chat_id)
 
 
 def perform_structured_search(chat_id, offset=0, edit_msg=None):
@@ -9607,19 +9818,22 @@ def keyword_search_handler(message):
     if selected_op not in ("sale", "rent"):
         send_keyword_operation_prompt(chat_id)
         return
+    if not st.get("date_selected"):
+        send_keyword_date_prompt(chat_id)
+        return
 
     loading_ref = show_loading_message(chat_id)
     log_search_event(
         chat_id,
         "keyword",
         operation=normalize_operation_value(selected_op) or selected_op,
-        query_text=text,
+        query_text=f"{text} | date_days={st.get('date_days')}",
     )
 
     words = [w for w in text.split() if w]
 
     page_items, total = query_keyword_results(
-        selected_op, words, offset=0, limit=PAGE_SIZE
+        selected_op, words, st.get("date_days"), offset=0, limit=PAGE_SIZE
     )
 
     if not total:
@@ -9631,7 +9845,7 @@ def keyword_search_handler(message):
     send_paginated_results(
         chat_id,
         mode="keyword",
-        params={"operation": selected_op, "words": words},
+        params={"operation": selected_op, "words": words, "date_days": st.get("date_days")},
         page=1,
         loading_ref=loading_ref,
     )
