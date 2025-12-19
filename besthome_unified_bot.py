@@ -3099,21 +3099,48 @@ def check_request_rate_limit(chat_id: int) -> Optional[int]:
 def persist_customer_request(chat_id: int, data: dict) -> Optional[int]:
     conn = get_local_conn()
     cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO customer_requests (chat_id, request_type, rayon, rooms, budget, notes, phone, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
-        """,
-        (
-            chat_id,
-            data.get("request_type"),
-            data.get("rayon"),
-            data.get("rooms"),
-            data.get("budget"),
-            data.get("notes"),
-            data.get("phone"),
-        ),
-    )
+
+    def has_created_at_column() -> bool:
+        try:
+            cur.execute("PRAGMA table_info(customer_requests)")
+            return any((row[1] if not isinstance(row, dict) else row.get("name")) == "created_at" for row in cur.fetchall())
+        except Exception:
+            return False
+
+    created_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    if has_created_at_column():
+        cur.execute(
+            """
+            INSERT INTO customer_requests (chat_id, request_type, rayon, rooms, budget, notes, phone, created_at, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
+            """,
+            (
+                chat_id,
+                data.get("request_type"),
+                data.get("rayon"),
+                data.get("rooms"),
+                data.get("budget"),
+                data.get("notes"),
+                data.get("phone"),
+                created_at,
+            ),
+        )
+    else:
+        cur.execute(
+            """
+            INSERT INTO customer_requests (chat_id, request_type, rayon, rooms, budget, notes, phone, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
+            """,
+            (
+                chat_id,
+                data.get("request_type"),
+                data.get("rayon"),
+                data.get("rooms"),
+                data.get("budget"),
+                data.get("notes"),
+                data.get("phone"),
+            ),
+        )
     req_id = cur.lastrowid
     conn.commit()
     conn.close()
@@ -7627,11 +7654,12 @@ def build_whatsapp_link(req: dict) -> Optional[str]:
 
 
 def format_request_card(req: dict) -> str:
-    created_at = req.get("created_at") or "-"
+    created_dt = parse_dt_safe(req.get("created_at"))
+    created_at = created_dt.strftime("%Y-%m-%d %H:%M") if created_dt else "bilinmir"
     req_type = format_request_type(req.get("request_type"))
     return "\n".join(
         [
-            f"🆔 ID: {req.get('id')}",
+            f"🆔 Sorğu ID: {req.get('id')}",
             f"📅 Tarix: {created_at}",
             f"📄 Tip: {req_type}",
             f"📍 Rayon: {req.get('rayon') or '-'}",
@@ -7639,7 +7667,7 @@ def format_request_card(req: dict) -> str:
             f"💰 Büdcə: {req.get('budget') or '-'}",
             f"📝 Qeyd: {req.get('notes') or '-'}",
             f"📞 Telefon: {req.get('phone') or '-'}",
-            f"💬 Chat ID: {req.get('chat_id')}",
+            f"🆔 Müştəri ID: {req.get('chat_id')}",
             f"📦 Status: {req.get('status')}",
             f"⭐ İşarə: {'Bəli' if req.get('flagged') else 'Xeyr'}",
         ]
@@ -7649,6 +7677,14 @@ def format_request_card(req: dict) -> str:
 def send_request_card(chat_id: int, req: dict):
     mk = types.InlineKeyboardMarkup()
     wa_link = build_whatsapp_link(req)
+    customer_id = req.get("chat_id")
+    if customer_id:
+        mk.add(
+            types.InlineKeyboardButton(
+                text=f"🆔 ID: {customer_id}",
+                callback_data=f"admin_view_profile:{customer_id}",
+            )
+        )
     if wa_link:
         mk.add(types.InlineKeyboardButton("💬 WhatsApp yaz", url=wa_link))
     mk.add(
@@ -7902,6 +7938,33 @@ def cb_admin_request_noop(c):
         return
     try:
         bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("admin_view_profile:"))
+def admin_open_user_profile(c):
+    if not is_admin(c.from_user.id):
+        return
+    parts = c.data.split(":", 1)
+    if len(parts) < 2:
+        return
+    try:
+        user_id = int(parts[1])
+    except Exception:
+        return
+    profile_url = get_profile_url_for_user(user_id)
+    try:
+        bot.answer_callback_query(c.id, url=profile_url)
+        return
+    except Exception:
+        pass
+    try:
+        bot.send_message(
+            c.message.chat.id,
+            f"👤 <a href=\"{profile_url}\">Profil</a>",
+            parse_mode="HTML",
+        )
     except Exception:
         pass
 
@@ -10732,6 +10795,12 @@ def build_profile_url(chat_id: int, username: Optional[str]) -> str:
     if username_clean:
         return f"https://t.me/{username_clean}"
     return f"tg://user?id={chat_id}"
+
+
+def get_profile_url_for_user(user_id: int) -> str:
+    record = get_user_record(user_id)
+    username = record.get("username") if record else None
+    return build_profile_url(user_id, username)
 
 
 def format_active_user_stats(users):
