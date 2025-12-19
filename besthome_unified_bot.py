@@ -24,6 +24,7 @@ import random
 import shutil
 import tempfile
 from datetime import datetime, date, timedelta
+from collections import defaultdict
 from typing import Optional, Tuple, List
 from urllib.parse import quote, unquote
 
@@ -99,6 +100,7 @@ last_complaint_time = {}
 admin_stats_period = {}
 admin_direct_message_state = {}
 admin_user_message_state = {}
+ui_state = defaultdict(list)
 BLOCKED_MESSAGE_TEXT = "Hesabınız müvəqqəti olaraq dayandırıldı."
 STATUS_PENDING = "pending"
 STATUS_ACTIVE_PAID = "active_paid"
@@ -887,6 +889,14 @@ def format_price(v) -> str:
         return f"{val:,}".replace(",", " ")
     except:
         return s
+
+
+def safe_clear_ui(bot_ref, chat_id: int, message_ids: List[int]):
+    for message_id in list(message_ids):
+        try:
+            bot_ref.delete_message(chat_id, message_id)
+        except Exception:
+            pass
 
 
 def parse_price_value(raw) -> Optional[int]:
@@ -4292,8 +4302,8 @@ def step_link(message):
     try:
         mk = types.InlineKeyboardMarkup()
         mk.add(
-            types.InlineKeyboardButton("✅ Təsdiqlə", callback_data=f"aprv|{new_id}"),
-            types.InlineKeyboardButton("❌ Sil", callback_data=f"del|{new_id}"),
+            types.InlineKeyboardButton("✅ Təsdiqlə", callback_data=f"admin_approve:{new_id}"),
+            types.InlineKeyboardButton("❌ Sil", callback_data=f"admin_delete:{new_id}"),
         )
         bot.send_message(ADMIN_ID, preview, parse_mode="Markdown", reply_markup=mk)
     except:
@@ -9804,15 +9814,100 @@ def show_pending_listings(chat_id):
         mk.add(
             types.InlineKeyboardButton(
                 "✅ Təsdiqlə",
-                callback_data=f"aprv|{ev['id']}",
+                callback_data=f"admin_approve:{ev['id']}",
             ),
             types.InlineKeyboardButton(
                 "❌ Sil",
-                callback_data=f"del|{ev['id']}",
+                callback_data=f"admin_delete:{ev['id']}",
             ),
         )
 
         bot.send_message(chat_id, txt, reply_markup=mk)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("admin_approve:"))
+def handle_admin_approve(c):
+    try:
+        ad_id = int(c.data.split(":")[1])
+
+        conn = get_local_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM listings_new WHERE id=?", (ad_id,))
+        row = cur.fetchone()
+        if not row:
+            conn.close()
+            raise ValueError("Listing not found")
+        ev = dict(row)
+
+        cur.execute(
+            """
+            INSERT INTO listings_approved (
+                date_added, chat_id, role, prop_type, operation,
+                rayon, metro, rooms, area_kvm, price, currency,
+                phone, contact_name, summary, link
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ev.get("date_added"),
+                ev.get("chat_id"),
+                ev.get("role"),
+                ev.get("prop_type"),
+                ev.get("operation"),
+                ev.get("rayon"),
+                ev.get("metro"),
+                ev.get("rooms"),
+                ev.get("area_kvm"),
+                ev.get("price"),
+                ev.get("currency"),
+                ev.get("phone"),
+                ev.get("contact_name"),
+                ev.get("summary"),
+                ev.get("link"),
+            ),
+        )
+        approved_id = cur.lastrowid
+        cur.execute("UPDATE listings_new SET approved=1 WHERE id=?", (ad_id,))
+        conn.commit()
+        conn.close()
+
+        ev["id"] = approved_id
+        send_listing_card(
+            CHANNEL_ID,
+            ev,
+            source="local",
+            with_fav_button=False,
+            status_controls=False,
+            track_view=False,
+        )
+
+        bot.answer_callback_query(c.id, "Elan təsdiqləndi ✅")
+
+        safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+        ui_state[c.message.chat.id].clear()
+
+    except Exception as e:
+        bot.answer_callback_query(c.id, "Xəta baş verdi ❌", show_alert=True)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("admin_delete:"))
+def handle_admin_delete(c):
+    try:
+        ad_id = int(c.data.split(":")[1])
+
+        conn = get_local_conn()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM listings_new WHERE id=?", (ad_id,))
+        conn.commit()
+        conn.close()
+
+        bot.answer_callback_query(c.id, "Elan silindi ❌")
+
+        safe_clear_ui(bot, c.message.chat.id, ui_state[c.message.chat.id])
+        ui_state[c.message.chat.id].clear()
+
+    except Exception as e:
+        bot.answer_callback_query(c.id, "Xəta baş verdi ❌", show_alert=True)
 
 
 # =============== İSTİFADƏÇİ TƏSDİQİ (ADMIN) ===============
