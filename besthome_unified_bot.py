@@ -13540,7 +13540,7 @@ def show_users_menu(chat_id):
     )
     mk.add(
         types.InlineKeyboardButton(
-            "⏳ Təsdiqlənməmiş", callback_data="userlist|pending"
+            "⏳ Təsdiqlənməmiş", callback_data="unverified_users"
         )
     )
     mk.add(
@@ -13550,6 +13550,22 @@ def show_users_menu(chat_id):
         chat_id,
         "👥 İstifadəçi kateqoriyasını seç:",
         reply_markup=mk,
+    )
+
+
+def show_all_users(chat_id, status="active", page=1, message=None):
+    show_users_by_status(chat_id, status, page=page, message=message)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "unverified_users")
+def cb_unverified_users(c):
+    if not is_admin(c.message.chat.id):
+        return
+    show_all_users(
+        c.message.chat.id,
+        status="pending",
+        page=1,
+        message=c.message,
     )
 
 
