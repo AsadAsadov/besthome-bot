@@ -14310,7 +14310,18 @@ def delete_user_fully(chat_id: int):
     return True
 
 
-def show_all_users(chat_id, status="active", page: int = 1, message=None, force_new: bool = False):
+def show_all_users(
+    chat_id,
+    status="active",
+    page: int = 1,
+    message=None,
+    force_new: bool = False,
+    callback_query=None,
+):
+    try:
+        bot.answer_callback_query(callback_query_id=callback_query.id)
+    except Exception:
+        pass
     try:
         conn = None
         logger.info("show_all_users start status=%s page=%s", status, page)
@@ -14325,14 +14336,14 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
         if status == "active":
             status_where = (
                 "approved=1 AND blocked=0 AND ("
-                "(paid_until IS NOT NULL AND paid_until > CURRENT_TIMESTAMP)"
+                "(paid_until IS NOT NULL AND datetime(paid_until) > datetime('now'))"
                 " OR is_premium=1)"
             )
             status_params = ()
         elif status == "demo":
             status_where = (
                 "approved=1 AND blocked=0 AND demo_end_at IS NOT NULL"
-                " AND demo_end_at > CURRENT_TIMESTAMP"
+                " AND datetime(demo_end_at) > datetime('now')"
             )
             status_params = ()
         elif status == "blocked":
@@ -14341,8 +14352,8 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
         elif status == "free":
             status_where = (
                 "approved=1 AND blocked=0 AND ("
-                "paid_until IS NULL OR paid_until <= CURRENT_TIMESTAMP"
-                ") AND (demo_end_at IS NULL OR demo_end_at <= CURRENT_TIMESTAMP)"
+                "paid_until IS NULL OR datetime(paid_until) <= datetime('now')"
+                ") AND (demo_end_at IS NULL OR datetime(demo_end_at) <= datetime('now'))"
             )
             status_params = ()
         elif status == "rejected":
@@ -14355,7 +14366,7 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
             status = "active"
             status_where = (
                 "approved=1 AND blocked=0 AND ("
-                "(paid_until IS NOT NULL AND paid_until > CURRENT_TIMESTAMP)"
+                "(paid_until IS NOT NULL AND datetime(paid_until) > datetime('now'))"
                 " OR is_premium=1)"
             )
             status_params = ()
@@ -14429,21 +14440,13 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
 
         if total == 0:
             conn.close()
-            mk = types.InlineKeyboardMarkup()
-            mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="adm|users"))
-            text = empty_text
-            try:
-                if message and not force_new:
-                    bot.edit_message_text(
-                        text,
-                        chat_id=message.chat.id,
-                        message_id=message.message_id,
-                        reply_markup=mk,
-                    )
-                else:
-                    bot.send_message(chat_id, text, reply_markup=mk)
-            except Exception:
-                safe_admin_step(chat_id, text, reply_markup=mk)
+            safe_send(
+                chat_id,
+                "❗ Bu kateqoriyada istifadəçi tapılmadı.",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Geri", callback_data="adm|users")
+                ),
+            )
             return
 
         total_pages = max(1, math.ceil(total / PAGE_SIZE_USERS))
@@ -14470,6 +14473,7 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
             status,
             len(rows),
         )
+        logger.info("ADMIN USER LIST READY status=%s rows=%s", status, len(rows))
         if status in {"active", "demo"}:
             logger.info(
                 "users fetch query result status=%s row_count=%s",
@@ -14480,7 +14484,13 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
 
         if not rows:
             conn.close()
-            safe_send(chat_id, empty_text)
+            safe_send(
+                chat_id,
+                "❗ Bu kateqoriyada istifadəçi tapılmadı.",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Geri", callback_data="adm|users")
+                ),
+            )
             return
 
         admin_user_page_state[(chat_id, status)] = page
@@ -14760,14 +14770,13 @@ def cb_admin_cancel_user_message(c):
     if state and state.get("origin_message"):
         origin_message = state.get("origin_message")
 
+    safe_answer_callback_query(c.id)
     show_all_users(
         c.message.chat.id,
         list_type,
         page=page,
         message=origin_message if origin_message else c.message,
     )
-
-    safe_answer_callback_query(c.id)
 
 
 @bot.message_handler(
