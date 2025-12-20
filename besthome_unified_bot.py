@@ -14101,10 +14101,7 @@ def cb_unverified_users_page(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("userlist|"))
 def cb_userlist(c):
-    try:
-        bot.answer_callback_query(c.id)
-    except Exception:
-        pass
+    safe_answer_callback_query(c.id)
 
     if not is_admin(c.message.chat.id):
         return
@@ -14143,6 +14140,7 @@ def cb_userlist(c):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_u:"))
 @callback_guard
 def cb_admin_user_pagination(c):
+    safe_answer_callback_query(c.id)
     if not is_admin(c.message.chat.id):
         return
     try:
@@ -14316,48 +14314,48 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
     try:
         conn = None
         logger.info("show_all_users start status=%s page=%s", status, page)
-        STATUS_DB_MAP = {
-            "active": ("paid", "demo", "free"),
-            "demo": ("demo",),
-            "free": ("free",),
-            "blocked": ("blocked",),
-            "pending": ("pending",),
-            "rejected": ("rejected",),
-        }
         page = max(1, int(page or 1))
         if status == "pending":
             show_unverified_users(chat_id, page=page, message=message, force_new=force_new)
-            return
-        db_statuses = STATUS_DB_MAP.get(status)
-        logger.info("Resolved UI status '%s' to DB statuses %s", status, db_statuses)
-        if not db_statuses:
-            mk = types.InlineKeyboardMarkup()
-            mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="adm|users"))
-            text = "❗ Bu kateqoriyada istifadəçi tapılmadı."
-            try:
-                if message and not force_new:
-                    bot.edit_message_text(
-                        text,
-                        chat_id=message.chat.id,
-                        message_id=message.message_id,
-                        reply_markup=mk,
-                    )
-                else:
-                    bot.send_message(chat_id, text, reply_markup=mk)
-            except Exception:
-                safe_admin_step(chat_id, text, reply_markup=mk)
             return
 
         conn = get_local_conn()
         cur = conn.cursor()
 
-        if len(db_statuses) == 1:
+        if status == "active":
+            status_where = (
+                "approved=1 AND blocked=0 AND ("
+                "(paid_until IS NOT NULL AND datetime(paid_until) > datetime('now'))"
+                " OR is_premium=1)"
+            )
+            status_params = ()
+        elif status == "demo":
+            status_where = (
+                "approved=1 AND blocked=0 AND demo_end_at IS NOT NULL"
+                " AND datetime(demo_end_at) > datetime('now')"
+            )
+            status_params = ()
+        elif status == "blocked":
+            status_where = "blocked=1"
+            status_params = ()
+        elif status == "free":
             status_where = "status=?"
-            status_params = (db_statuses[0],)
+            status_params = (STATUS_ACTIVE_FREE,)
+        elif status == "rejected":
+            status_where = "status=?"
+            status_params = (STATUS_REJECTED,)
+        elif status == "pending":
+            status_where = "approved=0"
+            status_params = ()
         else:
-            placeholders = ", ".join(["?"] * len(db_statuses))
-            status_where = f"status IN ({placeholders})"
-            status_params = tuple(db_statuses)
+            status = "active"
+            status_where = (
+                "approved=1 AND blocked=0 AND ("
+                "(paid_until IS NOT NULL AND datetime(paid_until) > datetime('now'))"
+                " OR is_premium=1)"
+            )
+            status_params = ()
+        logger.info("Resolved UI status '%s' to filter '%s'", status, status_where)
 
         query_parts = {
             "active": {
@@ -14393,6 +14391,16 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
 
         base_query = "SELECT * FROM users"
 
+        empty_texts = {
+            "active": "❗ Aktiv istifadəçi tapılmadı.",
+            "demo": "❗ Demo istifadəçi tapılmadı.",
+            "blocked": "❗ Bloklanmış istifadəçi tapılmadı.",
+            "free": "❗ Limitsiz istifadəçi tapılmadı.",
+            "rejected": "❗ Rədd edilmiş istifadəçi tapılmadı.",
+            "pending": "❗ Təsdiqlənməmiş istifadəçi tapılmadı.",
+        }
+        empty_text = empty_texts.get(status, "❗ Bu kateqoriyada istifadəçi tapılmadı.")
+
         logger.info(
             "users count query start chat_id=%s status=%s where=%s",
             chat_id,
@@ -14403,7 +14411,14 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
             f"SELECT COUNT(*) FROM users WHERE {status_where}",
             status_params,
         )
-        total = cur.fetchone()[0] or 0
+        count_row = cur.fetchone()
+        total = (count_row[0] if count_row else 0) or 0
+        logger.info(
+            "users count query rows chat_id=%s status=%s rows=%s",
+            chat_id,
+            status,
+            1 if count_row is not None else 0,
+        )
         logger.info(
             "users count query done chat_id=%s status=%s total=%s",
             chat_id,
@@ -14415,7 +14430,7 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
             conn.close()
             mk = types.InlineKeyboardMarkup()
             mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="adm|users"))
-            text = "❗ Bu kateqoriyada istifadəçi tapılmadı."
+            text = empty_text
             try:
                 if message and not force_new:
                     bot.edit_message_text(
@@ -14448,12 +14463,17 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
             (*status_params, PAGE_SIZE_USERS, offset),
         )
         rows = cur.fetchall()
-        logger.info("show_all_users rows_count=%s", len(rows))
+        logger.info(
+            "users fetch query rows chat_id=%s status=%s rows=%s",
+            chat_id,
+            status,
+            len(rows),
+        )
         columns = [desc[0] for desc in (cur.description or [])]
 
         if not rows:
             conn.close()
-            safe_send(chat_id, "❗ Bu kateqoriyada istifadəçi tapılmadı.")
+            safe_send(chat_id, empty_text)
             return
 
         admin_user_page_state[(chat_id, status)] = page
