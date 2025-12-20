@@ -14316,57 +14316,71 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
     try:
         conn = None
         logger.info("show_all_users start status=%s page=%s", status, page)
+        STATUS_DB_MAP = {
+            "active": ("paid", "demo", "free"),
+            "demo": ("demo",),
+            "free": ("free",),
+            "blocked": ("blocked",),
+            "pending": ("pending",),
+            "rejected": ("rejected",),
+        }
         page = max(1, int(page or 1))
         if status == "pending":
             show_unverified_users(chat_id, page=page, message=message, force_new=force_new)
             return
-        if status not in USERLIST_STATUS_FILTERS:
-            status = "active"
+        db_statuses = STATUS_DB_MAP.get(status)
+        logger.info("Resolved UI status '%s' to DB statuses %s", status, db_statuses)
+        if not db_statuses:
+            mk = types.InlineKeyboardMarkup()
+            mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="adm|users"))
+            text = "❗ Bu kateqoriyada istifadəçi tapılmadı."
+            try:
+                if message and not force_new:
+                    bot.edit_message_text(
+                        text,
+                        chat_id=message.chat.id,
+                        message_id=message.message_id,
+                        reply_markup=mk,
+                    )
+                else:
+                    bot.send_message(chat_id, text, reply_markup=mk)
+            except Exception:
+                safe_admin_step(chat_id, text, reply_markup=mk)
+            return
 
         conn = get_local_conn()
         cur = conn.cursor()
 
-        def _status_where_clause(list_status: str) -> Tuple[str, Tuple]:
-            statuses = USERLIST_STATUS_FILTERS.get(list_status, USERLIST_STATUS_FILTERS["active"])
-            if list_status == "active":
-                placeholders = ", ".join(["?"] * len(statuses))
-                return f"status IN ({placeholders})", statuses
-            return "status=?", (statuses[0],)
+        if len(db_statuses) == 1:
+            status_where = "status=?"
+            status_params = (db_statuses[0],)
+        else:
+            placeholders = ", ".join(["?"] * len(db_statuses))
+            status_where = f"status IN ({placeholders})"
+            status_params = tuple(db_statuses)
 
         query_parts = {
             "active": {
-                "where": _status_where_clause("active")[0],
-                "params": _status_where_clause("active")[1],
                 "title": "✅ Aktiv istifadəçilər",
                 "order": "ORDER BY datetime(joined_at) DESC",
             },
             "blocked": {
-                "where": _status_where_clause("blocked")[0],
-                "params": _status_where_clause("blocked")[1],
                 "title": "🚫 Bloklanmış istifadəçilər",
                 "order": "ORDER BY datetime(blocked_at) DESC",
             },
             "pending": {
-                "where": _status_where_clause("pending")[0],
-                "params": _status_where_clause("pending")[1],
                 "title": "⏳ Təsdiqlənməmiş istifadəçilər",
                 "order": "ORDER BY datetime(joined_at) ASC",
             },
             "demo": {
-                "where": _status_where_clause("demo")[0],
-                "params": _status_where_clause("demo")[1],
                 "title": "🎁 Demo istifadəçilər",
                 "order": "ORDER BY datetime(joined_at) DESC",
             },
             "free": {
-                "where": _status_where_clause("free")[0],
-                "params": _status_where_clause("free")[1],
                 "title": "♾ Limitsiz istifadəçilər",
                 "order": "ORDER BY datetime(joined_at) DESC",
             },
             "rejected": {
-                "where": _status_where_clause("rejected")[0],
-                "params": _status_where_clause("rejected")[1],
                 "title": "❌ Rədd edilmiş istifadəçilər",
                 "order": "ORDER BY datetime(joined_at) DESC",
             },
@@ -14383,11 +14397,11 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
             "users count query start chat_id=%s status=%s where=%s",
             chat_id,
             status,
-            parts["where"],
+            status_where,
         )
         cur.execute(
-            f"SELECT COUNT(*) FROM users WHERE {parts['where']}",
-            parts["params"],
+            f"SELECT COUNT(*) FROM users WHERE {status_where}",
+            status_params,
         )
         total = cur.fetchone()[0] or 0
         logger.info(
@@ -14430,8 +14444,8 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
         )
         cur.execute(
             base_query
-            + f" WHERE {parts['where']} {parts['order']} LIMIT ? OFFSET ?",
-            (*parts["params"], PAGE_SIZE_USERS, offset),
+            + f" WHERE {status_where} {parts['order']} LIMIT ? OFFSET ?",
+            (*status_params, PAGE_SIZE_USERS, offset),
         )
         rows = cur.fetchall()
         logger.info("show_all_users rows_count=%s", len(rows))
