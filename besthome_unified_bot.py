@@ -14325,25 +14325,29 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
         if status == "active":
             status_where = (
                 "approved=1 AND blocked=0 AND ("
-                "(paid_until IS NOT NULL AND datetime(paid_until) > datetime('now'))"
+                "(paid_until IS NOT NULL AND paid_until > CURRENT_TIMESTAMP)"
                 " OR is_premium=1)"
             )
             status_params = ()
         elif status == "demo":
             status_where = (
                 "approved=1 AND blocked=0 AND demo_end_at IS NOT NULL"
-                " AND datetime(demo_end_at) > datetime('now')"
+                " AND demo_end_at > CURRENT_TIMESTAMP"
             )
             status_params = ()
         elif status == "blocked":
             status_where = "blocked=1"
             status_params = ()
         elif status == "free":
-            status_where = "status=?"
-            status_params = (STATUS_ACTIVE_FREE,)
+            status_where = (
+                "approved=1 AND blocked=0 AND ("
+                "paid_until IS NULL OR paid_until <= CURRENT_TIMESTAMP"
+                ") AND (demo_end_at IS NULL OR demo_end_at <= CURRENT_TIMESTAMP)"
+            )
+            status_params = ()
         elif status == "rejected":
-            status_where = "status=?"
-            status_params = (STATUS_REJECTED,)
+            status_where = "approved=0 AND blocked=1"
+            status_params = ()
         elif status == "pending":
             status_where = "approved=0"
             status_params = ()
@@ -14351,11 +14355,16 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
             status = "active"
             status_where = (
                 "approved=1 AND blocked=0 AND ("
-                "(paid_until IS NOT NULL AND datetime(paid_until) > datetime('now'))"
+                "(paid_until IS NOT NULL AND paid_until > CURRENT_TIMESTAMP)"
                 " OR is_premium=1)"
             )
             status_params = ()
-        logger.info("Resolved UI status '%s' to filter '%s'", status, status_where)
+        logger.info(
+            "Resolved UI status '%s' to filter '%s' params=%s",
+            status,
+            status_where,
+            status_params,
+        )
 
         query_parts = {
             "active": {
@@ -14391,15 +14400,7 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
 
         base_query = "SELECT * FROM users"
 
-        empty_texts = {
-            "active": "❗ Aktiv istifadəçi tapılmadı.",
-            "demo": "❗ Demo istifadəçi tapılmadı.",
-            "blocked": "❗ Bloklanmış istifadəçi tapılmadı.",
-            "free": "❗ Limitsiz istifadəçi tapılmadı.",
-            "rejected": "❗ Rədd edilmiş istifadəçi tapılmadı.",
-            "pending": "❗ Təsdiqlənməmiş istifadəçi tapılmadı.",
-        }
-        empty_text = empty_texts.get(status, "❗ Bu kateqoriyada istifadəçi tapılmadı.")
+        empty_text = "❗ Bu kateqoriyada istifadəçi tapılmadı."
 
         logger.info(
             "users count query start chat_id=%s status=%s where=%s",
@@ -14469,6 +14470,12 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
             status,
             len(rows),
         )
+        if status in {"active", "demo"}:
+            logger.info(
+                "users fetch query result status=%s row_count=%s",
+                status,
+                len(rows),
+            )
         columns = [desc[0] for desc in (cur.description or [])]
 
         if not rows:
