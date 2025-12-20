@@ -14326,35 +14326,21 @@ def show_all_users(
         conn = None
         logger.info("show_all_users start status=%s page=%s", status, page)
         page = max(1, int(page or 1))
-        if status == "pending":
-            show_unverified_users(chat_id, page=page, message=message, force_new=force_new)
-            return
 
         conn = get_local_conn()
         cur = conn.cursor()
 
         if status == "active":
-            status_where = (
-                "approved=1 AND blocked=0 AND ("
-                "(paid_until IS NOT NULL AND datetime(paid_until) > datetime('now'))"
-                " OR is_premium=1)"
-            )
+            status_where = "status IN ('active_paid', 'active_free') AND blocked = 0"
             status_params = ()
         elif status == "demo":
-            status_where = (
-                "approved=1 AND blocked=0 AND demo_end_at IS NOT NULL"
-                " AND datetime(demo_end_at) > datetime('now')"
-            )
+            status_where = "status = 'active_demo' AND blocked = 0"
             status_params = ()
         elif status == "blocked":
             status_where = "blocked=1"
             status_params = ()
         elif status == "free":
-            status_where = (
-                "approved=1 AND blocked=0 AND ("
-                "paid_until IS NULL OR datetime(paid_until) <= datetime('now')"
-                ") AND (demo_end_at IS NULL OR datetime(demo_end_at) <= datetime('now'))"
-            )
+            status_where = "status = 'active_free' AND blocked = 0"
             status_params = ()
         elif status == "rejected":
             status_where = "approved=0 AND blocked=1"
@@ -14364,11 +14350,7 @@ def show_all_users(
             status_params = ()
         else:
             status = "active"
-            status_where = (
-                "approved=1 AND blocked=0 AND ("
-                "(paid_until IS NOT NULL AND datetime(paid_until) > datetime('now'))"
-                " OR is_premium=1)"
-            )
+            status_where = "status IN ('active_paid', 'active_free') AND blocked = 0"
             status_params = ()
         logger.info(
             "Resolved UI status '%s' to filter '%s' params=%s",
@@ -14545,14 +14527,12 @@ def show_all_users(
                 )
                 entry_lines.append(f"📅 Sorğu tarixi: {req_date} {req_time}")
             elif status == "active":
-                expiry = parse_dt_safe(row_value(row, "paid_until")) or parse_dt_safe(
-                    row_value(row, "demo_end_at") or row_value(row, "demo_expires_at")
-                )
+                expiry = None
                 entry_lines.append(f"📅 Qoşulma tarixi: {join_date} {join_time}")
                 entry_lines.append(f"⏳ Bitmə tarixi: {format_display_date(expiry)}")
                 entry_lines.append(f"🕒 Qalan gün: {format_remaining_time(expiry)}")
             elif status == "demo":
-                expiry = parse_dt_safe(row_value(row, "demo_end_at") or row_value(row, "demo_expires_at"))
+                expiry = None
                 entry_lines.append(f"📅 Qoşulma tarixi: {join_date} {join_time}")
                 entry_lines.append(f"⏳ Bitmə tarixi: {format_display_date(expiry)}")
                 entry_lines.append(f"🕒 Qalan gün: {format_remaining_time(expiry)}")
