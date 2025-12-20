@@ -14334,19 +14334,11 @@ def show_all_users(
         cur = conn.cursor()
 
         if status == "active":
-            status_where = (
-                "approved=1 AND blocked=0 AND ("
-                "(paid_until IS NOT NULL AND datetime(paid_until) > datetime('now')) "
-                "OR is_premium=1"
-                ")"
-            )
-            status_params = ()
+            status_where = "status IN (?, ?, ?)"
+            status_params = (STATUS_ACTIVE_PAID, STATUS_ACTIVE_DEMO, STATUS_ACTIVE_FREE)
         elif status == "demo":
-            status_where = (
-                "approved=1 AND blocked=0 AND "
-                "demo_end_at IS NOT NULL AND datetime(demo_end_at) > datetime('now')"
-            )
-            status_params = ()
+            status_where = "status=?"
+            status_params = (STATUS_ACTIVE_DEMO,)
         elif status == "expired":
             status_where = (
                 "("
@@ -14370,13 +14362,8 @@ def show_all_users(
             status_params = ()
         else:
             status = "active"
-            status_where = (
-                "approved=1 AND blocked=0 AND ("
-                "(paid_until IS NOT NULL AND datetime(paid_until) > datetime('now')) "
-                "OR is_premium=1"
-                ")"
-            )
-            status_params = ()
+            status_where = "status IN (?, ?, ?)"
+            status_params = (STATUS_ACTIVE_PAID, STATUS_ACTIVE_DEMO, STATUS_ACTIVE_FREE)
         logger.info(
             "Resolved UI status '%s' to filter '%s' params=%s",
             status,
@@ -14556,12 +14543,14 @@ def show_all_users(
                 )
                 entry_lines.append(f"📅 Sorğu tarixi: {req_date} {req_time}")
             elif status == "active":
-                expiry = None
+                expiry = parse_dt_safe(row_value(row, "paid_until")) or parse_dt_safe(
+                    row_value(row, "demo_end_at") or row_value(row, "demo_expires_at")
+                )
                 entry_lines.append(f"📅 Qoşulma tarixi: {join_date} {join_time}")
                 entry_lines.append(f"⏳ Bitmə tarixi: {format_display_date(expiry)}")
                 entry_lines.append(f"🕒 Qalan gün: {format_remaining_time(expiry)}")
             elif status == "demo":
-                expiry = None
+                expiry = parse_dt_safe(row_value(row, "demo_end_at") or row_value(row, "demo_expires_at"))
                 entry_lines.append(f"📅 Qoşulma tarixi: {join_date} {join_time}")
                 entry_lines.append(f"⏳ Bitmə tarixi: {format_display_date(expiry)}")
                 entry_lines.append(f"🕒 Qalan gün: {format_remaining_time(expiry)}")
