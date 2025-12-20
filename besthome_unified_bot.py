@@ -59,7 +59,7 @@ CHANNEL_ID = -1001878623087  # Bot bu kanalda admin olmalıdır
 # ==============================
 # 💾 DATABASE KONFİQURASİYASI
 # ==============================
-DATA_DIR = "/data"
+DATA_DIR = os.getenv("DATA_DIR", "/data")
 
 MAIN_DB = os.path.join(DATA_DIR, "besthome.db")  # Əsas elan bazası (daily update)
 LOCAL_DB = os.path.join(
@@ -70,11 +70,40 @@ AGENTS_DB = os.path.join(DATA_DIR, "agents.db")  # Vasitəçi elanları
 # ==============================
 # 🛡️ DB TƏHLÜKƏSİZLİK YOXLAMASI
 # ==============================
-for db_path in (MAIN_DB, LOCAL_DB, AGENTS_DB):
-    if not os.path.exists(db_path):
-        raise RuntimeError(f"❌ DB tapılmadı: {db_path}")
+def ensure_required_dbs():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    missing = [db_path for db_path in (MAIN_DB, LOCAL_DB, AGENTS_DB) if not os.path.exists(db_path)]
+    if missing:
+        missing_list = ", ".join(missing)
+        raise RuntimeError(f"❌ DB tapılmadı: {missing_list}")
+    print("✅ Bütün DB-lər tapıldı və hazırdır")
 
-print("✅ Bütün DB-lər tapıldı və hazırdır")
+
+BOT_USERNAME = None
+
+
+def get_bot_username() -> str:
+    global BOT_USERNAME
+    if BOT_USERNAME:
+        return BOT_USERNAME
+    BOT_USERNAME = bot.get_me().username
+    return BOT_USERNAME
+
+
+app = Flask(__name__)
+_bot_started = False
+_bot_start_lock = threading.Lock()
+
+
+@app.route("/")
+def home():
+    return "✅ BestHome Bot işləyir."
+
+
+@app.before_first_request
+def _start_bot_for_gunicorn():
+    start_bot_workers()
+
 
 # ==============================
 # 🧠 STATE-LƏR
@@ -86,7 +115,6 @@ agent_request_lookup_state = {}
 admin_customer_request_state = {}
 CUSTOMER_REQUEST_COOLDOWN_SECONDS = 300
 
-BOT_USERNAME = bot.get_me().username
 user_state = {}  # Yeni elan proses state
 search_state = {}  # Açar sözlə axtarış paging state
 today_flow_state = {}
@@ -3942,7 +3970,7 @@ def share_referral(message):
         )
         return
 
-    referral_link = f"https://t.me/{BOT_USERNAME}?start=ref_{chat_id}"
+    referral_link = f"https://t.me/{get_bot_username()}?start=ref_{chat_id}"
     text = (
         "🤝 Dostunu dəvət et və BONUS qazan!\n\n"
         f"Bu linki dostuna göndər:\n{referral_link}\n\n"
@@ -17366,8 +17394,15 @@ def cb_unhandled_callback(c):
     safe_answer_callback_query(c.id)
 
 
-def start_bot_server():
+def start_bot_workers():
+    global _bot_started
+    with _bot_start_lock:
+        if _bot_started:
+            return
+        _bot_started = True
+
     print("⚙️ BestHome Unified Bot FULL v9 işə düşür...")
+    ensure_required_dbs()
     init_local_db()
     migrate_user_statuses()
     init_agents_db()
@@ -17378,14 +17413,25 @@ def start_bot_server():
     threading.Thread(target=saved_search_worker, daemon=True).start()
     threading.Thread(target=favorite_price_worker, daemon=True).start()
     threading.Thread(target=subscription_notifier, daemon=True).start()
-
-    app = Flask(__name__)
-
-    @app.route("/")
-    def home():
-        return "✅ BestHome Bot işləyir."
-
     threading.Thread(target=run_bot, daemon=True).start()
 
+
+def start_bot_server():
+    start_bot_workers()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
+
+def main():
+    start_bot_server()
+
+
+if __name__ == "__main__":
+    import traceback
+
+    try:
+        main()
+    except Exception:
+        print("FATAL ERROR (full traceback):")
+        print(traceback.format_exc())
+        raise
