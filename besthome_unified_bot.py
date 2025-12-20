@@ -14142,28 +14142,44 @@ def cb_unverified_users_page(c):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("userlist|"))
-@callback_guard
 def cb_userlist(c):
-    safe_answer_callback_query(c.id)
-    if not is_admin(c.from_user.id):
-        safe_answer_callback_query(c.id, "⛔ İcazə yoxdur")
-        return
     try:
-        status = c.data.split("|", 1)[1]
+        bot.answer_callback_query(c.id)
     except Exception:
-        status = "active"
-    logger.info(
-        "Admin userlist callback status=%s chat_id=%s",
-        status,
-        c.message.chat.id,
-    )
-    if status not in {"active", "demo", "blocked", "pending", "free", "rejected"}:
+        pass
+
+    if not is_admin(c.message.chat.id):
+        return
+
+    try:
+        status = c.data.split("|")[1]
+    except Exception:
+        safe_send(c.message.chat.id, "⚠️ Kateqoriya oxunmadı.")
+        return
+
+    allowed = {"active", "demo", "blocked", "pending", "free", "rejected"}
+    if status not in allowed:
         safe_send(c.message.chat.id, "⚠️ Yanlış istifadəçi kateqoriyası.")
         return
-    if status == "pending":
-        show_unverified_users(c.message.chat.id, page=1, message=c.message, force_new=True)
-        return
-    show_all_users(c.message.chat.id, status, page=1, force_new=True)
+
+    logger.info(
+        f"ADMIN USERLIST CLICK status={status} chat_id={c.message.chat.id}"
+    )
+
+    try:
+        show_all_users(
+            c.message.chat.id,
+            status=status,
+            page=1,
+            message=None,
+            force_new=True
+        )
+    except Exception:
+        logger.exception("show_all_users crashed")
+        safe_send(
+            c.message.chat.id,
+            "❌ İstifadəçilər yüklənərkən xəta baş verdi."
+        )
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_u:"))
@@ -14339,8 +14355,8 @@ def delete_user_fully(chat_id: int):
 
 
 def show_all_users(chat_id, status="active", page: int = 1, message=None, force_new: bool = False):
-    conn = None
     try:
+        conn = None
         logger.info("show_all_users start status=%s page=%s", status, page)
         page = max(1, int(page or 1))
         if status == "pending":
@@ -14649,8 +14665,11 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
             except Exception:
                 pass
     except Exception:
-        logger.exception("show_all_users failed")
-        safe_send(chat_id, "❌ İstifadəçilər yüklənərkən xəta baş verdi.")
+        logger.exception("show_all_users fatal error")
+        safe_send(
+            chat_id,
+            "❌ İstifadəçi siyahısı açıla bilmədi. Loglara baxın."
+        )
     finally:
         try:
             conn.close()
