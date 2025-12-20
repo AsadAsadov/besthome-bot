@@ -20,18 +20,15 @@ import random
 import shutil
 import tempfile
 import html
-import logging
 import json
 from datetime import datetime, date, timedelta, timezone
 from collections import defaultdict
-from functools import wraps
 from typing import Optional, Tuple, List, Dict, Any
 from urllib.parse import quote, unquote, urlsplit, urlunsplit, parse_qs, urlencode
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 import requests
 from flask import Flask
-import telebot
 from telebot import types
 
 # ==============================
@@ -48,19 +45,16 @@ REFERRAL_REWARD_DAYS = 3
 REFERRAL_MILESTONE_COUNT = 10
 REFERRAL_MILESTONE_BONUS_DAYS = 45
 
+from config import ADMIN_IDS, PRIMARY_ADMIN_ID
+from core.bot_instance import bot
+from core.guards import callback_guard, safe_answer_callback_query
+from core.logging import logger
+
 # ==============================
 # 🔐 BOT KONFİQURASİYASI
 # ==============================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError(
-        "BOT_TOKEN env dəyişəni tapılmadı. Zəhmət olmasa BOT_TOKEN dəyərini təyin edin."
-    )
-
-ADMIN_ID = 1311851277
+ADMIN_ID = PRIMARY_ADMIN_ID
 CHANNEL_ID = -1001878623087  # Bot bu kanalda admin olmalıdır
-
-bot = telebot.TeleBot(BOT_TOKEN)
 
 # ==============================
 # 💾 DATABASE KONFİQURASİYASI
@@ -91,12 +85,6 @@ customer_request_state = {}
 agent_request_lookup_state = {}
 admin_customer_request_state = {}
 CUSTOMER_REQUEST_COOLDOWN_SECONDS = 300
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
-logger = logging.getLogger("besthome_bot")
 
 BOT_USERNAME = bot.get_me().username
 user_state = {}  # Yeni elan proses state
@@ -288,42 +276,6 @@ def safe_admin_step(chat_id: int, text: str, **kwargs):
         safe_send(chat_id, text, **kwargs)
     except Exception:
         logger.exception("Admin send failed chat_id=%s text=%s", chat_id, text)
-
-
-def safe_answer_callback_query(callback_id: Optional[str], text: Optional[str] = None, **kwargs):
-    if not callback_id:
-        return
-    try:
-        bot.answer_callback_query(callback_id, text, **kwargs)
-    except Exception:
-        logger.exception("answer_callback_query failed callback_id=%s", callback_id)
-
-
-def callback_guard(handler):
-    @wraps(handler)
-    def wrapper(call):
-        safe_answer_callback_query(call.id)
-        logger.info(
-            "callback entry handler=%s chat_id=%s from=%s data=%s",
-            handler.__name__,
-            getattr(getattr(call, "message", None), "chat", None).id if getattr(call, "message", None) else None,
-            getattr(getattr(call, "from_user", None), "id", None),
-            getattr(call, "data", None),
-        )
-        try:
-            return handler(call)
-        except Exception as exc:
-            logger.exception("Callback failed data=%s", getattr(call, "data", None))
-            chat_id = None
-            if call and getattr(call, "message", None):
-                chat_id = call.message.chat.id
-            notify_chat_id = chat_id if chat_id and is_admin(chat_id) else ADMIN_ID
-            if notify_chat_id is not None:
-                safe_admin_step(
-                    notify_chat_id,
-                    f"⚠️ Xəta oldu: {exc} (chat_id={chat_id})",
-                )
-    return wrapper
 
 
 def run_with_timeout(step_name: str, timeout_seconds: int, func, *args, **kwargs):
@@ -1555,7 +1507,7 @@ def ensure_fts_tables():
 
 
 def is_admin(chat_id: int) -> bool:
-    return chat_id == ADMIN_ID
+    return chat_id in ADMIN_IDS
 
 
 def format_price(v) -> str:
@@ -3940,7 +3892,7 @@ def start_cmd(message):
         send_payment_menu(chat_id)
 
     # 🧩 Admin üçün avtomatik təsdiq
-    if chat_id == ADMIN_ID:
+    if ADMIN_ID is not None and chat_id == ADMIN_ID:
         cur.execute(
             "UPDATE users SET approved=1, is_admin=1 WHERE chat_id=?", (chat_id,)
         )
@@ -5258,7 +5210,8 @@ def notify_admin_complaint(message, category: str, user_text: str):
             "✉️ Cavab yaz", callback_data=f"complaint_reply:{complaint_id}:{chat_id}"
         )
     )
-    bot.send_message(ADMIN_ID, text, reply_markup=mk)
+    if ADMIN_ID is not None:
+        bot.send_message(ADMIN_ID, text, reply_markup=mk)
 
 
 @bot.message_handler(func=lambda m: m.text == "📩 Şikayət və təkliflər")
@@ -5582,7 +5535,8 @@ def cb_demo_activate(c):
         "⏳ Demo bitmə tarixi:\n"
         f"{expires.strftime('%d.%m.%Y %H:%M')}"
     )
-    bot.send_message(ADMIN_ID, admin_text)
+    if ADMIN_ID is not None:
+        bot.send_message(ADMIN_ID, admin_text)
     reset_user_state(chat_id)
     reset_search_state(chat_id)
     send_main_menu(chat_id)
@@ -5619,7 +5573,8 @@ def cb_paydone(c):
             "❌ Ləğv et", callback_data=f"payadm|rej|{chat_id}|{plan_key}"
         ),
     )
-    bot.send_message(ADMIN_ID, admin_text, reply_markup=mk)
+    if ADMIN_ID is not None:
+        bot.send_message(ADMIN_ID, admin_text, reply_markup=mk)
     bot.send_message(chat_id, "✅ Ödəniş sorğunuz adminə göndərildi. Nəticə barədə məlumat veriləcək.")
     try:
         bot.answer_callback_query(c.id, "Admin təsdiqi gözlənilir")
@@ -6095,7 +6050,10 @@ def step_link(message):
             types.InlineKeyboardButton("✅ Təsdiqlə", callback_data=f"admin_approve:{new_id}"),
             types.InlineKeyboardButton("❌ Sil", callback_data=f"admin_delete:{new_id}"),
         )
-        bot.send_message(ADMIN_ID, preview, parse_mode="Markdown", reply_markup=mk)
+        if ADMIN_ID is not None:
+            bot.send_message(
+                ADMIN_ID, preview, parse_mode="Markdown", reply_markup=mk
+            )
     except:
         pass
 
@@ -17220,7 +17178,7 @@ def cb_unhandled_callback(c):
     safe_answer_callback_query(c.id)
 
 
-if __name__ == "__main__":
+def start_bot_server():
     print("⚙️ BestHome Unified Bot FULL v9 işə düşür...")
     init_local_db()
     migrate_user_statuses()
