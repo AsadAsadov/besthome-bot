@@ -14148,18 +14148,18 @@ def cb_userlist(c):
     if not is_admin(c.from_user.id):
         safe_answer_callback_query(c.id, "⛔ İcazə yoxdur")
         return
-    logger.info(
-        "userlist callback chat_id=%s from=%s data=%s",
-        c.message.chat.id,
-        c.from_user.id,
-        c.data,
-    )
     try:
         status = c.data.split("|", 1)[1]
     except Exception:
         status = "active"
-    if status not in USERLIST_STATUS_FILTERS:
-        status = "active"
+    logger.info(
+        "Admin userlist callback status=%s chat_id=%s",
+        status,
+        c.message.chat.id,
+    )
+    if status not in {"active", "demo", "blocked", "pending", "free", "rejected"}:
+        safe_send(c.message.chat.id, "⚠️ Yanlış istifadəçi kateqoriyası.")
+        return
     if status == "pending":
         show_unverified_users(c.message.chat.id, page=1, message=c.message, force_new=True)
         return
@@ -14341,7 +14341,7 @@ def delete_user_fully(chat_id: int):
 def show_all_users(chat_id, status="active", page: int = 1, message=None, force_new: bool = False):
     conn = None
     try:
-        logger.info("show_all_users start chat_id=%s status=%s page=%s", chat_id, status, page)
+        logger.info("show_all_users start status=%s page=%s", status, page)
         page = max(1, int(page or 1))
         if status == "pending":
             show_unverified_users(chat_id, page=page, message=message, force_new=force_new)
@@ -14427,7 +14427,7 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
             conn.close()
             mk = types.InlineKeyboardMarkup()
             mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="adm|users"))
-            text = f"❌ {parts['title']} tapılmadı."
+            text = "❗ Bu kateqoriyada istifadəçi tapılmadı."
             try:
                 if message and not force_new:
                     bot.edit_message_text(
@@ -14460,13 +14460,13 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
             (*parts["params"], PAGE_SIZE_USERS, offset),
         )
         rows = cur.fetchall()
-        logger.info(
-            "users fetch query done chat_id=%s status=%s rows=%s",
-            chat_id,
-            status,
-            len(rows),
-        )
+        logger.info("show_all_users rows_count=%s", len(rows))
         columns = [desc[0] for desc in (cur.description or [])]
+
+        if not rows:
+            conn.close()
+            safe_send(chat_id, "❗ Bu kateqoriyada istifadəçi tapılmadı.")
+            return
 
         admin_user_page_state[(chat_id, status)] = page
 
@@ -14648,12 +14648,9 @@ def show_all_users(chat_id, status="active", page: int = 1, message=None, force_
                 bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=mk)
             except Exception:
                 pass
-    except Exception as e:
+    except Exception:
         logger.exception("show_all_users failed")
-        safe_send(
-            chat_id,
-            f"⚠️ İstifadəçilər siyahısı yüklənərkən xəta oldu. Loglara baxın. {e}",
-        )
+        safe_send(chat_id, "❌ İstifadəçilər yüklənərkən xəta baş verdi.")
     finally:
         try:
             conn.close()
