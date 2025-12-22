@@ -1958,8 +1958,6 @@ def resolve_extension_base(chat_id: int) -> datetime:
     return now
 
 
-
-
 def get_user_record(chat_id: int) -> Optional[dict]:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -1994,7 +1992,11 @@ def get_user_computed_status(chat_id: int) -> Optional[str]:
     conn.close()
     if not row:
         return None
-    return row["computed_status"] if isinstance(row, dict) or hasattr(row, "keys") else row[0]
+    return (
+        row["computed_status"]
+        if isinstance(row, dict) or hasattr(row, "keys")
+        else row[0]
+    )
 
 
 def is_user_active(chat_id: int) -> bool:
@@ -3030,7 +3032,7 @@ def check_subscription(chat_id: int, silent: bool = False) -> bool:
         if not silent:
             try:
                 bot.send_message(
-                    chat_id, "❌ Hesabınız deaktiv edilib. Dəstək ilə əlaqə saxlayın."
+                    chat_id, "❌ Hesabınız deaktiv edilib. Admin ilə əlaqə saxlayın @esedovesed."
                 )
             except Exception:
                 pass
@@ -4351,7 +4353,7 @@ def start_cmd(message):
     user_status = get_user_computed_status(chat_id)
     if user_status == "BLOCKED":
         bot.send_message(
-            chat_id, "❌ Hesabınız deaktiv edilib. Dəstək ilə əlaqə saxlayın."
+            chat_id, "❌ Hesabınız deaktiv edilib. Admin ilə əlaqə saxlayın @esedovesed."
         )
         return
 
@@ -13957,7 +13959,9 @@ def show_admin_promo_list(chat_id: int, page: int = 1):
         mk.add(*nav_buttons)
 
     mk.add(
-        types.InlineKeyboardButton(TEXTS_AZ["admin_promo_back"], callback_data="adm|promos")
+        types.InlineKeyboardButton(
+            TEXTS_AZ["admin_promo_back"], callback_data="adm|promos"
+        )
     )
     bot.send_message(chat_id, txt, reply_markup=mk)
 
@@ -14113,7 +14117,9 @@ def show_admin_promo_stats(chat_id: int, page: int = 1):
     if nav_buttons:
         mk.add(*nav_buttons)
     mk.add(
-        types.InlineKeyboardButton(TEXTS_AZ["admin_promo_back"], callback_data="adm|promos")
+        types.InlineKeyboardButton(
+            TEXTS_AZ["admin_promo_back"], callback_data="adm|promos"
+        )
     )
 
     bot.send_message(chat_id, txt, reply_markup=mk)
@@ -14529,7 +14535,7 @@ def cb_subscription_control(c):
             conn.commit()
             conn.close()
             try:
-                bot.send_message(uid, f"? Hesab?n?z {days} g?n uzad?ld?")
+                bot.send_message(uid, f"✅ Hesabınız {days} gün uzadıldı")
             except Exception:
                 pass
     elif action == "stop":
@@ -14564,7 +14570,7 @@ def cb_subscription_control(c):
             except Exception:
                 pass
         try:
-            bot.send_message(uid, "? Hesab?n?z deaktiv edildi")
+            bot.send_message(uid, "🛑 Hesabınız deaktiv edildi")
         except Exception:
             pass
     elif action == "act":
@@ -14585,7 +14591,7 @@ def cb_subscription_control(c):
         conn.commit()
         conn.close()
         try:
-            bot.send_message(uid, "? Hesab?n?z aktivl??dirildi")
+            bot.send_message(uid, "✅ Hesabınız aktivləşdirildi")
         except Exception:
             pass
 
@@ -15124,7 +15130,7 @@ def activate_user_for_days(user_id: int, days: int):
     conn.close()
     logger.info("Admin activated user_id=%s days=%s", user_id, days)
     try:
-        bot.send_message(user_id, f"? Hesab?n?z {days} g?n aktiv edildi")
+        bot.send_message(user_id, f"✅ Hesabınız {days} gün aktiv edildi")
     except Exception:
         pass
 
