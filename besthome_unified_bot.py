@@ -1893,10 +1893,8 @@ def admin_effective_expires_expr() -> str:
 
 def admin_user_status_subquery() -> str:
     return (
-        "(SELECT u.chat_id, u.full_name, u.username, u.blocked, "
-        "uw.effective_expires_at, uw.computed_status "
-        "FROM users_with_status uw "
-        "JOIN users u ON u.chat_id = uw.chat_id)"
+        "(SELECT chat_id, full_name, username, effective_expires_at, computed_status "
+        "FROM users_with_status)"
     )
 
 
@@ -14917,25 +14915,10 @@ def show_all_users(
         base_query = admin_user_status_subquery()
         where_clause, params = admin_user_status_where(list_status)
 
-        schema = detect_users_schema()
-        columns = schema.get("columns", set())
-
         if list_status in ("active", "expired", "demo"):
             order_clause = "ORDER BY CAST(effective_expires_at AS INTEGER) DESC"
-        elif list_status == "blocked":
-            order_col = _select_first_column(
-                columns,
-                ["blocked_at", "joined_at", "created_at", "id"],
-                fallback="chat_id",
-            )
-            order_clause = f"ORDER BY datetime({order_col}) DESC" if order_col else ""
         else:
-            order_col = _select_first_column(
-                columns,
-                ["request_sent_at", "joined_at", "created_at", "id"],
-                fallback="chat_id",
-            )
-            order_clause = f"ORDER BY datetime({order_col}) ASC" if order_col else ""
+            order_clause = "ORDER BY chat_id ASC"
 
         logger.info(
             "users count query start chat_id=%s status=%s where=%s",
@@ -15012,15 +14995,19 @@ def show_all_users(
             username_value = f"@{username}" if username else "-"
             computed_status = _row_value_safe(row, "computed_status")
             expiry_raw = _row_value_safe(row, "effective_expires_at")
-            remaining_text = format_remaining_days_for_ui(computed_status, expiry_raw)
+            if list_status == "pending":
+                expiry_text = "—"
+                remaining_text = "—"
+            else:
+                expiry_text = format_effective_expiry_for_ui(expiry_raw)
+                remaining_text = format_remaining_days_for_ui(computed_status, expiry_raw)
 
             entry_lines = [
                 f"[{idx}]",
                 f"{TEXTS_AZ['admin_userlist_entry_name']}: {name}",
                 f"{TEXTS_AZ['admin_userlist_entry_id']}: {uid}",
                 f"{TEXTS_AZ['admin_userlist_entry_username']}: {username_value}",
-                f"{TEXTS_AZ['admin_userlist_entry_expiry']}: "
-                f"{format_effective_expiry_for_ui(expiry_raw)}",
+                f"{TEXTS_AZ['admin_userlist_entry_expiry']}: {expiry_text}",
                 f"{TEXTS_AZ['admin_userlist_entry_remaining']}: {remaining_text}",
             ]
 
@@ -15337,11 +15324,10 @@ def show_pending_users(chat_id):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT u.chat_id, u.full_name, u.username
-        FROM users_with_status uw
-        JOIN users u ON u.chat_id = uw.chat_id
-        WHERE uw.computed_status = 'PENDING'
-        ORDER BY u.chat_id ASC
+        SELECT chat_id, full_name, username
+        FROM users_with_status
+        WHERE computed_status = 'PENDING'
+        ORDER BY chat_id ASC
         LIMIT 100
         """,
     )
