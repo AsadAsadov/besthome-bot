@@ -1222,6 +1222,54 @@ def init_local_db():
     """
     )
 
+    cur.execute("DROP VIEW IF EXISTS users_with_status")
+    cur.execute(
+        """
+        CREATE VIEW users_with_status AS
+        SELECT
+            u.chat_id,
+            u.full_name,
+            u.username,
+            u.approved,
+            u.blocked,
+
+            -- effective_expires_at ALWAYS as unix timestamp
+            MAX(
+                COALESCE(strftime('%s', s.expires_at), 0),
+                COALESCE(strftime('%s', u.demo_end_at), 0),
+                CASE
+                    WHEN u.promo_active = 1
+                    THEN COALESCE(strftime('%s', u.promo_expires_at), 0)
+                    ELSE 0
+                END
+            ) AS effective_expires_at,
+
+            CASE
+                WHEN u.blocked = 1 THEN 'BLOCKED'
+                WHEN u.approved = 0 THEN 'PENDING'
+                WHEN
+                    MAX(
+                        COALESCE(strftime('%s', s.expires_at), 0),
+                        COALESCE(strftime('%s', u.demo_end_at), 0),
+                        CASE
+                            WHEN u.promo_active = 1
+                            THEN COALESCE(strftime('%s', u.promo_expires_at), 0)
+                            ELSE 0
+                        END
+                    ) > strftime('%s','now')
+                THEN 'ACTIVE'
+                ELSE 'EXPIRED'
+            END AS computed_status
+
+        FROM users u
+        LEFT JOIN subscriptions s
+            ON s.chat_id = u.chat_id
+            AND s.is_active = 1
+
+        GROUP BY u.chat_id, u.full_name, u.username, u.approved, u.blocked
+        """
+    )
+
     # Ödənişlər
     cur.execute(
         """
