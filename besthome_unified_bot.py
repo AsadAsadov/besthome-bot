@@ -9877,46 +9877,32 @@ def query_keyword_results(
                     break
         return list(dict.fromkeys(selected))
 
-    def build_multi_like_sql(fields):
-        if not fields:
+    def build_keyword_where(fields: List[str], tokens: List[str]) -> Tuple[str, List[str]]:
+        if not fields or not tokens:
             return "1=0", []
-        sql_parts = []
+        token_clauses = []
         params = []
-        for w in words:
-            part = "(" + " OR ".join(
-                ["LOWER(COALESCE(" + f + ", '')) LIKE ?" for f in fields]
-            ) + ")"
-            sql_parts.append(part)
-            like = f"%{w}%"
-            params.extend([like] * len(fields))
-        sql = " AND ".join(sql_parts)
-        return sql, params
+        for token in tokens:
+            like = "%" + token.lower() + "%"
+            field_clauses = []
+            for col in fields:
+                field_clauses.append("LOWER(COALESCE({}, '')) LIKE ?".format(col))
+                params.append(like)
+            token_clauses.append("(" + " OR ".join(field_clauses) + ")")
+        return " AND ".join(token_clauses), params
 
     results = []
 
     if os.path.exists(MAIN_DB):
         conn = get_main_conn()
         cur = conn.cursor()
-        if is_fts_ready(conn, "listings_fts"):
-            match_q = build_fts_match(words)
-            cur.execute(
-                """
-                SELECT l.* FROM listings l
-                JOIN listings_fts f ON l.id = f.rowid
-                WHERE l.operation = ? AND listings_fts MATCH ?
-                ORDER BY l.date_read DESC LIMIT 5000
-                """,
-                (op_main, match_q),
-            )
-        else:
-            fields_main = build_keyword_columns(cur, "listings")
-            sql_where, params = build_multi_like_sql(fields_main)
-            sql = (
-                "SELECT * FROM listings WHERE operation = ? AND "
-                + sql_where
-                + " ORDER BY date_read DESC LIMIT 5000"
-            )
-            cur.execute(sql, [op_main] + params)
+        fields_main = build_keyword_columns(cur, "listings")
+        sql_where, params = build_keyword_where(fields_main, words)
+        sql = (
+            "SELECT * FROM listings WHERE operation = ? AND {} "
+            "ORDER BY date_read DESC LIMIT 5000"
+        ).format(sql_where)
+        cur.execute(sql, [op_main] + params)
         for r in cur.fetchall():
             d = dict(r)
             d["__source"] = "main"
@@ -9925,26 +9911,13 @@ def query_keyword_results(
 
     conn = get_local_conn()
     cur = conn.cursor()
-    if is_fts_ready(conn, "local_listings_fts"):
-        match_q = build_fts_match(words)
-        cur.execute(
-            """
-            SELECT l.* FROM listings_approved l
-            JOIN local_listings_fts f ON l.id = f.rowid
-            WHERE l.operation = ? AND local_listings_fts MATCH ?
-            ORDER BY l.date_added DESC LIMIT 5000
-            """,
-            (op_local, match_q),
-        )
-    else:
-        fields_local = build_keyword_columns(cur, "listings_approved")
-        sql_where, params = build_multi_like_sql(fields_local)
-        sql = (
-            "SELECT * FROM listings_approved WHERE operation = ? AND "
-            + sql_where
-            + " ORDER BY date_added DESC LIMIT 5000"
-        )
-        cur.execute(sql, [op_local] + params)
+    fields_local = build_keyword_columns(cur, "listings_approved")
+    sql_where, params = build_keyword_where(fields_local, words)
+    sql = (
+        "SELECT * FROM listings_approved WHERE operation = ? AND {} "
+        "ORDER BY date_added DESC LIMIT 5000"
+    ).format(sql_where)
+    cur.execute(sql, [op_local] + params)
     for r in cur.fetchall():
         d = dict(r)
         d["__source"] = "local"
@@ -14743,6 +14716,8 @@ def format_display_date(dt_raw: Optional[str]) -> str:
 
 
 def normalize_effective_expiry(raw: Optional[Union[str, datetime]]) -> Optional[datetime]:
+    if raw in (None, 0, "0"):
+        return None
     if isinstance(raw, datetime):
         dt = raw
     else:
