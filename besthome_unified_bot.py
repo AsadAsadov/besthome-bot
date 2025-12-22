@@ -4078,12 +4078,9 @@ def send_with_reply_keyboard(
 def send_main_menu(chat_id: int):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     buttons = [
-        "📝 Yeni elan əlavə et",
         "🔎 Axtarış sistemi",
-        "📝 Ev axtarıram",
         "🆕 Bu gün daxil olan elanlar",
         "📂 Elan statusları",
-        "⭐ Favorilərim",
         "📋 Elanlarım",
         "💳 Ödəniş",
         "ℹ️ Haqqında",
@@ -4107,6 +4104,7 @@ def build_search_menu_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("🏠 Satılır", "🏢 Kirayə verilir")
     kb.row("🔍 Açar sözlə axtar", "📞 Nömrə ilə axtar")
+    kb.row("📝 Yeni elan əlavə et", "📝 Ev axtarıram")
     kb.row("⭐ Favorilərim", "🔔 Bildirişlərim")
     kb.row("⬅️ Əsas menyuya qayıt")
     return kb
@@ -9923,6 +9921,15 @@ def query_keyword_results(
                     break
         return list(dict.fromkeys(selected))
 
+    def find_dedup_column(cur: sqlite3.Cursor, table: str) -> Optional[str]:
+        cur.execute("PRAGMA table_info(" + table + ")")
+        cols = {row[1].lower(): row[1] for row in cur.fetchall()}
+        for name in ("listing_id", "id", "link"):
+            col = cols.get(name)
+            if col:
+                return col
+        return None
+
     def build_keyword_where(fields: List[str], tokens: List[str]) -> Tuple[str, List[str]]:
         if not fields or not tokens:
             return "1=0", []
@@ -9935,7 +9942,7 @@ def query_keyword_results(
                 field_clauses.append("LOWER(COALESCE({}, '')) LIKE ?".format(col))
                 params.append(like)
             token_clauses.append("(" + " OR ".join(field_clauses) + ")")
-        return " AND ".join(token_clauses), params
+        return "(" + " OR ".join(token_clauses) + ")", params
 
     results = []
 
@@ -9943,12 +9950,21 @@ def query_keyword_results(
         conn = get_main_conn()
         cur = conn.cursor()
         fields_main = build_keyword_columns(cur, "listings")
+        dedup_col_main = find_dedup_column(cur, "listings")
         sql_where, params = build_keyword_where(fields_main, words)
-        sql = (
-            "SELECT * FROM listings WHERE operation = ? AND {} "
-            "ORDER BY date_read DESC LIMIT 5000"
-        ).format(sql_where)
-        cur.execute(sql, [op_main] + params)
+        if dedup_col_main:
+            sql = (
+                "SELECT * FROM listings WHERE {dedup} IN ("
+                "SELECT DISTINCT {dedup} FROM listings WHERE operation = ? AND {where}"
+                ") ORDER BY date_read DESC LIMIT 5000"
+            ).format(dedup=dedup_col_main, where=sql_where)
+            cur.execute(sql, [op_main] + params)
+        else:
+            sql = (
+                "SELECT DISTINCT * FROM listings WHERE operation = ? AND {where} "
+                "ORDER BY date_read DESC LIMIT 5000"
+            ).format(where=sql_where)
+            cur.execute(sql, [op_main] + params)
         for r in cur.fetchall():
             d = dict(r)
             d["__source"] = "main"
@@ -9958,12 +9974,22 @@ def query_keyword_results(
     conn = get_local_conn()
     cur = conn.cursor()
     fields_local = build_keyword_columns(cur, "listings_approved")
+    dedup_col_local = find_dedup_column(cur, "listings_approved")
     sql_where, params = build_keyword_where(fields_local, words)
-    sql = (
-        "SELECT * FROM listings_approved WHERE operation = ? AND {} "
-        "ORDER BY date_added DESC LIMIT 5000"
-    ).format(sql_where)
-    cur.execute(sql, [op_local] + params)
+    if dedup_col_local:
+        sql = (
+            "SELECT * FROM listings_approved WHERE {dedup} IN ("
+            "SELECT DISTINCT {dedup} FROM listings_approved "
+            "WHERE operation = ? AND {where}"
+            ") ORDER BY date_added DESC LIMIT 5000"
+        ).format(dedup=dedup_col_local, where=sql_where)
+        cur.execute(sql, [op_local] + params)
+    else:
+        sql = (
+            "SELECT DISTINCT * FROM listings_approved WHERE operation = ? AND {where} "
+            "ORDER BY date_added DESC LIMIT 5000"
+        ).format(where=sql_where)
+        cur.execute(sql, [op_local] + params)
     for r in cur.fetchall():
         d = dict(r)
         d["__source"] = "local"
@@ -17424,12 +17450,9 @@ def run_bot(polling_started: Optional[threading.Event] = None):
 def main_menu(chat_id):
     mk = types.ReplyKeyboardMarkup(resize_keyboard=True)
     buttons = [
-        "📝 Yeni elan əlavə et",
         "🔎 Axtarış sistemi",
-        "📝 Ev axtarıram",
         "🆕 Bu gün daxil olan elanlar",
         "📂 Elan statusları",
-        "⭐ Favorilərim",
         "📋 Elanlarım",
         "💳 Ödəniş",
         "ℹ️ Haqqında",
