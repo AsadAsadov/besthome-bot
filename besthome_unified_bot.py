@@ -1853,39 +1853,16 @@ def _row_value_safe(row, key: str, default=None):
 def resolve_user_status(
     user_row,
 ) -> Literal["active", "demo", "expired", "unverified", "blocked", "rejected"]:
-    blocked_raw = _row_value_safe(user_row, "blocked", 0) or 0
-    approved_raw = _row_value_safe(user_row, "approved", 0) or 0
-    status_raw = _row_value_safe(user_row, "status")
-    paid_until_raw = _row_value_safe(user_row, "paid_until")
-    demo_end_raw = _row_value_safe(
-        user_row, "demo_end_at", _row_value_safe(user_row, "demo_expires_at")
-    )
-
-    try:
-        blocked = int(blocked_raw)
-    except Exception:
-        blocked = 0
-    try:
-        approved = int(approved_raw)
-    except Exception:
-        approved = 0
-
-    if blocked == 1:
+    chat_id = _row_value_safe(user_row, "chat_id")
+    status = get_user_computed_status(chat_id) if chat_id else None
+    if status == "BLOCKED":
         return "blocked"
-    if approved == 0:
+    if status == "PENDING":
         return "unverified"
-    if status_raw == STATUS_REJECTED or status_raw == "rejected":
-        return "rejected"
-
-    now = datetime.utcnow()
-    paid_until = parse_dt_safe(paid_until_raw)
-    if paid_until:
-        return "active" if paid_until > now else "expired"
-
-    demo_end_at = parse_dt_safe(demo_end_raw)
-    if demo_end_at:
-        return "demo" if demo_end_at > now else "expired"
-
+    if status == "ACTIVE":
+        return "active"
+    if status == "EXPIRED":
+        return "expired"
     return "expired"
 
 
@@ -1916,52 +1893,37 @@ def admin_effective_expires_expr() -> str:
 
 def admin_user_status_subquery() -> str:
     return (
-        "(SELECT u.*, "
-        + admin_effective_expires_expr()
-        + " AS effective_expires_at FROM users u)"
+        "(SELECT u.*, uw.effective_expires_at, uw.computed_status "
+        "FROM users_with_status uw "
+        "JOIN users u ON u.chat_id = uw.chat_id)"
     )
 
 
 def admin_user_status_case_sql() -> str:
-    return (
-        "CASE "
-        "WHEN blocked=1 THEN 'blocked' "
-        "WHEN approved=0 AND blocked=0 THEN 'pending' "
-        "WHEN approved=1 AND blocked=0 "
-        "AND effective_expires_at IS NOT NULL "
-        "AND datetime(effective_expires_at) > datetime('now') THEN 'active' "
-        "WHEN approved=1 AND blocked=0 "
-        "AND (effective_expires_at IS NULL OR datetime(effective_expires_at) <= datetime('now')) THEN 'expired' "
-        "ELSE 'unknown' END"
-    )
-
-
-def admin_user_demo_where() -> str:
-    demo_expr = admin_datetime_expr("demo_end_at")
-    return (
-        "approved=1 AND blocked=0 "
-        "AND demo_end_at IS NOT NULL "
-        f"AND {demo_expr} > datetime('now')"
-    )
+    return "computed_status"
 
 
 def admin_user_status_where(status: str) -> tuple:
     normalized = (status or "active").lower()
     if normalized == "unverified":
         normalized = "pending"
-    if normalized == "demo":
-        return admin_user_demo_where(), ()
-    allowed = {"active", "expired", "pending", "blocked"}
-    if normalized not in allowed:
-        normalized = "active"
-    return f"{admin_user_status_case_sql()} = ?", (normalized,)
+    status_map = {
+        "active": "ACTIVE",
+        "expired": "EXPIRED",
+        "pending": "PENDING",
+        "blocked": "BLOCKED",
+        "demo": "DEMO",
+    }
+    computed = status_map.get(normalized, "ACTIVE")
+    return "computed_status = ?", (computed,)
 
 
 def admin_user_status_count(cur: sqlite3.Cursor, status: str) -> int:
-    base = admin_user_status_subquery()
     where_clause, params = admin_user_status_where(status)
     try:
-        cur.execute(f"SELECT COUNT(*) FROM {base} WHERE {where_clause}", params)
+        cur.execute(
+            "SELECT COUNT(*) FROM users_with_status WHERE " + where_clause, params
+        )
         row = cur.fetchone()
         return (row[0] if row else 0) or 0
     except Exception:
@@ -1972,9 +1934,9 @@ def get_effective_expires_at(chat_id: int) -> Optional[datetime]:
     conn = get_local_conn()
     cur = conn.cursor()
     try:
-        base = admin_user_status_subquery()
         cur.execute(
-            f"SELECT effective_expires_at FROM {base} WHERE chat_id=?", (chat_id,)
+            "SELECT effective_expires_at FROM users_with_status WHERE chat_id=?",
+            (chat_id,),
         )
         row = cur.fetchone()
     finally:
@@ -1985,7 +1947,7 @@ def get_effective_expires_at(chat_id: int) -> Optional[datetime]:
     if not row:
         return None
     raw = row["effective_expires_at"] if isinstance(row, sqlite3.Row) else row[0]
-    return parse_dt_safe(raw)
+    return parse_effective_expires_at(raw)
 
 
 def resolve_extension_base(chat_id: int) -> datetime:
@@ -1996,69 +1958,6 @@ def resolve_extension_base(chat_id: int) -> datetime:
     return now
 
 
-def derive_status_from_legacy(row: sqlite3.Row, now: datetime) -> str:
-    status = (
-        (row.get("status") if isinstance(row, dict) else row["status"]) if row else None
-    )
-    if status in {
-        STATUS_PENDING,
-        STATUS_ACTIVE_PAID,
-        STATUS_ACTIVE_DEMO,
-        STATUS_ACTIVE_FREE,
-        STATUS_BLOCKED,
-        STATUS_REJECTED,
-    }:
-        return status
-    if status == "active":
-        return STATUS_ACTIVE_PAID
-    if status == "demo":
-        return STATUS_ACTIVE_DEMO
-    if status == "blocked":
-        return STATUS_BLOCKED
-    if row:
-        if row["blocked"]:
-            return STATUS_BLOCKED
-        if row["approved"]:
-            return STATUS_ACTIVE_PAID
-        demo_exp = (
-            parse_dt_safe(row.get("demo_expires_at"))
-            if isinstance(row, dict)
-            else parse_dt_safe(row["demo_expires_at"])
-        )
-        if row["demo_used"] and demo_exp and demo_exp > now:
-            return STATUS_ACTIVE_DEMO
-    return STATUS_PENDING
-
-
-def migrate_user_statuses():
-    now = datetime.utcnow()
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT chat_id, status, approved, blocked, demo_used, demo_expires_at,
-               date_joined, joined_at, last_status_change_at, demo_start_at,
-               demo_end_at, paid_until
-        FROM users
-        """
-    )
-    rows = cur.fetchall()
-    for row in rows:
-        joined_at = (
-            row["joined_at"] or row["date_joined"] or datetime.utcnow().isoformat()
-        )
-        status = derive_status_from_legacy(row, now)
-        last_change = row["last_status_change_at"] or joined_at
-        cur.execute(
-            """
-            UPDATE users
-            SET status=?, joined_at=?, last_status_change_at=COALESCE(last_status_change_at, ?)
-            WHERE chat_id=?
-            """,
-            (status, joined_at, last_change, row["chat_id"]),
-        )
-    conn.commit()
-    conn.close()
 
 
 def get_user_record(chat_id: int) -> Optional[dict]:
@@ -2066,11 +1965,14 @@ def get_user_record(chat_id: int) -> Optional[dict]:
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT chat_id, full_name, username, status, joined_at, demo_start_at,
-               demo_end_at, paid_until, last_status_change_at, approved, blocked,
-               promo_active, promo_expires_at, referred_by, referral_bonus_used,
-               referral_milestone_used, demo_used, demo_expires_at, blocked_at
-        FROM users WHERE chat_id=?
+        SELECT u.chat_id, u.full_name, u.username, u.status, u.joined_at, u.demo_start_at,
+               u.demo_end_at, u.paid_until, u.last_status_change_at, u.approved, u.blocked,
+               u.promo_active, u.promo_expires_at, u.referred_by, u.referral_bonus_used,
+               u.referral_milestone_used, u.demo_used, u.demo_expires_at, u.blocked_at,
+               uw.computed_status, uw.effective_expires_at
+        FROM users u
+        LEFT JOIN users_with_status uw ON uw.chat_id = u.chat_id
+        WHERE u.chat_id=?
         """,
         (chat_id,),
     )
@@ -2078,12 +1980,39 @@ def get_user_record(chat_id: int) -> Optional[dict]:
     conn.close()
     if not row:
         return None
-    data = dict(row)
-    data["status"] = derive_status_from_legacy(row, datetime.utcnow())
-    return data
+    return dict(row)
+
+
+def get_user_computed_status(chat_id: int) -> Optional[str]:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT computed_status FROM users_with_status WHERE chat_id=?",
+        (chat_id,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return row["computed_status"] if isinstance(row, dict) or hasattr(row, "keys") else row[0]
+
+
+def is_user_active(chat_id: int) -> bool:
+    return get_user_computed_status(chat_id) == "ACTIVE"
+
+
+def parse_effective_expires_at(raw: Optional[str]) -> Optional[datetime]:
+    if raw is None:
+        return None
+    try:
+        return datetime.utcfromtimestamp(float(raw))
+    except Exception:
+        return parse_dt_safe(raw)
 
 
 def has_customer_requests_access(user_id: int) -> bool:
+    if not is_user_active(user_id):
+        return False
     conn = get_local_conn()
     cur = conn.cursor()
     cur.execute(
@@ -2416,13 +2345,59 @@ def get_user_demo_status(chat_id: int) -> dict:
     }
 
 
-def mark_demo_used(chat_id: int, expires_at: datetime):
-    update_user_status(
-        chat_id,
-        STATUS_ACTIVE_DEMO,
-        demo_start_at=datetime.utcnow(),
-        demo_end_at=expires_at,
+def update_user_demo_end(chat_id: int, demo_end_at: Optional[datetime], approve: bool):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    updates = ["demo_end_at=?", "demo_expires_at=?"]
+    params = [
+        demo_end_at.isoformat() if demo_end_at else None,
+        demo_end_at.isoformat() if demo_end_at else None,
+    ]
+    if approve:
+        updates.append("approved=1")
+    params.append(chat_id)
+    cur.execute(
+        f"UPDATE users SET {', '.join(updates)} WHERE chat_id=?",
+        params,
     )
+    conn.commit()
+    conn.close()
+
+
+def insert_subscription(
+    chat_id: int,
+    plan: str,
+    expires_at: Optional[datetime],
+    is_demo: int = 0,
+    note: Optional[str] = None,
+):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO subscriptions (chat_id, plan, expires_at, is_active, is_demo, last_payment_note)
+        VALUES (?, ?, ?, 1, ?, ?)
+        ON CONFLICT(chat_id) DO UPDATE SET
+            plan=excluded.plan,
+            expires_at=excluded.expires_at,
+            is_active=1,
+            is_demo=excluded.is_demo,
+            last_payment_note=COALESCE(excluded.last_payment_note, subscriptions.last_payment_note)
+        """,
+        (
+            chat_id,
+            plan,
+            expires_at.isoformat() if expires_at else None,
+            is_demo,
+            note,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def mark_demo_used(chat_id: int, expires_at: datetime):
+    update_user_demo_end(chat_id, expires_at, approve=True)
 
 
 def set_payment_note(chat_id: int, note: str):
@@ -3012,22 +2987,9 @@ def subscription_payment_code(chat_id: int) -> str:
 
 
 def is_demo_available(chat_id: int) -> bool:
-    record = get_user_record(chat_id)
-    status = get_user_demo_status(chat_id)
-    lifecycle_status = record.get("status") if record else STATUS_PENDING
-    if lifecycle_status in ACTIVE_STATUSES or lifecycle_status in {
-        STATUS_BLOCKED,
-        STATUS_REJECTED,
-    }:
+    status = get_user_computed_status(chat_id)
+    if status in {"ACTIVE", "BLOCKED"}:
         return False
-    if status.get("demo_used"):
-        return False
-    sub = get_subscription(chat_id)
-    now = datetime.utcnow()
-    if sub and sub.get("is_active"):
-        exp_dt = parse_subscription_expiry(sub)
-        if not exp_dt or exp_dt > now:
-            return False
     return True
 
 
@@ -3061,17 +3023,10 @@ def send_payment_menu(chat_id: int):
 
 
 def check_subscription(chat_id: int, silent: bool = False) -> bool:
-    if is_admin(chat_id):
+    status = get_user_computed_status(chat_id)
+    if status == "ACTIVE":
         return True
-
-    record = get_user_record(chat_id)
-    if not record:
-        if not silent:
-            send_payment_menu(chat_id)
-        return False
-
-    status = record.get("status", STATUS_PENDING)
-    if status == STATUS_BLOCKED:
+    if status == "BLOCKED":
         if not silent:
             try:
                 bot.send_message(
@@ -3080,98 +3035,23 @@ def check_subscription(chat_id: int, silent: bool = False) -> bool:
             except Exception:
                 pass
         return False
-    if status == STATUS_REJECTED:
-        if not silent:
-            try:
-                bot.send_message(
-                    chat_id,
-                    "❌ Sorğunuz rədd edilib. Daha sonra yenidən müraciət edə bilərsiniz.",
-                )
-            except Exception:
-                pass
-        return False
-
-    now = datetime.utcnow()
-    sub = get_subscription(chat_id)
-    paid_until = parse_dt_safe(record.get("paid_until"))
-    if not paid_until and sub and sub.get("expires_at"):
-        paid_until = parse_dt_safe(sub.get("expires_at"))
-    demo_end = parse_dt_safe(record.get("demo_end_at") or record.get("demo_expires_at"))
-
-    if status == STATUS_ACTIVE_FREE:
-        return True
-
-    if status == STATUS_ACTIVE_DEMO:
-        if demo_end and demo_end <= now:
-            update_user_status(chat_id, STATUS_PENDING)
-            if not silent:
-                try:
-                    bot.send_message(
-                        chat_id,
-                        "💳 Demo bitdi. Ödəniş edərək botdan istifadəni davam etdirə bilərsiniz.",
-                    )
-                except Exception:
-                    pass
-                send_payment_menu(chat_id)
-            return False
-        return True
-
-    if status == STATUS_ACTIVE_PAID:
-        if paid_until and paid_until <= now:
-            update_user_status(chat_id, STATUS_PENDING)
-            if sub:
-                conn = get_local_conn()
-                cur = conn.cursor()
-                cur.execute(
-                    "UPDATE subscriptions SET is_active=0 WHERE chat_id=?", (chat_id,)
-                )
-                conn.commit()
-                conn.close()
-            if not silent:
-                try:
-                    bot.send_message(
-                        chat_id,
-                        "⛔ Abunəlik müddəti bitib. Yeniləmək üçün ödəniş edin.",
-                    )
-                except Exception:
-                    pass
-                send_payment_menu(chat_id)
-            return False
-        if paid_until:
-            return True
-        update_user_status(chat_id, STATUS_PENDING)
-
     if not silent:
         send_payment_menu(chat_id)
     return False
 
 
 def is_user_allowed(chat_id: int) -> bool:
-    if is_admin(chat_id):
-        return True
-    record = get_user_record(chat_id)
-    if not record:
-        return False
-    status = record.get("status", STATUS_PENDING)
-    return status in ACTIVE_STATUSES
+    return is_user_active(chat_id)
 
 
 def ensure_allowed(message) -> bool:
     chat_id = message.chat.id
-    if is_admin(chat_id):
-        return True
-    if not check_subscription(chat_id):
-        return False
-    return True
+    return check_subscription(chat_id)
 
 
 def ensure_allowed_cb(c) -> bool:
     chat_id = c.message.chat.id
-    if is_admin(chat_id):
-        return True
-    if not check_subscription(chat_id):
-        return False
-    return True
+    return check_subscription(chat_id)
 
 
 def check_limit(chat_id: int, key_type: str, daily_limit: int) -> bool:
@@ -4436,17 +4316,14 @@ def start_cmd(message):
         if referred_by_value:
             save_referral(referred_by_value, chat_id, is_new_user=True)
 
-        update_user_status(chat_id, STATUS_PENDING)
+        cur.execute(
+            "UPDATE users SET approved=0, blocked=0 WHERE chat_id=?", (chat_id,)
+        )
     else:
         is_first_start = (
             bool(row["is_first_start"]) if row["is_first_start"] is not None else False
         )
         record = get_user_record(chat_id)
-        existing_status = record.get("status") if record else STATUS_PENDING
-        if existing_status not in ACTIVE_STATUSES.union(
-            {STATUS_BLOCKED, STATUS_REJECTED, STATUS_PENDING}
-        ):
-            update_user_status(chat_id, STATUS_PENDING)
 
     ensure_subscription_record(chat_id)
     if is_first_time:
@@ -4458,15 +4335,21 @@ def start_cmd(message):
             "UPDATE users SET approved=1, is_admin=1 WHERE chat_id=?", (chat_id,)
         )
         conn.commit()
-        update_user_status(chat_id, STATUS_ACTIVE_FREE)
+        insert_subscription(
+            chat_id,
+            "admin",
+            datetime.utcnow() + timedelta(days=3650),
+            is_demo=0,
+            note="admin_auto",
+        )
         conn.close()
         main_menu(chat_id)
         return
 
     conn.close()
 
-    user_record = get_user_record(chat_id)
-    if user_record and user_record.get("status") == STATUS_BLOCKED:
+    user_status = get_user_computed_status(chat_id)
+    if user_status == "BLOCKED":
         bot.send_message(
             chat_id, "❌ Hesabınız deaktiv edilib. Dəstək ilə əlaqə saxlayın."
         )
@@ -5716,8 +5599,7 @@ def handle_request_phone(message):
 
 
 def is_complaint_access_allowed(chat_id: int) -> bool:
-    record = get_user_record(chat_id)
-    if record and record.get("status") == STATUS_BLOCKED:
+    if get_user_computed_status(chat_id) == "BLOCKED":
         try:
             bot.send_message(chat_id, BLOCKED_MESSAGE_TEXT)
         except Exception:
@@ -6188,14 +6070,18 @@ def cb_pay_admin(c):
     if action == "ok":
         base = resolve_extension_base(uid)
         expires = base + timedelta(days=plan["days"])
-        set_subscription(
-            uid, plan["title"], expires, is_active=1, is_demo=0, note=f"plan:{plan_key}"
+        insert_subscription(
+            uid, plan["title"], expires, is_demo=0, note=f"plan:{plan_key}"
         )
+        conn = get_local_conn()
+        cur = conn.cursor()
+        cur.execute("UPDATE users SET approved=1 WHERE chat_id=?", (uid,))
+        conn.commit()
+        conn.close()
         amount_val = parse_price_value(plan.get("price")) or 0
         if amount_val > 0:
             log_approved_payment(uid, plan["title"], amount_val)
         process_referral_on_payment(uid, sub, amount_val)
-        update_user_status(uid, STATUS_ACTIVE_PAID, paid_until=expires)
         try:
             bot.send_message(
                 uid,
@@ -10009,7 +9895,7 @@ def query_keyword_results(
                 """
                 SELECT l.* FROM listings l
                 JOIN listings_fts f ON l.id = f.rowid
-                WHERE l.operation = ? AND f MATCH ?
+                WHERE l.operation = ? AND listings_fts MATCH ?
                 ORDER BY l.date_read DESC LIMIT 5000
                 """,
                 (op_main, match_q),
@@ -10036,7 +9922,7 @@ def query_keyword_results(
             """
             SELECT l.* FROM listings_approved l
             JOIN local_listings_fts f ON l.id = f.rowid
-            WHERE l.operation = ? AND f MATCH ?
+            WHERE l.operation = ? AND local_listings_fts MATCH ?
             ORDER BY l.date_added DESC LIMIT 5000
             """,
             (op_local, match_q),
@@ -10208,7 +10094,7 @@ def query_smart_results(criteria: dict, offset: int = 0, limit: int = None):
                 f"""
                 SELECT l.* FROM listings l
                 JOIN listings_fts f ON l.id = f.rowid
-                WHERE {where_clause} AND f MATCH ?
+                WHERE {where_clause} AND listings_fts MATCH ?
                 ORDER BY l.date_read DESC LIMIT 5000
                 """,
                 base_params + [match_q],
@@ -10245,7 +10131,7 @@ def query_smart_results(criteria: dict, offset: int = 0, limit: int = None):
             f"""
             SELECT l.* FROM listings_approved l
             JOIN local_listings_fts f ON l.id = f.rowid
-            WHERE {where_clause} AND f MATCH ?
+            WHERE {where_clause} AND local_listings_fts MATCH ?
             ORDER BY l.date_added DESC LIMIT 5000
             """,
             base_params + [match_q],
@@ -13417,11 +13303,7 @@ def get_demo_profile_url(user_id: int, _username: Optional[str]) -> str:
 
 
 def resolve_demo_expiry(row: sqlite3.Row) -> Optional[datetime]:
-    expiry_raw = None
-    if row["sub_is_demo"]:
-        expiry_raw = row["sub_expires_at"]
-    if not expiry_raw:
-        expiry_raw = row["demo_end_at"] or row["demo_expires_at"]
+    expiry_raw = row["demo_end_at"] or row["demo_expires_at"]
     return parse_dt_safe(expiry_raw)
 
 
@@ -13442,22 +13324,6 @@ def deactivate_expired_demo(
 ):
     if not expiry_dt:
         return
-    record = get_user_record(user_id)
-    if record and record.get("status") == STATUS_ACTIVE_DEMO:
-        paid_until = parse_dt_safe(record.get("paid_until"))
-        update_user_status(
-            user_id,
-            STATUS_PENDING,
-            demo_start_at=parse_dt_safe(record.get("demo_start_at")),
-            demo_end_at=expiry_dt,
-            paid_until=paid_until,
-        )
-    ensure_subscription_record(user_id)
-    if plan is None:
-        plan = "demo"
-    set_subscription(
-        user_id, plan, expiry_dt, is_active=0, is_demo=0, note="demo_expired"
-    )
 
 
 def build_demo_users_view(page: int = 1) -> Tuple[str, types.InlineKeyboardMarkup, int]:
@@ -13468,22 +13334,13 @@ def build_demo_users_view(page: int = 1) -> Tuple[str, types.InlineKeyboardMarku
         SELECT u.chat_id,
                u.full_name,
                u.username,
-               u.status,
                u.demo_end_at,
                u.demo_expires_at,
-               u.demo_start_at,
-               u.paid_until,
-               s.plan AS sub_plan,
-               s.expires_at AS sub_expires_at,
-               COALESCE(s.is_demo, 0) AS sub_is_demo
+               u.demo_start_at
         FROM users u
-        LEFT JOIN subscriptions s ON s.chat_id = u.chat_id
-        WHERE COALESCE(s.is_demo, 0)=1
-           OR u.status=?
-           OR u.demo_end_at IS NOT NULL
+        WHERE u.demo_end_at IS NOT NULL
            OR u.demo_expires_at IS NOT NULL
-        """,
-        (STATUS_ACTIVE_DEMO,),
+        """
     )
     rows = cur.fetchall()
     conn.close()
@@ -13498,7 +13355,7 @@ def build_demo_users_view(page: int = 1) -> Tuple[str, types.InlineKeyboardMarku
         expiry_dt = resolve_demo_expiry(row)
         is_active = bool(expiry_dt and expiry_dt > now)
         if not is_active:
-            deactivate_expired_demo(row["chat_id"], expiry_dt, row["sub_plan"])
+            deactivate_expired_demo(row["chat_id"], expiry_dt, None)
 
         remaining_days = 0
         if expiry_dt and expiry_dt > now:
@@ -13641,69 +13498,20 @@ def send_demo_users_report(chat_id: int, page: int = 1, message=None):
 
 def extend_demo_for_user(user_id: int, days: int) -> Optional[datetime]:
     record = get_user_record(user_id)
-    sub = get_subscription(user_id) or {}
     now = datetime.utcnow()
     expiry_dt = None
-    if sub.get("is_demo"):
-        expiry_dt = parse_dt_safe(sub.get("expires_at"))
     if not expiry_dt and record:
         expiry_dt = parse_dt_safe(
             record.get("demo_end_at") or record.get("demo_expires_at")
         )
     base = expiry_dt if expiry_dt and expiry_dt > now else now
     new_expiry = base + timedelta(days=days)
-
-    demo_start = parse_dt_safe(record.get("demo_start_at")) if record else None
-    if not demo_start:
-        demo_start = now
-    paid_until = parse_dt_safe(record.get("paid_until")) if record else None
-
-    update_user_status(
-        user_id,
-        STATUS_ACTIVE_DEMO,
-        demo_start_at=demo_start,
-        demo_end_at=new_expiry,
-        paid_until=paid_until,
-    )
-    set_subscription(
-        user_id,
-        sub.get("plan") or "demo",
-        new_expiry,
-        is_active=1,
-        is_demo=1,
-        note="admin_demo_extend",
-    )
+    update_user_demo_end(user_id, new_expiry, approve=True)
     return new_expiry
 
 
 def cancel_demo_for_user(user_id: int):
-    record = get_user_record(user_id)
-    paid_until = parse_dt_safe(record.get("paid_until")) if record else None
-    demo_start = parse_dt_safe(record.get("demo_start_at")) if record else None
-    update_user_status(
-        user_id,
-        STATUS_PENDING,
-        demo_start_at=demo_start,
-        demo_end_at=None,
-        paid_until=paid_until,
-    )
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE users SET demo_end_at=NULL, demo_expires_at=NULL WHERE chat_id=?",
-        (user_id,),
-    )
-    conn.commit()
-    conn.close()
-    sub = get_subscription(user_id) or {}
-    set_subscription(
-        user_id,
-        sub.get("plan") or "demo",
-        datetime.utcnow(),
-        is_active=0,
-        is_demo=0,
-        note="admin_demo_cancel",
-    )
+    update_user_demo_end(user_id, None, approve=False)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("demo_users|"))
@@ -14712,23 +14520,19 @@ def cb_subscription_control(c):
             base = resolve_extension_base(uid)
             new_exp = base + timedelta(days=days)
             plan_name = sub.get("plan") or f"manual {days}g"
-            set_subscription(
-                uid, plan_name, new_exp, is_active=1, is_demo=0, note=f"extend:{days}"
+            insert_subscription(
+                uid, plan_name, new_exp, is_demo=0, note=f"extend:{days}"
             )
-            update_user_status(uid, STATUS_ACTIVE_PAID, paid_until=new_exp)
+            conn = get_local_conn()
+            cur = conn.cursor()
+            cur.execute("UPDATE users SET approved=1 WHERE chat_id=?", (uid,))
+            conn.commit()
+            conn.close()
             try:
                 bot.send_message(uid, f"? Hesab?n?z {days} g?n uzad?ld?")
             except Exception:
                 pass
     elif action == "stop":
-        set_subscription(
-            uid,
-            sub.get("plan") or "manual",
-            exp_dt,
-            is_active=0,
-            is_demo=sub.get("is_demo") or 0,
-            note="stopped",
-        )
         try:
             conn = get_local_conn()
             cur = conn.cursor()
@@ -14768,15 +14572,18 @@ def cb_subscription_control(c):
         new_exp = (
             base if base > datetime.utcnow() else datetime.utcnow() + timedelta(days=1)
         )
-        set_subscription(
+        insert_subscription(
             uid,
             sub.get("plan") or "manual",
             new_exp,
-            is_active=1,
             is_demo=0,
             note="activated",
         )
-        update_user_status(uid, STATUS_ACTIVE_PAID, paid_until=new_exp)
+        conn = get_local_conn()
+        cur = conn.cursor()
+        cur.execute("UPDATE users SET approved=1, blocked=0 WHERE chat_id=?", (uid,))
+        conn.commit()
+        conn.close()
         try:
             bot.send_message(uid, "? Hesab?n?z aktivl??dirildi")
         except Exception:
@@ -14888,33 +14695,6 @@ def format_remaining_days_allow_negative(expiry: Optional[datetime]) -> str:
     return f"{days} gün"
 
 
-def determine_activation_status(uid: int) -> Tuple[Optional[str], Optional[datetime]]:
-    record = get_user_record(uid)
-    sub = get_subscription(uid)
-    now = datetime.utcnow()
-
-    paid_until = parse_dt_safe(record.get("paid_until")) if record else None
-    if not paid_until and sub and sub.get("expires_at"):
-        paid_until = parse_dt_safe(sub.get("expires_at"))
-
-    if sub and sub.get("is_active") and paid_until and paid_until > now:
-        return STATUS_ACTIVE_PAID, paid_until
-
-    demo_exp = None
-    if sub and sub.get("is_demo"):
-        demo_exp = parse_subscription_expiry(sub)
-    if not demo_exp:
-        demo_exp = (
-            parse_dt_safe(record.get("demo_end_at") or record.get("demo_expires_at"))
-            if record
-            else None
-        )
-    if demo_exp and demo_exp > now:
-        return STATUS_ACTIVE_DEMO, demo_exp
-
-    return None, None
-
-
 def resolve_admin_user_status(record: Optional[dict]) -> str:
     if not record:
         return "unknown"
@@ -14924,10 +14704,8 @@ def resolve_admin_user_status(record: Optional[dict]) -> str:
     conn = get_local_conn()
     cur = conn.cursor()
     try:
-        base = admin_user_status_subquery()
-        case_sql = admin_user_status_case_sql()
         cur.execute(
-            f"SELECT {case_sql} AS admin_status FROM {base} WHERE chat_id=?",
+            "SELECT computed_status AS admin_status FROM users_with_status WHERE chat_id=?",
             (uid,),
         )
         row = cur.fetchone()
@@ -15001,41 +14779,26 @@ def restore_user_to_pending(chat_id: int):
 
 
 def set_user_unlimited(chat_id: int):
-    update_user_status(chat_id, STATUS_ACTIVE_FREE)
-    try:
-        conn = get_local_conn()
-        cur = conn.cursor()
-        cur.execute(
-            "UPDATE subscriptions SET is_active=0, is_demo=0 WHERE chat_id=?",
-            (chat_id,),
-        )
-        conn.commit()
-    except Exception:
-        pass
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+    insert_subscription(
+        chat_id,
+        "free",
+        datetime.utcnow() + timedelta(days=3650),
+        is_demo=0,
+        note="admin_free",
+    )
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET approved=1, blocked=0 WHERE chat_id=?", (chat_id,))
+    conn.commit()
+    conn.close()
 
 
 def switch_user_to_paid_flow(chat_id: int):
-    update_user_status(chat_id, STATUS_PENDING)
-    try:
-        conn = get_local_conn()
-        cur = conn.cursor()
-        cur.execute(
-            "UPDATE subscriptions SET is_active=0, is_demo=0 WHERE chat_id=?",
-            (chat_id,),
-        )
-        conn.commit()
-    except Exception:
-        pass
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET approved=0 WHERE chat_id=?", (chat_id,))
+    conn.commit()
+    conn.close()
 
 
 def delete_user_fully(chat_id: int):
@@ -15084,7 +14847,7 @@ def show_all_users(
         columns = schema.get("columns", set())
 
         if list_status in ("active", "expired", "demo"):
-            order_clause = "ORDER BY datetime(effective_expires_at) DESC"
+            order_clause = "ORDER BY CAST(effective_expires_at AS INTEGER) DESC"
         elif list_status == "blocked":
             order_col = _select_first_column(
                 columns,
@@ -15176,7 +14939,7 @@ def show_all_users(
             )
 
             expiry_raw = _row_value_safe(row, "effective_expires_at")
-            expiry_dt = parse_dt_safe(expiry_raw)
+            expiry_dt = parse_effective_expires_at(expiry_raw)
 
             remaining_text = "-"
             if expiry_dt:
@@ -15347,15 +15110,18 @@ def activate_user_for_days(user_id: int, days: int):
     base = resolve_extension_base(user_id)
     new_exp = base + timedelta(days=days)
     plan_name = sub.get("plan") or f"manual {days}g"
-    set_subscription(
+    insert_subscription(
         user_id,
         plan_name,
         new_exp,
-        is_active=1,
         is_demo=0,
         note=f"admin_activate:{days}",
     )
-    update_user_status(user_id, STATUS_ACTIVE_PAID, paid_until=new_exp)
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET approved=1 WHERE chat_id=?", (user_id,))
+    conn.commit()
+    conn.close()
     logger.info("Admin activated user_id=%s days=%s", user_id, days)
     try:
         bot.send_message(user_id, f"? Hesab?n?z {days} g?n aktiv edildi")
@@ -15505,10 +15271,11 @@ def show_pending_users(chat_id):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT chat_id, full_name, username, joined_at
-        FROM users
-        WHERE approved=0 AND blocked=0
-        ORDER BY datetime(joined_at) ASC
+        SELECT u.chat_id, u.full_name, u.username, u.joined_at
+        FROM users_with_status uw
+        JOIN users u ON u.chat_id = uw.chat_id
+        WHERE uw.computed_status = 'PENDING'
+        ORDER BY datetime(u.joined_at) ASC
         LIMIT 100
         """,
     )
@@ -15571,20 +15338,23 @@ def cb_user_approve_action(c):
         safe_answer_callback_query(c.id, TEXTS_AZ["admin_user_not_found"])
         return
 
-    new_status, expires_at = determine_activation_status(uid)
-    if not new_status:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET approved=1 WHERE chat_id=?", (uid,))
+    conn.commit()
+    conn.close()
+
+    if not is_user_active(uid):
+        conn = get_local_conn()
+        cur = conn.cursor()
+        cur.execute("UPDATE users SET approved=0 WHERE chat_id=?", (uid,))
+        conn.commit()
+        conn.close()
         safe_answer_callback_query(c.id, TEXTS_AZ["admin_user_no_plan"])
         return
 
-    if new_status == STATUS_ACTIVE_PAID:
-        update_user_status(uid, STATUS_ACTIVE_PAID, paid_until=expires_at)
-        status_text = "?d?ni?li"
-    else:
-        demo_start = datetime.utcnow()
-        update_user_status(
-            uid, STATUS_ACTIVE_DEMO, demo_start_at=demo_start, demo_end_at=expires_at
-        )
-        status_text = "Demo"
+    status_text = "Aktiv"
+    expires_at = get_effective_expires_at(uid)
 
     apply_referral_bonus(uid)
 
@@ -15614,7 +15384,6 @@ def cb_user_demo_action(c):
     ensure_subscription_record(uid)
     expires = extend_demo_for_user(uid, days)
     if expires:
-        mark_demo_used(uid, expires)
         try:
             bot.send_message(
                 uid, f"?? Admin t?r?find?n {days} g?nl?k demo aktiv edildi!"
@@ -15674,8 +15443,17 @@ def cb_user_approve(c):
         return
     uid = int(c.data.split("|")[1])
 
-    new_status, expires_at = determine_activation_status(uid)
-    if not new_status:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET approved=1 WHERE chat_id=?", (uid,))
+    conn.commit()
+    conn.close()
+    if not is_user_active(uid):
+        conn = get_local_conn()
+        cur = conn.cursor()
+        cur.execute("UPDATE users SET approved=0 WHERE chat_id=?", (uid,))
+        conn.commit()
+        conn.close()
         bot.answer_callback_query(c.id, "⚠️ Aktiv plan tapılmadı")
         bot.send_message(
             c.message.chat.id,
@@ -15683,15 +15461,8 @@ def cb_user_approve(c):
         )
         return
 
-    if new_status == STATUS_ACTIVE_PAID:
-        update_user_status(uid, STATUS_ACTIVE_PAID, paid_until=expires_at)
-        status_text = "💳 Ödənişli"
-    else:
-        demo_start = datetime.utcnow()
-        update_user_status(
-            uid, STATUS_ACTIVE_DEMO, demo_start_at=demo_start, demo_end_at=expires_at
-        )
-        status_text = "🎁 Demo"
+    status_text = "✅ Aktiv"
+    expires_at = get_effective_expires_at(uid)
 
     apply_referral_bonus(uid)
 
@@ -15732,8 +15503,8 @@ def broadcast_bot_update(admin_chat_id):
     conn = get_local_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT chat_id FROM users WHERE status NOT IN (?, ?)",
-        (STATUS_BLOCKED, STATUS_REJECTED),
+        "SELECT chat_id FROM users_with_status WHERE computed_status = ?",
+        ("ACTIVE",),
     )
     rows = cur.fetchall()
     conn.close()
@@ -17486,84 +17257,29 @@ def subscription_notifier():
         try:
             conn = get_local_conn()
             cur = conn.cursor()
-            cur.execute("SELECT chat_id, expires_at, is_active FROM subscriptions")
+            cur.execute(
+                """
+                SELECT chat_id, effective_expires_at
+                FROM users_with_status
+                WHERE computed_status='ACTIVE'
+                  AND effective_expires_at IS NOT NULL
+                  AND CAST(effective_expires_at AS INTEGER)
+                      BETWEEN strftime('%s','now') AND strftime('%s','now','+1 day')
+                """
+            )
             rows = cur.fetchall()
             conn.close()
-            now = datetime.utcnow()
-            for chat_id, expires_at, is_active in rows:
-                if not expires_at:
-                    continue
-                try:
-                    exp_dt = datetime.fromisoformat(str(expires_at))
-                except Exception:
-                    continue
-
-                if is_active and exp_dt <= now:
-                    conn2 = get_local_conn()
-                    cur2 = conn2.cursor()
-                    cur2.execute(
-                        "UPDATE subscriptions SET is_active=0 WHERE chat_id=?",
-                        (chat_id,),
-                    )
-                    conn2.commit()
-                    conn2.close()
-                    update_user_status(chat_id, STATUS_PENDING)
+            for chat_id, exp_ts in rows:
+                key = (chat_id, exp_ts)
+                if key not in subscription_warn_cache:
                     try:
-                        bot.send_message(chat_id, "⛔ Hesabınızın müddəti bitdi")
+                        bot.send_message(
+                            chat_id,
+                            "⚠️ Hesabınızın bitməsinə 1 gün qalıb",
+                        )
                     except Exception:
                         pass
-                    continue
-
-                if is_active and timedelta(0) < (exp_dt - now) <= timedelta(days=1):
-                    key = (chat_id, exp_dt.date())
-                    if key not in subscription_warn_cache:
-                        try:
-                            bot.send_message(
-                                chat_id,
-                                "⚠️ Hesabınızın bitməsinə 1 gün qalıb",
-                            )
-                        except Exception:
-                            pass
-                        subscription_warn_cache.add(key)
-
-            conn_demo = get_local_conn()
-            cur_demo = conn_demo.cursor()
-            cur_demo.execute(
-                "SELECT chat_id, demo_end_at FROM users WHERE status=?",
-                (STATUS_ACTIVE_DEMO,),
-            )
-            demo_rows = cur_demo.fetchall()
-            conn_demo.close()
-            for demo_row in demo_rows:
-                demo_chat = demo_row["chat_id"]
-                demo_end_raw = demo_row["demo_end_at"]
-                demo_end = parse_dt_safe(demo_end_raw)
-                if not demo_end:
-                    continue
-                warn_key = (demo_chat, demo_end.date(), "warn")
-                end_key = (demo_chat, demo_end.isoformat(), "end")
-                if demo_end <= now:
-                    if end_key not in demo_warn_cache:
-                        update_user_status(demo_chat, STATUS_PENDING)
-                        try:
-                            bot.send_message(
-                                demo_chat,
-                                "💳 Demo bitdi. Ödəniş edərək botdan istifadəni davam etdirə bilərsiniz.",
-                            )
-                        except Exception:
-                            pass
-                        demo_warn_cache.add(end_key)
-                    continue
-                if timedelta(0) < (demo_end - now) <= timedelta(hours=6):
-                    if warn_key not in demo_warn_cache:
-                        try:
-                            bot.send_message(
-                                demo_chat,
-                                "🔔 Demo bitməsinə 6 saat qalıb. Davam etmək üçün ödəniş edin.",
-                            )
-                        except Exception:
-                            pass
-                        demo_warn_cache.add(warn_key)
+                    subscription_warn_cache.add(key)
         except Exception as e:
             print("Subscription notifier error:", e)
         time.sleep(3600)
@@ -17637,7 +17353,6 @@ def main():
 
     _verify_db_paths()
     init_local_db()
-    migrate_user_statuses()
     init_agents_db()
     init_main_db_indices()
     ensure_fts_tables()
