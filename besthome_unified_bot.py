@@ -25,7 +25,7 @@ import json
 from datetime import datetime, date, timedelta, timezone
 from collections import defaultdict
 from functools import wraps
-from typing import Optional, Tuple, List, Dict, Any, Literal
+from typing import Optional, Tuple, List, Dict, Any, Literal, Union
 from urllib.parse import quote, unquote, urlsplit, urlunsplit, parse_qs, urlencode
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
@@ -1893,7 +1893,8 @@ def admin_effective_expires_expr() -> str:
 
 def admin_user_status_subquery() -> str:
     return (
-        "(SELECT u.*, uw.effective_expires_at, uw.computed_status "
+        "(SELECT u.chat_id, u.full_name, u.username, u.blocked, "
+        "uw.effective_expires_at, uw.computed_status "
         "FROM users_with_status uw "
         "JOIN users u ON u.chat_id = uw.chat_id)"
     )
@@ -9856,35 +9857,40 @@ def query_keyword_results(
     op_main = detect_db_operation_value(selected_op, "main")
     op_local = detect_db_operation_value(selected_op, "local")
 
+    def build_keyword_columns(cur: sqlite3.Cursor, table: str) -> List[str]:
+        cur.execute("PRAGMA table_info(" + table + ")")
+        cols = {row[1].lower(): row[1] for row in cur.fetchall()}
+        if not cols:
+            return []
+        groups = [
+            ["title", "prop_type", "emlakin_novu"],
+            ["description", "summary", "umumi_melumat", "text", "details"],
+            ["district", "rayon", "rayon_qesebe", "region"],
+            ["address", "unvan", "adres"],
+        ]
+        selected = []
+        for group in groups:
+            for name in group:
+                col = cols.get(name.lower())
+                if col:
+                    selected.append(col)
+                    break
+        return list(dict.fromkeys(selected))
+
     def build_multi_like_sql(fields):
+        if not fields:
+            return "1=0", []
         sql_parts = []
         params = []
         for w in words:
-            part = "(" + " OR ".join([f"LOWER({f}) LIKE ?" for f in fields]) + ")"
+            part = "(" + " OR ".join(
+                ["LOWER(COALESCE(" + f + ", '')) LIKE ?" for f in fields]
+            ) + ")"
             sql_parts.append(part)
             like = f"%{w}%"
             params.extend([like] * len(fields))
         sql = " AND ".join(sql_parts)
         return sql, params
-
-    FIELDS_MAIN = [
-        "prop_type",
-        "operation",
-        "metro",
-        "rooms",
-        "address",
-        "summary",
-        "contact_name",
-    ]
-    FIELDS_LOCAL = [
-        "prop_type",
-        "operation",
-        "metro",
-        "rooms",
-        "rayon",
-        "summary",
-        "contact_name",
-    ]
 
     results = []
 
@@ -9903,7 +9909,8 @@ def query_keyword_results(
                 (op_main, match_q),
             )
         else:
-            sql_where, params = build_multi_like_sql(FIELDS_MAIN)
+            fields_main = build_keyword_columns(cur, "listings")
+            sql_where, params = build_multi_like_sql(fields_main)
             sql = (
                 "SELECT * FROM listings WHERE operation = ? AND "
                 + sql_where
@@ -9930,7 +9937,8 @@ def query_keyword_results(
             (op_local, match_q),
         )
     else:
-        sql_where, params = build_multi_like_sql(FIELDS_LOCAL)
+        fields_local = build_keyword_columns(cur, "listings_approved")
+        sql_where, params = build_multi_like_sql(fields_local)
         sql = (
             "SELECT * FROM listings_approved WHERE operation = ? AND "
             + sql_where
@@ -11227,10 +11235,10 @@ def agent_search_by_keyword(message):
     cur.execute(
         """
         SELECT * FROM arenda_data
-        WHERE LOWER(Umumi_melumat) LIKE ?
-           OR LOWER(Unvan) LIKE ?
-           OR LOWER(Rayon_Qesebe) LIKE ?
-           OR LOWER(Emlakin_novu) LIKE ?
+        WHERE LOWER(COALESCE(Umumi_melumat, '')) LIKE ?
+           OR LOWER(COALESCE(Unvan, '')) LIKE ?
+           OR LOWER(COALESCE(Rayon_Qesebe, '')) LIKE ?
+           OR LOWER(COALESCE(Emlakin_novu, '')) LIKE ?
         ORDER BY added_at DESC
         LIMIT 50
         """,
@@ -13207,9 +13215,9 @@ def show_user_profile(chat_id: int, user_id: int):
     phone_raw = get_user_phone_for_admin(user_id)
     wa_url = build_admin_whatsapp_url(phone_raw)
     customer_requests_enabled = has_customer_requests_access(user_id)
-    joined_at = record.get("joined_at")
-    join_date, join_time = parse_join_datetime(joined_at)
     username = record.get("username")
+    computed_status = record.get("computed_status") or get_user_computed_status(user_id)
+    effective_raw = record.get("effective_expires_at")
 
     profile_text = "\n".join(
         [
@@ -13218,8 +13226,9 @@ def show_user_profile(chat_id: int, user_id: int):
             f"👤 Ad: {record.get('full_name') or '-'}",
             f"👤 Username: @{username}" if username else "👤 Username: -",
             f"📞 Telefon: {phone_raw or '-'}",
-            f"📅 Qoşulma: {join_date} {join_time}",
-            f"📦 Status: {record.get('status') or '-'}",
+            f"📦 Status: {computed_status or '-'}",
+            f"📅 Bitmə tarixi: {format_effective_expiry_for_ui(effective_raw)}",
+            f"⏳ Qalan gün: {format_remaining_days_for_ui(computed_status, effective_raw)}",
         ]
     )
 
@@ -13500,16 +13509,9 @@ def send_demo_users_report(chat_id: int, page: int = 1, message=None):
 
 def extend_demo_for_user(user_id: int, days: int) -> Optional[datetime]:
     record = get_user_record(user_id)
-    now = datetime.utcnow()
-    expiry_dt = None
-    if not expiry_dt and record:
-        expiry_dt = parse_dt_safe(
-            record.get("demo_end_at") or record.get("demo_expires_at")
-        )
-    base = expiry_dt if expiry_dt and expiry_dt > now else now
-    new_expiry = base + timedelta(days=days)
-    update_user_demo_end(user_id, new_expiry, approve=True)
-    return new_expiry
+    if not record:
+        return None
+    return admin_grant_demo_days(user_id, days)
 
 
 def cancel_demo_for_user(user_id: int):
@@ -14191,65 +14193,102 @@ def admin_search_by_id_step(message):
     except Exception:
         bot.send_message(message.chat.id, "⚠️ Düzgün chat_id yazın.")
         return
-    admin_show_subscription_info(message.chat.id, target_id)
+    admin_show_user_panel(message.chat.id, target_id)
 
 
-def admin_show_subscription_info(admin_chat_id: int, target_id: int):
-    ensure_subscription_record(target_id)
-    sub = get_subscription(target_id)
-    exp_txt = "-"
-    exp_dt = None
-    if sub and sub.get("expires_at"):
-        try:
-            exp_dt = datetime.fromisoformat(str(sub["expires_at"]))
-            exp_txt = exp_dt.strftime("%d.%m.%Y")
-        except Exception:
-            exp_txt = str(sub.get("expires_at"))
-    plan_txt = sub.get("plan") if sub else "-"
-    is_active = bool(sub.get("is_active")) if sub else False
-    demo_txt = "Bəli" if sub and sub.get("is_demo") else "Xeyr"
+def admin_show_user_panel(
+    admin_chat_id: int, target_id: int, message: Optional[types.Message] = None
+):
+    record = get_user_record(target_id) or {}
+    if not record:
+        bot.send_message(admin_chat_id, "⚠️ İstifadəçi tapılmadı.")
+        return
+    computed_status = record.get("computed_status") or get_user_computed_status(target_id)
+    effective_raw = record.get("effective_expires_at")
+    blocked_state = "Bəli" if record.get("blocked") else "Xeyr"
 
     info_txt = (
         f"🆔 İstifadəçi: {target_id}\n"
-        f"📦 Plan: {plan_txt or '-'}\n"
-        f"📅 Bitmə tarixi: {exp_txt}\n"
-        f"✅ Aktiv: {'Bəli' if is_active else 'Xeyr'}\n"
-        f"🎁 Demo: {demo_txt}\n"
+        f"📦 Status: {computed_status or '-'}\n"
+        f"📅 Bitmə tarixi: {format_effective_expiry_for_ui(effective_raw)}\n"
+        f"⏳ Qalan gün: {format_remaining_days_for_ui(computed_status, effective_raw)}\n"
+        f"⛔ Bloklu: {blocked_state}\n"
         f"🆔 Ödəniş kodu: {subscription_payment_code(target_id)}"
     )
 
     mk = types.InlineKeyboardMarkup()
     mk.add(
         types.InlineKeyboardButton(
-            TEXTS_AZ["admin_subscription_extend_3"],
-            callback_data=f"subctl|add|{target_id}|3",
+            "➕ 3 gün uzat",
+            callback_data=f"admusr|extend|{target_id}|3",
         ),
         types.InlineKeyboardButton(
-            TEXTS_AZ["admin_subscription_extend_7"],
-            callback_data=f"subctl|add|{target_id}|7",
+            "➕ 5 gün uzat",
+            callback_data=f"admusr|extend|{target_id}|5",
         ),
     )
     mk.add(
         types.InlineKeyboardButton(
-            TEXTS_AZ["admin_subscription_extend_15"],
-            callback_data=f"subctl|add|{target_id}|15",
+            "➕ 7 gün uzat",
+            callback_data=f"admusr|extend|{target_id}|7",
         ),
         types.InlineKeyboardButton(
-            TEXTS_AZ["admin_subscription_extend_30"],
-            callback_data=f"subctl|add|{target_id}|30",
+            "➕ 15 gün uzat",
+            callback_data=f"admusr|extend|{target_id}|15",
         ),
     )
     mk.add(
         types.InlineKeyboardButton(
-            TEXTS_AZ["admin_subscription_stop"],
-            callback_data=f"subctl|stop|{target_id}",
+            "➕ 30 gün uzat",
+            callback_data=f"admusr|extend|{target_id}|30",
+        )
+    )
+    mk.add(
+        types.InlineKeyboardButton(
+            "🎁 3 gün demo",
+            callback_data=f"admusr|demo|{target_id}|3",
         ),
         types.InlineKeyboardButton(
-            TEXTS_AZ["admin_subscription_activate"],
-            callback_data=f"subctl|act|{target_id}",
+            "🎁 5 gün demo",
+            callback_data=f"admusr|demo|{target_id}|5",
         ),
     )
+    mk.add(
+        types.InlineKeyboardButton(
+            "🎁 7 gün demo",
+            callback_data=f"admusr|demo|{target_id}|7",
+        ),
+        types.InlineKeyboardButton(
+            "🎁 15 gün demo",
+            callback_data=f"admusr|demo|{target_id}|15",
+        ),
+    )
+    if record.get("blocked"):
+        mk.add(
+            types.InlineKeyboardButton(
+                "✅ Blokdan çıxart",
+                callback_data=f"admusr|unblock|{target_id}",
+            )
+        )
+    else:
+        mk.add(
+            types.InlineKeyboardButton(
+                "⛔ Blokla",
+                callback_data=f"admusr|block|{target_id}",
+            )
+        )
 
+    if message:
+        try:
+            bot.edit_message_text(
+                info_txt,
+                chat_id=admin_chat_id,
+                message_id=message.message_id,
+                reply_markup=mk,
+            )
+            return
+        except Exception:
+            pass
     bot.send_message(admin_chat_id, info_txt, reply_markup=mk)
 
 
@@ -14523,61 +14562,21 @@ def cb_subscription_control(c):
         except Exception:
             days = 0
         if days > 0:
-            base = resolve_extension_base(uid)
-            new_exp = base + timedelta(days=days)
-            plan_name = sub.get("plan") or f"manual {days}g"
-            insert_subscription(
-                uid, plan_name, new_exp, is_demo=0, note=f"extend:{days}"
-            )
-            conn = get_local_conn()
-            cur = conn.cursor()
-            cur.execute("UPDATE users SET approved=1 WHERE chat_id=?", (uid,))
-            conn.commit()
-            conn.close()
+            admin_extend_user_time(uid, days, note=f"extend:{days}")
             try:
                 bot.send_message(uid, f"✅ Hesabınız {days} gün uzadıldı")
             except Exception:
                 pass
     elif action == "stop":
-        try:
-            conn = get_local_conn()
-            cur = conn.cursor()
-            schema = detect_users_schema()
-            columns = schema.get("columns", set())
-            updates = ["blocked=1"]
-            params = []
-            blocked_at = datetime.utcnow().isoformat(sep=" ", timespec="seconds")
-            now = datetime.utcnow().isoformat()
-            if "blocked_at" in columns:
-                updates.append("blocked_at=?")
-                params.append(blocked_at)
-            if "status" in columns:
-                updates.append("status=?")
-                params.append(STATUS_BLOCKED)
-            if "last_status_change_at" in columns:
-                updates.append("last_status_change_at=?")
-                params.append(now)
-            params.append(uid)
-            cur.execute(
-                f"UPDATE users SET {', '.join(updates)} WHERE chat_id=?", params
-            )
-            conn.commit()
-        except Exception:
-            logger.error("Admin stop user update failed", exc_info=True)
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
+        block_user(uid)
         try:
             bot.send_message(uid, "🛑 Hesabınız deaktiv edildi")
         except Exception:
             pass
     elif action == "act":
+        unblock_user(uid)
         base = resolve_extension_base(uid)
-        new_exp = (
-            base if base > datetime.utcnow() else datetime.utcnow() + timedelta(days=1)
-        )
+        new_exp = base if base > datetime.utcnow() else datetime.utcnow() + timedelta(days=1)
         insert_subscription(
             uid,
             sub.get("plan") or "manual",
@@ -14585,11 +14584,6 @@ def cb_subscription_control(c):
             is_demo=0,
             note="activated",
         )
-        conn = get_local_conn()
-        cur = conn.cursor()
-        cur.execute("UPDATE users SET approved=1, blocked=0 WHERE chat_id=?", (uid,))
-        conn.commit()
-        conn.close()
         try:
             bot.send_message(uid, "✅ Hesabınız aktivləşdirildi")
         except Exception:
@@ -14599,7 +14593,73 @@ def cb_subscription_control(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-    admin_show_subscription_info(c.message.chat.id, uid)
+    admin_show_user_panel(c.message.chat.id, uid, message=c.message)
+
+
+def admin_extend_user_time(user_id: int, days: int, note: str = "admin_extend") -> Optional[datetime]:
+    ensure_subscription_record(user_id)
+    sub = get_subscription(user_id) or {}
+    base = resolve_extension_base(user_id)
+    new_exp = base + timedelta(days=days)
+    plan_name = sub.get("plan") or f"manual {days}g"
+    insert_subscription(user_id, plan_name, new_exp, is_demo=0, note=note)
+    return new_exp
+
+
+def admin_grant_demo_days(user_id: int, days: int) -> Optional[datetime]:
+    ensure_subscription_record(user_id)
+    sub = get_subscription(user_id) or {}
+    base = resolve_extension_base(user_id)
+    new_exp = base + timedelta(days=days)
+    update_user_demo_end(user_id, new_exp, approve=True)
+    if not sub.get("plan") or sub.get("is_demo") or sub.get("plan") == "demo":
+        set_subscription(user_id, "demo", new_exp, is_active=1, is_demo=1, note="admin_demo")
+    return new_exp
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("admusr|"))
+@callback_guard
+def cb_admin_user_panel_actions(c):
+    if not is_admin(c.message.chat.id):
+        return
+    parts = c.data.split("|")
+    if len(parts) < 3:
+        return
+    action = parts[1]
+    try:
+        uid = int(parts[2])
+    except Exception:
+        return
+
+    if action in {"extend", "demo"} and len(parts) > 3:
+        try:
+            days = int(parts[3])
+        except Exception:
+            days = 0
+        if days <= 0:
+            safe_answer_callback_query(c.id, "⚠️ Gün sayı düzgün deyil.")
+            return
+        if action == "extend":
+            admin_extend_user_time(uid, days, note=f"admin_extend:{days}")
+            safe_answer_callback_query(c.id, f"✅ {days} gün uzadıldı.")
+        else:
+            admin_grant_demo_days(uid, days)
+            safe_answer_callback_query(c.id, f"✅ {days} gün demo verildi.")
+    elif action == "block":
+        blocked = block_user(uid)
+        safe_answer_callback_query(
+            c.id, "✅ Bloklandı." if blocked else "⚠️ Artıq blokludur."
+        )
+    elif action == "unblock":
+        unblocked = unblock_user(uid)
+        safe_answer_callback_query(
+            c.id, "✅ Blokdan çıxarıldı." if unblocked else "⚠️ Blokda deyil."
+        )
+    else:
+        safe_answer_callback_query(c.id)
+        return
+
+    admin_show_user_panel(c.message.chat.id, uid, message=c.message)
 
 
 def show_users_menu(chat_id):
@@ -14682,22 +14742,38 @@ def format_display_date(dt_raw: Optional[str]) -> str:
     return dt.strftime("%d.%m.%Y")
 
 
-def format_remaining_time(expiry: Optional[datetime]) -> str:
+def normalize_effective_expiry(raw: Optional[Union[str, datetime]]) -> Optional[datetime]:
+    if isinstance(raw, datetime):
+        dt = raw
+    else:
+        dt = parse_effective_expires_at(raw)
+    if not dt:
+        return None
+    epoch = datetime.utcfromtimestamp(0)
+    if dt <= epoch:
+        return None
+    return dt
+
+
+def format_effective_expiry_for_ui(raw: Optional[Union[str, datetime]]) -> str:
+    dt = normalize_effective_expiry(raw)
+    if not dt:
+        return "—"
+    return dt.strftime("%d.%m.%Y")
+
+
+def format_remaining_days_for_ui(
+    computed_status: Optional[str], raw: Optional[Union[str, datetime]]
+) -> str:
+    if computed_status != "ACTIVE":
+        return "—"
+    expiry = normalize_effective_expiry(raw)
     if not expiry:
         return "—"
     now = datetime.utcnow()
     if expiry <= now:
-        return "0 gün"
+        return "—"
     days = math.ceil((expiry - now).total_seconds() / 86400)
-    return f"{days} gün"
-
-
-def format_remaining_days_allow_negative(expiry: Optional[datetime]) -> str:
-    if not expiry:
-        return "-"
-    now = datetime.utcnow()
-    delta_days = (expiry - now).total_seconds() / 86400
-    days = math.ceil(delta_days) if delta_days >= 0 else math.floor(delta_days)
     return f"{days} gün"
 
 
@@ -14742,7 +14818,6 @@ def block_user(chat_id: int) -> bool:
         return False
 
     blocked_at = datetime.utcnow().isoformat(sep=" ", timespec="seconds")
-    now = datetime.utcnow().isoformat()
     schema = detect_users_schema()
     columns = schema.get("columns", set())
     updates = ["blocked=1"]
@@ -14750,12 +14825,6 @@ def block_user(chat_id: int) -> bool:
     if "blocked_at" in columns:
         updates.append("blocked_at=?")
         params.append(blocked_at)
-    if "status" in columns:
-        updates.append("status=?")
-        params.append(STATUS_BLOCKED)
-    if "last_status_change_at" in columns:
-        updates.append("last_status_change_at=?")
-        params.append(now)
     params.append(chat_id)
     cur.execute(f"UPDATE users SET {', '.join(updates)} WHERE chat_id=?", params)
     conn.commit()
@@ -14766,6 +14835,30 @@ def block_user(chat_id: int) -> bool:
     except Exception:
         pass
 
+    return True
+
+
+def unblock_user(chat_id: int) -> bool:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT blocked FROM users WHERE chat_id=?", (chat_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return False
+    if not row["blocked"]:
+        conn.close()
+        return False
+    schema = detect_users_schema()
+    columns = schema.get("columns", set())
+    updates = ["blocked=0"]
+    params = []
+    if "blocked_at" in columns:
+        updates.append("blocked_at=NULL")
+    params.append(chat_id)
+    cur.execute(f"UPDATE users SET {', '.join(updates)} WHERE chat_id=?", params)
+    conn.commit()
+    conn.close()
     return True
 
 
@@ -14875,7 +14968,9 @@ def show_all_users(
             list_status,
             where_clause,
         )
-        cur.execute(f"SELECT COUNT(*) FROM {base_query} WHERE {where_clause}", params)
+        cur.execute(
+            "SELECT COUNT(*) FROM users_with_status WHERE " + where_clause, params
+        )
         total = cur.fetchone()[0] or 0
         logger.info(
             "users count query done chat_id=%s status=%s total=%s",
@@ -14940,27 +15035,17 @@ def show_all_users(
             name = _row_value_safe(row, "full_name", "-") or "-"
             username = _row_value_safe(row, "username")
             username_value = f"@{username}" if username else "-"
-            join_date, join_time = parse_join_datetime(
-                _row_value_safe(row, "joined_at")
-            )
-
+            computed_status = _row_value_safe(row, "computed_status")
             expiry_raw = _row_value_safe(row, "effective_expires_at")
-            expiry_dt = parse_effective_expires_at(expiry_raw)
-
-            remaining_text = "-"
-            if expiry_dt:
-                if list_status == "expired":
-                    remaining_text = format_remaining_days_allow_negative(expiry_dt)
-                elif list_status in ("active", "demo"):
-                    remaining_text = format_remaining_time(expiry_dt)
+            remaining_text = format_remaining_days_for_ui(computed_status, expiry_raw)
 
             entry_lines = [
                 f"[{idx}]",
                 f"{TEXTS_AZ['admin_userlist_entry_name']}: {name}",
                 f"{TEXTS_AZ['admin_userlist_entry_id']}: {uid}",
                 f"{TEXTS_AZ['admin_userlist_entry_username']}: {username_value}",
-                f"{TEXTS_AZ['admin_userlist_entry_joined']}: {join_date} {join_time}",
-                f"{TEXTS_AZ['admin_userlist_entry_expiry']}: {format_display_date(expiry_dt)}",
+                f"{TEXTS_AZ['admin_userlist_entry_expiry']}: "
+                f"{format_effective_expiry_for_ui(expiry_raw)}",
                 f"{TEXTS_AZ['admin_userlist_entry_remaining']}: {remaining_text}",
             ]
 
@@ -15277,11 +15362,11 @@ def show_pending_users(chat_id):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT u.chat_id, u.full_name, u.username, u.joined_at
+        SELECT u.chat_id, u.full_name, u.username
         FROM users_with_status uw
         JOIN users u ON u.chat_id = uw.chat_id
         WHERE uw.computed_status = 'PENDING'
-        ORDER BY datetime(u.joined_at) ASC
+        ORDER BY u.chat_id ASC
         LIMIT 100
         """,
     )
@@ -15292,7 +15377,7 @@ def show_pending_users(chat_id):
         bot.send_message(chat_id, TEXTS_AZ["admin_pending_users_none"])
         return
 
-    for uid, full_name, username, dt in rows:
+    for uid, full_name, username in rows:
         mk = types.InlineKeyboardMarkup()
         mk.row(
             types.InlineKeyboardButton(
@@ -15320,14 +15405,12 @@ def show_pending_users(chat_id):
             ),
         )
         prof = f"@{username}" if username else "yoxdur"
-        join_date, join_time = parse_join_datetime(dt)
         txt = (
             f"{TEXTS_AZ['admin_pending_users_title']}\n\n"
             f"• 👤 Ad: {full_name or '-'}\n"
             f"• 🆔 ID: <code>{uid}</code>\n"
             f"• 👤 Username: {prof}\n"
-            f"• 📅 Sorğu tarixi: {join_date}\n"
-            f"• ⏰ Saat: {join_time}"
+            f"• 📅 Sorğu tarixi: —"
         )
         bot.send_message(chat_id, txt, parse_mode="HTML", reply_markup=mk)
 
@@ -15366,7 +15449,7 @@ def cb_user_approve_action(c):
 
     safe_answer_callback_query(c.id, TEXTS_AZ["admin_user_activated"])
     try:
-        expiry_txt = format_display_date(expires_at)
+        expiry_txt = format_effective_expiry_for_ui(expires_at)
         bot.send_message(
             uid,
             f"✅ Hesabınız {status_text} olaraq aktiv edildi.\n📅 Bitmə tarixi: {expiry_txt}",
@@ -15474,7 +15557,7 @@ def cb_user_approve(c):
 
     bot.answer_callback_query(c.id, "✅ İstifadəçi aktiv edildi.")
     try:
-        expiry_txt = format_display_date(expires_at)
+        expiry_txt = format_effective_expiry_for_ui(expires_at)
         bot.send_message(
             uid,
             f"🎉 Hesabınız {status_text} kimi aktiv edildi.\n📅 Bitmə tarixi: {expiry_txt}",
@@ -16355,10 +16438,10 @@ def pub_agent_search_by_keyword(message):
     cur.execute(
         """
         SELECT * FROM arenda_data
-        WHERE LOWER(Umumi_melumat) LIKE ?
-           OR LOWER(Unvan) LIKE ?
-           OR LOWER(Rayon_Qesebe) LIKE ?
-           OR LOWER(Emlakin_novu) LIKE ?
+        WHERE LOWER(COALESCE(Umumi_melumat, '')) LIKE ?
+           OR LOWER(COALESCE(Unvan, '')) LIKE ?
+           OR LOWER(COALESCE(Rayon_Qesebe, '')) LIKE ?
+           OR LOWER(COALESCE(Emlakin_novu, '')) LIKE ?
         ORDER BY added_at DESC
         LIMIT 30
         """,
@@ -17169,22 +17252,47 @@ def admin_search_handler(message):
     like = f"%{q}%"
     found = 0
 
+    def build_keyword_columns(cur: sqlite3.Cursor, table: str) -> List[str]:
+        cur.execute("PRAGMA table_info(" + table + ")")
+        cols = {row[1].lower(): row[1] for row in cur.fetchall()}
+        if not cols:
+            return []
+        groups = [
+            ["title", "prop_type", "emlakin_novu"],
+            ["description", "summary", "umumi_melumat", "text", "details"],
+            ["district", "rayon", "rayon_qesebe", "region"],
+            ["address", "unvan", "adres"],
+        ]
+        selected = []
+        for group in groups:
+            for name in group:
+                col = cols.get(name.lower())
+                if col:
+                    selected.append(col)
+                    break
+        return list(dict.fromkeys(selected))
+
+    def build_keyword_where(columns: List[str]) -> Tuple[str, List[str]]:
+        if not columns:
+            return "1=0", []
+        conds = [
+            "LOWER(COALESCE(" + col + ", '')) LIKE ?" for col in columns
+        ]
+        return "(" + " OR ".join(conds) + ")", [like] * len(columns)
+
     # MAIN DB listings
     if os.path.exists(MAIN_DB):
         try:
             conn = get_main_conn()
             cur = conn.cursor()
-            cur.execute(
-                """
-                SELECT * FROM listings
-                WHERE LOWER(summary) LIKE ?
-                   OR LOWER(address) LIKE ?
-                   OR LOWER(metro) LIKE ?
-                ORDER BY date_read DESC
-                LIMIT 30
-                """,
-                (like, like, like),
+            columns = build_keyword_columns(cur, "listings")
+            where_clause, params = build_keyword_where(columns)
+            sql = (
+                "SELECT * FROM listings WHERE "
+                + where_clause
+                + " ORDER BY date_read DESC LIMIT 30"
             )
+            cur.execute(sql, params)
             rows = cur.fetchall()
             close_main_conn(conn)
             for r in rows:
@@ -17201,17 +17309,14 @@ def admin_search_handler(message):
     # LOCAL APPROVED
     conn = get_local_conn()
     cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT * FROM listings_approved
-        WHERE LOWER(summary) LIKE ?
-           OR LOWER(rayon) LIKE ?
-           OR LOWER(metro) LIKE ?
-        ORDER BY date_added DESC
-        LIMIT 30
-        """,
-        (like, like, like),
+    columns = build_keyword_columns(cur, "listings_approved")
+    where_clause, params = build_keyword_where(columns)
+    sql = (
+        "SELECT * FROM listings_approved WHERE "
+        + where_clause
+        + " ORDER BY date_added DESC LIMIT 30"
     )
+    cur.execute(sql, params)
     rows = cur.fetchall()
     conn.close()
     for r in rows:
@@ -17230,13 +17335,14 @@ def admin_search_handler(message):
         cur_a.execute(
             """
             SELECT * FROM arenda_data
-            WHERE LOWER(Umumi_melumat) LIKE ?
-               OR LOWER(Unvan) LIKE ?
-               OR LOWER(Rayon_Qesebe) LIKE ?
+            WHERE LOWER(COALESCE(Emlakin_novu, '')) LIKE ?
+               OR LOWER(COALESCE(Umumi_melumat, '')) LIKE ?
+               OR LOWER(COALESCE(Rayon_Qesebe, '')) LIKE ?
+               OR LOWER(COALESCE(Unvan, '')) LIKE ?
             ORDER BY added_at DESC
             LIMIT 30
             """,
-            (like, like, like),
+            (like, like, like, like),
         )
         arows = cur_a.fetchall()
         conn_a.close()
