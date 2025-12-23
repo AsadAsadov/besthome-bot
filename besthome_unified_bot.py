@@ -466,24 +466,20 @@ def get_agents_conn():
 
 
 def normalize_text(text: str) -> str:
-    if not text:
-        return ""
-    text = text.lower()
-    replace_map = {
-        "ə": "a",
+    mapping = {
+        "ə": "e",
+        "ş": "s",
         "ı": "i",
         "ö": "o",
         "ü": "u",
-        "ş": "s",
         "ç": "c",
         "ğ": "g",
     }
-    for k, v in replace_map.items():
+    text = (text or "").lower().strip()
+    for k, v in mapping.items():
         text = text.replace(k, v)
-    text = text.replace("%", " faiz ")
-    text = re.sub(r"[^\w\s]", " ", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+    text = " ".join(text.split())
+    return text
 
 
 def safe_send(chat_id: int, text: str, **kwargs):
@@ -5511,12 +5507,10 @@ def send_keyword_notification_summaries(scan_state: Dict[int, Dict[str, Any]]):
         mk = types.InlineKeyboardMarkup()
         mk.add(
             types.InlineKeyboardButton(
-                f"👁 Elanlara bax ({total})", callback_data="kw_notif_view"
+                "📂 Elanlara bax", callback_data="kw_notif_view"
             )
         )
-        summary_text = (
-            f"🔔 Açar söz bildirişləri (Bu gün) — {total} uyğun elan tapıldı"
-        )
+        summary_text = f"🔔 Açar sözlər üzrə {total} uyğun elan tapıldı"
         try:
             bot.send_message(user_id, summary_text, reply_markup=mk)
             send_main_menu(user_id)
@@ -9664,9 +9658,7 @@ def normalize_rayon_name(value: Optional[str]) -> str:
 
 
 def normalize_today_rayon(value: Optional[str]) -> str:
-    val = str(value or "").strip().lower()
-    val = re.sub(r"\s+", " ", val)
-    return val
+    return normalize_text(value or "")
 
 
 def extract_today_rayon_candidates(ev: dict) -> List[str]:
@@ -10134,117 +10126,70 @@ def query_keyword_results(
     offset: int = 0,
     limit: int = None,
 ):
-    if not words:
+    tokens = normalize_text(" ".join([w for w in words if w])).split()
+    if not tokens:
         return [], 0
 
-    words = [w.lower() for w in words if w]
     op_main = detect_db_operation_value(selected_op, "main")
     op_local = detect_db_operation_value(selected_op, "local")
 
-    def build_keyword_columns(cur: sqlite3.Cursor, table: str) -> List[str]:
-        cur.execute("PRAGMA table_info(" + table + ")")
-        cols = {row[1].lower(): row[1] for row in cur.fetchall()}
-        if not cols:
-            return []
-        groups = [
-            ["title", "prop_type", "emlakin_novu"],
-            ["description", "summary", "umumi_melumat", "text", "details"],
-            ["district", "rayon", "rayon_qesebe", "region"],
-            ["address", "unvan", "adres"],
-        ]
-        selected = []
-        for group in groups:
-            for name in group:
-                col = cols.get(name.lower())
-                if col:
-                    selected.append(col)
-                    break
-        return list(dict.fromkeys(selected))
-
-    def find_dedup_column(cur: sqlite3.Cursor, table: str) -> Optional[str]:
-        cur.execute("PRAGMA table_info(" + table + ")")
-        cols = {row[1].lower(): row[1] for row in cur.fetchall()}
-        for name in ("listing_id", "id", "link"):
-            col = cols.get(name)
-            if col:
-                return col
-        return None
-
-    def build_keyword_where(
-        fields: List[str], tokens: List[str]
-    ) -> Tuple[str, List[str]]:
-        if not fields or not tokens:
-            return "1=0", []
-        token_clauses = []
-        params = []
-        for token in tokens:
-            like = "%" + token.lower() + "%"
-            field_clauses = []
-            for col in fields:
-                field_clauses.append("LOWER(COALESCE({}, '')) LIKE ?".format(col))
-                params.append(like)
-            token_clauses.append("(" + " OR ".join(field_clauses) + ")")
-        return "(" + " OR ".join(token_clauses) + ")", params
-
     results = []
 
-    if os.path.exists(MAIN_DB):
-        conn = get_main_conn()
+    def apply_date_clause_sql(table: str, date_col: Optional[str]) -> Tuple[str, list]:
+        if not date_days or not date_col:
+            return "", []
+        cutoff = datetime.utcnow() - timedelta(days=date_days)
+        return f" AND {date_col} >= ?", [cutoff.isoformat()]
+
+    def load_results_from_table(
+        conn_factory, table: str, operation_value: Optional[str], source: str
+    ):
+        conn = conn_factory()
         cur = conn.cursor()
-        fields_main = build_keyword_columns(cur, "listings")
-        dedup_col_main = find_dedup_column(cur, "listings")
-        sql_where, params = build_keyword_where(fields_main, words)
-        if dedup_col_main:
-            sql = (
-                "SELECT * FROM listings WHERE {dedup} IN ("
-                "SELECT DISTINCT {dedup} FROM listings WHERE operation = ? AND {where}"
-                ") ORDER BY date_read DESC LIMIT 5000"
-            ).format(dedup=dedup_col_main, where=sql_where)
-            cur.execute(sql, [op_main] + params)
-        else:
-            sql = (
-                "SELECT DISTINCT * FROM listings WHERE operation = ? AND {where} "
-                "ORDER BY date_read DESC LIMIT 5000"
-            ).format(where=sql_where)
-            cur.execute(sql, [op_main] + params)
+        date_col = detect_table_date_column(cur, table)
+        sql = f"SELECT * FROM {table} WHERE 1=1"
+        params: List[Any] = []
+        if operation_value:
+            sql += " AND operation = ?"
+            params.append(operation_value)
+        date_sql, date_params = apply_date_clause_sql(table, date_col)
+        sql += date_sql
+        order_col = date_col or "date_read"
+        sql += f" ORDER BY {order_col} DESC LIMIT 5000"
+        cur.execute(sql, params + date_params)
         for r in cur.fetchall():
             d = dict(r)
-            d["__source"] = "main"
+            d["__source"] = source
             results.append(d)
-        close_main_conn(conn)
+        if conn_factory == get_main_conn:
+            close_main_conn(conn)
+        else:
+            conn.close()
 
-    conn = get_local_conn()
-    cur = conn.cursor()
-    fields_local = build_keyword_columns(cur, "listings_approved")
-    dedup_col_local = find_dedup_column(cur, "listings_approved")
-    sql_where, params = build_keyword_where(fields_local, words)
-    if dedup_col_local:
-        sql = (
-            "SELECT * FROM listings_approved WHERE {dedup} IN ("
-            "SELECT DISTINCT {dedup} FROM listings_approved "
-            "WHERE operation = ? AND {where}"
-            ") ORDER BY date_added DESC LIMIT 5000"
-        ).format(dedup=dedup_col_local, where=sql_where)
-        cur.execute(sql, [op_local] + params)
-    else:
-        sql = (
-            "SELECT DISTINCT * FROM listings_approved WHERE operation = ? AND {where} "
-            "ORDER BY date_added DESC LIMIT 5000"
-        ).format(where=sql_where)
-        cur.execute(sql, [op_local] + params)
-    for r in cur.fetchall():
-        d = dict(r)
-        d["__source"] = "local"
-        results.append(d)
-    conn.close()
+    if os.path.exists(MAIN_DB):
+        load_results_from_table(get_main_conn, "listings", op_main, "main")
+
+    load_results_from_table(get_local_conn, "listings_approved", op_local, "local")
 
     status_map = get_status_map()
-    results = [r for r in results if is_listing_active(r, status_map)]
-    results.sort(key=safe_date, reverse=True)
-    total = len(results)
+
+    filtered: List[dict] = []
+    for ev in results:
+        if not is_within_date_range(ev, date_days):
+            continue
+        if not is_listing_active(ev, status_map):
+            continue
+        listing_text = build_listing_text_blob(ev)
+        if not listing_text:
+            continue
+        if all(token in listing_text for token in tokens):
+            filtered.append(ev)
+
+    filtered.sort(key=safe_date, reverse=True)
+    total = len(filtered)
     if limit is not None:
-        results = results[offset : offset + limit]
-    return results, total
+        filtered = filtered[offset : offset + limit]
+    return filtered, total
 
 
 def parse_smart_query(text: str) -> dict:
@@ -11236,11 +11181,13 @@ def keyword_search_handler(message):
     chat_id = message.chat.id
     if not check_limit(chat_id, "keyword", 30):
         bot.send_message(chat_id, "Günlük açar sözlə axtarış limitiniz bitib.")
+        send_main_menu(chat_id)
         return
 
-    text = (message.text or "").strip().lower()
+    text = normalize_text(message.text or "")
     if not text:
         bot.send_message(chat_id, "Boş sorğu göndərdiniz.")
+        send_main_menu(chat_id)
         return
 
     st = search_state.get(chat_id, {})
@@ -11271,6 +11218,7 @@ def keyword_search_handler(message):
             loading_ref, "❌ Uyğun elan tapılmadı. Yenidən axtarış edin."
         ):
             bot.send_message(chat_id, "❌ Uyğun elan tapılmadı. Yenidən axtarış edin.")
+        send_main_menu(chat_id)
         return
 
     inc_limit(chat_id, "keyword", 1)
