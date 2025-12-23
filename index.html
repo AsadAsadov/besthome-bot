@@ -1,0 +1,1648 @@
+<!DOCTYPE html>
+<html lang="az">
+<head>
+    <meta charset="UTF-8" />
+    <title>BestHome MiniApp</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+        :root {
+            --bg-main: #050816;
+            --bg-panel: #0b1020;
+            --bg-panel-soft: #11182a;
+            --bg-card: #131b30;
+            --bg-card-soft: #151f35;
+            --accent: #3b82f6;
+            --accent-soft: rgba(59,130,246,0.15);
+            --danger: #f97373;
+            --success: #4ade80;
+            --text-main: #e5e7eb;
+            --text-soft: #9ca3af;
+            --border-soft: rgba(148,163,184,0.25);
+            --radius-lg: 18px;
+            --radius-md: 12px;
+            --radius-sm: 8px;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: radial-gradient(circle at top left, #111827, #020617 60%);
+            color: var(--text-main);
+            min-height: 100vh;
+        }
+
+        a {
+            color: inherit;
+            text-decoration: none;
+        }
+
+        .app-shell {
+            display: grid;
+            grid-template-columns: 260px minmax(0, 1fr);
+            max-width: 1440px;
+            margin: 0 auto;
+            padding: 16px;
+            column-gap: 16px;
+        }
+
+        /* SIDEBAR */
+        .sidebar {
+            background: linear-gradient(180deg, #020617, #020617 55%, #020617);
+            border-radius: var(--radius-lg);
+            padding: 18px 14px 16px;
+            border: 1px solid rgba(148,163,184,0.3);
+            box-shadow: 0 24px 60px rgba(15,23,42,0.8);
+            display: flex;
+            flex-direction: column;
+            row-gap: 18px;
+        }
+
+        .brand-row {
+            display: flex;
+            align-items: center;
+            column-gap: 10px;
+            padding: 8px 10px;
+            border-radius: 999px;
+            background: radial-gradient(circle at top left, rgba(59,130,246,0.35), transparent 60%);
+        }
+
+        .brand-logo {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: #0ea5e9;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 800;
+            font-size: 17px;
+        }
+
+        .brand-text-main {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .brand-text-sub {
+            font-size: 11px;
+            color: var(--text-soft);
+        }
+
+        .sidebar-section-title {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            color: var(--text-soft);
+            margin-bottom: 6px;
+            padding-inline: 6px;
+        }
+
+        .nav-list {
+            display: flex;
+            flex-direction: column;
+            row-gap: 4px;
+        }
+
+        .nav-item {
+            display: flex;
+            align-items: center;
+            column-gap: 8px;
+            padding: 7px 9px;
+            border-radius: 10px;
+            font-size: 13px;
+            color: var(--text-soft);
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+
+        .nav-item span.icon {
+            width: 22px;
+            text-align: center;
+            font-size: 14px;
+        }
+
+        .nav-item.active {
+            background: radial-gradient(circle at top left, rgba(59,130,246,0.4), rgba(15,23,42,0.9));
+            color: #f9fafb;
+        }
+
+        .nav-item:hover {
+            background: rgba(15,23,42,0.9);
+            color: #e5e7eb;
+        }
+
+        .sidebar-footer {
+            margin-top: auto;
+            padding-top: 10px;
+            border-top: 1px solid rgba(31,41,55,0.9);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 11px;
+            color: var(--text-soft);
+        }
+
+        .chip-outline {
+            border-radius: 999px;
+            border: 1px solid rgba(148,163,184,0.4);
+            padding: 3px 8px;
+            font-size: 11px;
+        }
+
+        /* MAIN */
+        .main {
+            background: radial-gradient(circle at top right, rgba(37,99,235,0.22), transparent 55%), #020617;
+            border-radius: var(--radius-lg);
+            border: 1px solid rgba(30,64,175,0.6);
+            box-shadow: 0 24px 70px rgba(15,23,42,0.9);
+            padding: 18px 18px 20px;
+            display: flex;
+            flex-direction: column;
+            row-gap: 14px;
+        }
+
+        .main-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+        }
+
+        .page-title-block {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .page-title {
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .page-sub {
+            font-size: 12px;
+            color: var(--text-soft);
+        }
+
+        .top-actions {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .pill-soft {
+            border-radius: 999px;
+            padding: 4px 9px;
+            font-size: 11px;
+            background: rgba(15,23,42,0.9);
+            border: 1px solid rgba(148,163,184,0.45);
+        }
+
+        .btn-mini {
+            border-radius: 999px;
+            padding: 5px 10px;
+            font-size: 11px;
+            border: none;
+            cursor: pointer;
+            background: rgba(59,130,246,0.15);
+            color: #bfdbfe;
+        }
+
+        .btn-mini:hover {
+            background: rgba(59,130,246,0.3);
+        }
+
+        /* SECTIONS */
+        .sections {
+            flex: 1;
+            min-height: 0;
+        }
+
+        .section {
+            display: none;
+        }
+
+        .section.active {
+            display: block;
+        }
+
+        /* DASHBOARD */
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+            gap: 12px;
+        }
+
+        .card {
+            background: radial-gradient(circle at top left, rgba(59,130,246,0.18), rgba(15,23,42,0.95));
+            border-radius: var(--radius-md);
+            border: 1px solid rgba(30,64,175,0.7);
+            padding: 14px;
+        }
+
+        .card-soft {
+            background: rgba(15,23,42,0.92);
+            border-radius: var(--radius-md);
+            border: 1px solid rgba(31,41,55,0.9);
+            padding: 12px;
+        }
+
+        .card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 8px;
+        }
+
+        .card-title {
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        .card-sub {
+            font-size: 11px;
+            color: var(--text-soft);
+        }
+
+        .map-placeholder {
+            border-radius: var(--radius-md);
+            border: 1px dashed rgba(148,163,184,0.35);
+            padding: 10px;
+            font-size: 11px;
+            color: var(--text-soft);
+            background: rgba(15,23,42,0.85);
+        }
+
+        .stats-row {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 10px;
+        }
+
+        .stat-box {
+            background: rgba(15,23,42,0.9);
+            border-radius: 12px;
+            padding: 10px;
+            border: 1px solid rgba(30,64,175,0.5);
+        }
+
+        .stat-label {
+            font-size: 11px;
+            color: var(--text-soft);
+        }
+
+        .stat-value {
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        .stat-tag {
+            font-size: 10px;
+            color: #bfdbfe;
+            margin-top: 3px;
+        }
+
+        .card-scroll {
+            max-height: 260px;
+            overflow-y: auto;
+            padding-right: 4px;
+        }
+
+        .small-label {
+            font-size: 11px;
+            color: var(--text-soft);
+            margin-bottom: 4px;
+        }
+
+        /* FILTER BAR – Bütün elanlar */
+        .filter-bar {
+            background: rgba(15,23,42,0.96);
+            border-radius: var(--radius-md);
+            border: 1px solid rgba(30,64,175,0.6);
+            padding: 10px;
+            display: grid;
+            grid-template-columns: repeat(6, minmax(0, 1fr));
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+
+        .filter-group {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .filter-label {
+            font-size: 10px;
+            color: var(--text-soft);
+        }
+
+        .filter-input,
+        .filter-select {
+            width: 100%;
+            border-radius: 999px;
+            border: 1px solid rgba(55,65,81,0.9);
+            background: rgba(15,23,42,0.92);
+            color: var(--text-main);
+            font-size: 11px;
+            padding: 6px 10px;
+            outline: none;
+        }
+
+        .filter-input::placeholder {
+            color: rgba(148,163,184,0.7);
+        }
+
+        .filter-actions {
+            display: flex;
+            align-items: flex-end;
+            gap: 6px;
+        }
+
+        .btn-primary {
+            border-radius: 999px;
+            border: none;
+            background: linear-gradient(90deg, #2563eb, #06b6d4);
+            color: #f9fafb;
+            font-size: 12px;
+            padding: 7px 14px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+
+        .btn-outline {
+            border-radius: 999px;
+            border: 1px solid rgba(148,163,184,0.5);
+            background: transparent;
+            color: var(--text-soft);
+            font-size: 11px;
+            padding: 6px 12px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+
+        .btn-primary:hover {
+            filter: brightness(1.07);
+        }
+
+        .btn-outline:hover {
+            background: rgba(15,23,42,0.95);
+        }
+
+        .filter-checkbox {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 11px;
+            color: var(--text-soft);
+            margin-top: 6px;
+        }
+
+        .filter-checkbox input {
+            width: 13px;
+            height: 13px;
+        }
+
+        .result-info {
+            font-size: 11px;
+            color: var(--text-soft);
+            margin-bottom: 6px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        /* CARDS GRID */
+        .cards-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+            gap: 10px;
+        }
+
+        .listing-card {
+            background: radial-gradient(circle at top left, rgba(59,130,246,0.25), rgba(15,23,42,0.98));
+            border-radius: 16px;
+            border: 1px solid rgba(37,99,235,0.5);
+            padding: 10px 10px 9px;
+            display: flex;
+            flex-direction: column;
+            row-gap: 6px;
+            position: relative;
+        }
+
+        .listing-card.favorite {
+            box-shadow: 0 0 0 1px rgba(250,204,21,0.6), 0 14px 40px rgba(250,204,21,0.18);
+        }
+
+        .listing-header-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 11px;
+        }
+
+        .pill-op {
+            border-radius: 999px;
+            padding: 3px 7px;
+            background: rgba(15,23,42,0.94);
+            border: 1px solid rgba(148,163,184,0.5);
+        }
+
+        .price-label {
+            font-weight: 600;
+            font-size: 13px;
+        }
+
+        .listing-title {
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .listing-summary {
+            font-size: 11px;
+            color: var(--text-soft);
+            max-height: 70px;
+            overflow: hidden;
+        }
+
+        .listing-meta-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 4px;
+            font-size: 10px;
+            color: var(--text-soft);
+        }
+
+        .listing-actions-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 6px;
+            font-size: 10px;
+        }
+
+        .fav-toggle {
+            cursor: pointer;
+            padding: 3px 7px;
+            border-radius: 999px;
+            border: 1px solid rgba(148,163,184,0.6);
+            background: rgba(15,23,42,0.9);
+        }
+
+        .fav-toggle.active {
+            background: rgba(251,191,36,0.1);
+            border-color: rgba(250,204,21,0.9);
+            color: #facc15;
+        }
+
+        .link-btn {
+            font-size: 10px;
+            padding: 3px 8px;
+            border-radius: 999px;
+            border: 1px solid rgba(56,189,248,0.7);
+            background: rgba(8,47,73,0.9);
+            color: #bfdbfe;
+            cursor: pointer;
+        }
+
+        /* PAGINATION */
+        .pagination-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 8px;
+            font-size: 11px;
+            color: var(--text-soft);
+        }
+
+        .pagination-buttons {
+            display: flex;
+            gap: 4px;
+        }
+
+        .btn-page {
+            border-radius: 999px;
+            border: 1px solid rgba(148,163,184,0.6);
+            background: transparent;
+            color: var(--text-soft);
+            font-size: 11px;
+            padding: 4px 9px;
+            cursor: pointer;
+        }
+
+        .btn-page:disabled {
+            opacity: 0.4;
+            cursor: default;
+        }
+
+        /* FAVORITES / AGENTS SIMPLE CARDS */
+        .empty-state {
+            font-size: 12px;
+            color: var(--text-soft);
+            padding: 12px;
+            border-radius: 12px;
+            border: 1px dashed rgba(148,163,184,0.4);
+            background: rgba(15,23,42,0.95);
+        }
+
+        .agent-card {
+            background: linear-gradient(135deg, rgba(59,130,246,0.25), rgba(6,78,59,0.9));
+            border-radius: 16px;
+            border: 1px solid rgba(56,189,248,0.7);
+            padding: 10px;
+            font-size: 11px;
+        }
+
+        .agent-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 4px;
+        }
+
+        .agent-name {
+            font-weight: 600;
+            font-size: 12px;
+        }
+
+        .agent-phone {
+            font-weight: 500;
+        }
+
+        .tag-badge {
+            border-radius: 999px;
+            padding: 2px 7px;
+            font-size: 10px;
+            background: rgba(15,23,42,0.9);
+            border: 1px solid rgba(148,163,184,0.55);
+        }
+
+        /* ADD LISTING FORM */
+        .form-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .form-label {
+            font-size: 11px;
+            color: var(--text-soft);
+        }
+
+        .form-input,
+        .form-select,
+        .form-textarea {
+            border-radius: 10px;
+            border: 1px solid rgba(55,65,81,0.9);
+            background: rgba(15,23,42,0.96);
+            color: var(--text-main);
+            font-size: 12px;
+            padding: 7px 10px;
+            outline: none;
+        }
+
+        .form-textarea {
+            min-height: 110px;
+            resize: vertical;
+        }
+
+        .form-input::placeholder,
+        .form-textarea::placeholder {
+            color: rgba(148,163,184,0.7);
+        }
+
+        /* TOAST */
+        .toast {
+            position: fixed;
+            right: 18px;
+            bottom: 18px;
+            min-width: 220px;
+            max-width: 320px;
+            padding: 10px 12px;
+            border-radius: 10px;
+            font-size: 12px;
+            display: none;
+            z-index: 9999;
+        }
+
+        .toast.ok {
+            background: rgba(22,163,74,0.95);
+            color: #ecfdf5;
+        }
+
+        .toast.err {
+            background: rgba(239,68,68,0.98);
+            color: #fef2f2;
+        }
+
+        @media (max-width: 1024px) {
+            .app-shell {
+                grid-template-columns: 1fr;
+            }
+            .sidebar {
+                flex-direction: row;
+                overflow-x: auto;
+                column-gap: 8px;
+            }
+            .sidebar-section-title,
+            .sidebar-footer {
+                display: none;
+            }
+        }
+    </style>
+</head>
+<body>
+<div class="app-shell">
+    <!-- SIDEBAR -->
+    <aside class="sidebar">
+        <div class="brand-row">
+            <div class="brand-logo">BH</div>
+            <div>
+                <div class="brand-text-main">BestHome</div>
+                <div class="brand-text-sub">MiniApp · Agent Panel</div>
+            </div>
+        </div>
+
+        <div>
+            <div class="sidebar-section-title">Naviqasiya</div>
+            <div class="nav-list">
+                <div class="nav-item active" data-page="dashboard">
+                    <span class="icon">🏠</span>
+                    <span>Panel</span>
+                </div>
+                <div class="nav-item" data-page="listings">
+                    <span class="icon">📋</span>
+                    <span>Bütün elanlar</span>
+                </div>
+                <div class="nav-item" data-page="add">
+                    <span class="icon">➕</span>
+                    <span>Elan əlavə et</span>
+                </div>
+                <div class="nav-item" data-page="favorites">
+                    <span class="icon">❤️</span>
+                    <span>Favorilər</span>
+                </div>
+                <div class="nav-item" data-page="admin">
+                    <span class="icon">🛡️</span>
+                    <span>Admin panel</span>
+                </div>
+                <div class="nav-item" data-page="agents">
+                    <span class="icon">🤝</span>
+                    <span>Vasitəçilər</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="sidebar-footer">
+            <span>v1.0 · MiniApp</span>
+            <span class="chip-outline">@besthome.az</span>
+        </div>
+    </aside>
+
+    <!-- MAIN -->
+    <main class="main">
+        <header class="main-header">
+            <div class="page-title-block">
+                <div class="page-title" id="pageTitle">Panel</div>
+                <div class="page-sub" id="pageSub">Ən son elanların xülasəsi və xəritə görünüşü.</div>
+            </div>
+            <div class="top-actions">
+                <div class="pill-soft" id="resultSummary">Hazırda 0 elan yüklənib</div>
+                <button class="btn-mini" id="openTelegram">Telegram bot</button>
+            </div>
+        </header>
+
+        <section class="sections">
+            <!-- DASHBOARD -->
+            <div class="section active" id="page-dashboard">
+                <div class="dashboard-grid">
+                    <div class="card">
+                        <div class="card-header">
+                            <div>
+                                <div class="card-title">Xəritə görünüşü</div>
+                                <div class="card-sub">Ərazı üzrə elanların vizual xəritəsi.</div>
+                            </div>
+                            <button class="btn-mini">Tezliklə real map</button>
+                        </div>
+                        <div class="map-placeholder">
+                            Xəritə inteqrasiyası növbəti addımda əlavə olunacaq.
+                            Hal-hazırda bu panel yalnız UI olaraq işləyir.
+                        </div>
+                    </div>
+                    <div class="card-soft">
+                        <div class="card-header">
+                            <div>
+                                <div class="card-title">Bugün üzrə statistika</div>
+                                <div class="card-sub">BestHome DB üzərindən hesablama.</div>
+                            </div>
+                            <div class="pill-soft" id="todayLabel">Bugün · demo rəqəmlər</div>
+                        </div>
+                        <div class="stats-row">
+                            <div class="stat-box">
+                                <div class="stat-label">Bu gün əlavə olunan</div>
+                                <div class="stat-value" id="statToday">0</div>
+                                <div class="stat-tag">son 24 saat</div>
+                            </div>
+                            <div class="stat-box">
+                                <div class="stat-label">Satış elanları</div>
+                                <div class="stat-value" id="statSale">0</div>
+                                <div class="stat-tag">BestHome listings</div>
+                            </div>
+                            <div class="stat-box">
+                                <div class="stat-label">Kirayə elanları</div>
+                                <div class="stat-value" id="statRent">0</div>
+                                <div class="stat-tag">aylıq / günlük</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="margin-top:14px;" class="card-soft">
+                    <div class="card-header">
+                        <div>
+                            <div class="card-title">Sürətli baxış · Son elanlar</div>
+                            <div class="card-sub">Son yüklənən bir neçə elan.</div>
+                        </div>
+                        <button class="btn-mini" data-page-jump="listings">Bütün elanlara bax</button>
+                    </div>
+                    <div id="dashboardRecentListings" class="cards-grid card-scroll"></div>
+                </div>
+            </div>
+
+            <!-- BÜTÜN ELANLAR -->
+            <div class="section" id="page-listings">
+                <div class="filter-bar">
+                    <div class="filter-group">
+                        <label class="filter-label">Açar söz</label>
+                        <input id="filterText" class="filter-input" placeholder="mətn, ünvan, metro..." />
+                    </div>
+                    <div class="filter-group">
+                        <label class="filter-label">Əlaqə nömrəsi</label>
+                        <input id="filterPhone" class="filter-input" placeholder="+994..." />
+                    </div>
+                    <div class="filter-group">
+                        <label class="filter-label">Rayon / qəsəbə</label>
+                        <input id="filterRayon" class="filter-input" placeholder="Saray, Yasamal..." />
+                    </div>
+                    <div class="filter-group">
+                        <label class="filter-label">Minimum qiymət</label>
+                        <input id="filterPriceMin" type="number" class="filter-input" placeholder="AZN" />
+                    </div>
+                    <div class="filter-group">
+                        <label class="filter-label">Maksimum qiymət</label>
+                        <input id="filterPriceMax" type="number" class="filter-input" placeholder="AZN" />
+                    </div>
+                    <div class="filter-group">
+                        <label class="filter-label">Otaq sayı</label>
+                        <input id="filterRooms" class="filter-input" placeholder="1,2,3..." />
+                        <label class="filter-checkbox">
+                            <input type="checkbox" id="filterCredit" />
+                            <span>Kredit / ipoteka</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="result-info">
+                    <div id="listingsInfo">Elanlar yüklənmədi.</div>
+                    <div id="listingsInfoRight">Səhifə 1 / 1</div>
+                </div>
+
+                <div id="listingsGrid" class="cards-grid"></div>
+
+                <div class="pagination-row">
+                    <div>Göstərilir: <span id="listingsRange">0–0</span></div>
+                    <div class="pagination-buttons">
+                        <button id="listingsPrev" class="btn-page">← Əvvəlki</button>
+                        <button id="listingsNext" class="btn-page">Növbəti →</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ELAN ƏLAVƏ ET -->
+            <div class="section" id="page-add">
+                <div class="card-soft">
+                    <div class="card-header">
+                        <div>
+                            <div class="card-title">Yeni elan əlavə et</div>
+                            <div class="card-sub">Məlumatlar local_data.db / listings_new cədvəlinə düşəcək.</div>
+                        </div>
+                    </div>
+
+                    <form id="addListingForm">
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label class="form-label">Əməliyyat</label>
+                                <select id="addOperation" class="form-select">
+                                    <option value="sale">Satılır</option>
+                                    <option value="rent">Kirayə</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Əmlak növü</label>
+                                <input id="addPropType" class="form-input" placeholder="mənzil, həyət evi..." />
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Rayon / qəsəbə</label>
+                                <input id="addRayon" class="form-input" placeholder="Saray qəs., Yasamal..." />
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Metro</label>
+                                <input id="addMetro" class="form-input" placeholder="Gənclik, 20 Yanvar..." />
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Otaq sayı</label>
+                                <input id="addRooms" class="form-input" placeholder="2 otaq" />
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Sahə (kv.m)</label>
+                                <input id="addArea" class="form-input" placeholder="65" />
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Qiymət</label>
+                                <input id="addPrice" class="form-input" placeholder="500" />
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Valyuta</label>
+                                <select id="addCurrency" class="form-select">
+                                    <option value="AZN">AZN</option>
+                                    <option value="USD">USD</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Əlaqə nömrəsi</label>
+                                <input id="addPhone" class="form-input" placeholder="+994..." />
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Əlaqə adı</label>
+                                <input id="addContact" class="form-input" placeholder="Ad Soyad" />
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Elanın linki (istəyə görə)</label>
+                                <input id="addLink" class="form-input" placeholder="https://..." />
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="form-label">Elan mətni</label>
+                            <textarea id="addSummary" class="form-textarea" placeholder="Elan haqqında ətraflı məlumat..."></textarea>
+                        </div>
+
+                        <div style="margin-top:8px; display:flex; gap:8px; justify-content:flex-end;">
+                            <button type="button" class="btn-outline" id="addListingReset">Təmizlə</button>
+                            <button type="submit" class="btn-primary">Göndər</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+            
+            
+            <!-- FAVORİLƏR -->
+            <div class="section" id="page-favorites">
+                <div class="card-soft">
+                    <div class="card-header">
+                        <div>
+                            <div class="card-title">Favori elanlar</div>
+                            <div class="card-sub">Telegram və miniapp üzərindən seçdiklərin.</div>
+                        </div>
+                        <div class="pill-soft" id="favCountLabel">0 favorit</div>
+                    </div>
+                    <div id="favoritesGrid" class="cards-grid"></div>
+                    <div id="favoritesEmpty" class="empty-state" style="display:none;">
+                        Hələ favoritə əlavə etdiyin elan yoxdur. Bütün elanlar siyahısından ❤ düyməsinə bas.
+                    </div>
+                </div>
+            </div>
+
+            <!-- ADMIN PANEL -->
+            <div class="section" id="page-admin">
+                <div class="card-soft">
+                    <div class="card-header">
+                        <div>
+                            <div class="card-title">Admin panel</div>
+                            <div class="card-sub">Təsdiq gözləyən elanların siyahısı.</div>
+                        </div>
+                    </div>
+                    <div id="adminList" class="cards-grid"></div>
+                </div>
+            </div>
+
+            <!-- VASİTƏÇİLƏR -->
+            <div class="section" id="page-agents">
+                <div class="card-soft">
+                    <div class="card-header">
+                        <div>
+                            <div class="card-title">Vasitəçilər</div>
+                            <div class="card-sub">Agents.db mənbəli elanlar, nömrə və sözlə axtarış.</div>
+                        </div>
+                    </div>
+
+                    <div class="filter-bar" style="margin-bottom:8px;">
+                        <div class="filter-group">
+                            <label class="filter-label">Açar söz</label>
+                            <input id="agentsText" class="filter-input" placeholder="mətn, ünvan..." />
+                        </div>
+                        <div class="filter-group">
+                            <label class="filter-label">Əlaqə nömrəsi</label>
+                            <input id="agentsPhone" class="filter-input" placeholder="+994..." />
+                        </div>
+                        <div class="filter-group">
+                            <label class="filter-label">Rayon / qəsəbə</label>
+                            <input id="agentsRayon" class="filter-input" placeholder="Saray, Yasamal..." />
+                        </div>
+                        <div class="filter-group">
+                            <label class="filter-label">Əməliyyat</label>
+                            <select id="agentsOperation" class="filter-select">
+                                <option value="">Hamısı</option>
+                                <option value="Satılır">Satılır</option>
+                                <option value="Kirayə verilir">Kirayə verilir</option>
+                            </select>
+                        </div>
+                        <div class="filter-actions">
+                            <button id="agentsSearchBtn" class="btn-primary">Axtar</button>
+                            <button id="agentsResetBtn" class="btn-outline">Sıfırla</button>
+                        </div>
+                    </div>
+
+                    <div class="result-info">
+                        <div id="agentsInfo">Vasitəçi elanları hələ yüklənməyib.</div>
+                        <div id="agentsInfoRight">Səhifə 1 / 1</div>
+                    </div>
+
+                    <div id="agentsGrid" class="cards-grid"></div>
+
+                    <div class="pagination-row">
+                        <div>Göstərilir: <span id="agentsRange">0–0</span></div>
+                        <div class="pagination-buttons">
+                            <button id="agentsPrev" class="btn-page">← Əvvəlki</button>
+                            <button id="agentsNext" class="btn-page">Növbəti →</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+    // =============================
+    // Helper – Toast
+    // =============================
+    const toastEl = document.getElementById("toast");
+    let toastTimer = null;
+
+    function showToast(message, type = "ok") {
+        toastEl.textContent = message;
+        toastEl.className = "toast " + (type === "ok" ? "ok" : "err");
+        toastEl.style.display = "block";
+
+        if (toastTimer) clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => {
+            toastEl.style.display = "none";
+        }, 2600);
+    }
+
+    // =============================
+    // Naviqasiya
+    // =============================
+    const navItems = document.querySelectorAll(".nav-item");
+    const sections = document.querySelectorAll(".section");
+    const pageTitleEl = document.getElementById("pageTitle");
+    const pageSubEl = document.getElementById("pageSub");
+
+    const pageMeta = {
+        dashboard: {
+            title: "Panel",
+            sub: "Ən son elanların xülasəsi və xəritə görünüşü."
+        },
+        listings: {
+            title: "Bütün elanlar",
+            sub: "Filtrlə, nömrə və sözlə axtar, nəticə sayını gör."
+        },
+        add: {
+            title: "Elan əlavə et",
+            sub: "Yeni elanları local_data.db vasitəsilə sistemə yaz."
+        },
+        favorites: {
+            title: "Favorilər",
+            sub: "Seçilmiş elanlara tez çıxış."
+        },
+        admin: {
+            title: "Admin panel",
+            sub: "Təsdiq gözləyən elanlar üzərində nəzarət."
+        },
+        agents: {
+            title: "Vasitəçilər",
+            sub: "Agents.db məlumatlarından detallı axtarış."
+        }
+    };
+
+    navItems.forEach(item => {
+        item.addEventListener("click", () => {
+            const page = item.getAttribute("data-page");
+
+            navItems.forEach(n => n.classList.remove("active"));
+            item.classList.add("active");
+
+            sections.forEach(sec => sec.classList.remove("active"));
+            document.getElementById("page-" + page).classList.add("active");
+
+            pageTitleEl.textContent = pageMeta[page].title;
+            pageSubEl.textContent = pageMeta[page].sub;
+
+            if (page === "listings") {
+                listingsState.page = 1;
+                loadListings();
+            } else if (page === "favorites") {
+                loadFavorites();
+            } else if (page === "admin") {
+                renderAdminList();
+            } else if (page === "agents") {
+                agentsState.page = 1;
+                loadAgents();
+            }
+        });
+    });
+
+    document.querySelectorAll("[data-page-jump]").forEach(btn => {
+        btn.addEventListener("click", () => {
+            const target = btn.getAttribute("data-page-jump");
+            document.querySelector(`.nav-item[data-page="${target}"]`).click();
+        });
+    });
+
+    document.getElementById("openTelegram").addEventListener("click", () => {
+        // Buraya öz bot linkivi qoyarsan
+        window.open("https://t.me/EmlakTapBot", "_blank");
+    });
+
+    // =============================
+    // GLOBAL STATE
+    // =============================
+    const resultSummary = document.getElementById("resultSummary");
+
+    const listingsState = {
+        page: 1,
+        total: 0,
+        pageSize: 0,
+        totalPages: 1
+    };
+
+    const agentsState = {
+        page: 1,
+        total: 0,
+        pageSize: 0,
+        totalPages: 1
+    };
+
+    // =============================
+    // Bütün elanlar – load & render
+    // =============================
+    const listingsGrid = document.getElementById("listingsGrid");
+    const listingsInfo = document.getElementById("listingsInfo");
+    const listingsInfoRight = document.getElementById("listingsInfoRight");
+    const listingsRange = document.getElementById("listingsRange");
+
+    async function loadListings(pageOverride) {
+        const page = pageOverride || listingsState.page || 1;
+
+        const q = document.getElementById("filterText").value.trim();
+        const phone = document.getElementById("filterPhone").value.trim();
+        const rayon = document.getElementById("filterRayon").value.trim();
+        const minPrice = document.getElementById("filterPriceMin").value.trim();
+        const maxPrice = document.getElementById("filterPriceMax").value.trim();
+        const rooms = document.getElementById("filterRooms").value.trim();
+        const credit = document.getElementById("filterCredit").checked ? 1 : 0;
+
+        listingsInfo.textContent = "Yüklənir...";
+        listingsGrid.innerHTML = "";
+
+        const params = new URLSearchParams();
+        params.set("page", page);
+        if (q) params.set("q", q);
+        if (phone) params.set("phone", phone);
+        if (rayon) params.set("rayon", rayon);
+        if (minPrice) params.set("min_price", minPrice);
+        if (maxPrice) params.set("max_price", maxPrice);
+        if (rooms) params.set("rooms", rooms);
+        if (credit) params.set("credit", "1");
+
+        try {
+            const resp = await fetch("/api/listings?" + params.toString());
+            const data = await resp.json();
+
+            if (!data.ok) {
+                listingsInfo.textContent = "Xəta baş verdi: " + (data.error || "bilinmir");
+                return;
+            }
+
+            const items = data.items || [];
+            listingsState.page = data.page || page;
+            listingsState.total = data.total || items.length;
+            listingsState.pageSize = data.page_size || items.length;
+            listingsState.totalPages = data.total_pages || 1;
+
+            renderListings(items);
+
+            const from = listingsState.total === 0 ? 0 : ( (listingsState.page - 1) * listingsState.pageSize + 1 );
+            const to = (listingsState.page - 1) * listingsState.pageSize + items.length;
+
+            listingsInfo.textContent = `${listingsState.total} elan tapıldı`;
+            listingsInfoRight.textContent = `Səhifə ${listingsState.page} / ${listingsState.totalPages}`;
+            listingsRange.textContent = `${from}–${to}`;
+            resultSummary.textContent = `BestHome: ${listingsState.total} aktiv elan`;
+
+            // Dashboard statistikaları
+            if (data.stats) {
+                document.getElementById("statToday").textContent = data.stats.today_total ?? 0;
+                document.getElementById("statSale").textContent = data.stats.sale_total ?? 0;
+                document.getElementById("statRent").textContent = data.stats.rent_total ?? 0;
+            }
+        } catch (e) {
+            console.error(e);
+            listingsInfo.textContent = "Serverə qoşulmaq mümkün olmadı.";
+        }
+    }
+
+    function renderListings(items) {
+        listingsGrid.innerHTML = "";
+        const recentContainer = document.getElementById("dashboardRecentListings");
+        recentContainer.innerHTML = "";
+
+        if (!items.length) {
+            listingsGrid.innerHTML = `<div class="empty-state">Bu filtrlərlə uyğun elan tapılmadı.</div>`;
+            return;
+        }
+
+        items.forEach((l, idx) => {
+            const card = document.createElement("div");
+            card.className = "listing-card" + (l.is_favorite ? " favorite" : "");
+
+            const title = l.summary && l.summary.length > 110
+                ? l.summary.slice(0, 110) + "..."
+                : (l.summary || "");
+
+            card.innerHTML = `
+                <div class="listing-header-row">
+                    <div class="pill-op">${l.operation || "Elan"}</div>
+                    <div class="price-label">${(l.price || "?")} ${l.currency || "AZN"}</div>
+                </div>
+                <div class="listing-title">${l.rayon || ""} · ${l.rooms || ""}</div>
+                <div class="listing-summary">${title}</div>
+                <div class="listing-meta-row">
+                    <div>${l.metro || ""}</div>
+                    <div>${l.phone || ""}</div>
+                </div>
+                <div class="listing-actions-row">
+                    <button class="link-btn" ${l.link ? "" : "disabled"} data-link="${l.link || ""}">Elana keçid</button>
+                    <button class="fav-toggle ${l.is_favorite ? "active" : ""}" data-id="${l.id}" data-source="besthome">
+                        ${l.is_favorite ? "❤ Favoridə" : "♡ Favoriyə əlavə et"}
+                    </button>
+                </div>
+            `;
+
+            listingsGrid.appendChild(card);
+
+            // İlk 4 elanı panel üçün də göstərək
+            if (idx < 4) {
+                const mini = card.cloneNode(true);
+                mini.style.transform = "scale(0.98)";
+                mini.style.opacity = "0.95";
+                recentContainer.appendChild(mini);
+            }
+        });
+
+        // Link düymələri
+        listingsGrid.querySelectorAll(".link-btn").forEach(btn => {
+            if (!btn.dataset.link) return;
+            btn.addEventListener("click", () => {
+                window.open(btn.dataset.link, "_blank");
+            });
+        });
+
+        // Favori düymələri
+        listingsGrid.querySelectorAll(".fav-toggle").forEach(btn => {
+            btn.addEventListener("click", async () => {
+                const id = Number(btn.getAttribute("data-id"));
+                const source = btn.getAttribute("data-source") || "besthome";
+                await toggleFavorite(id, source, btn, btn.closest(".listing-card"));
+            });
+        });
+    }
+
+    document.getElementById("listingsPrev").addEventListener("click", () => {
+        if (listingsState.page > 1) {
+            listingsState.page--;
+            loadListings();
+        }
+    });
+
+    document.getElementById("listingsNext").addEventListener("click", () => {
+        if (listingsState.page < listingsState.totalPages) {
+            listingsState.page++;
+            loadListings();
+        }
+    });
+
+    document.getElementById("filterText").addEventListener("keydown", e => {
+        if (e.key === "Enter") {
+            e.preventDefault();
+            listingsState.page = 1;
+            loadListings();
+        }
+    });
+
+    document.getElementById("filterPhone").addEventListener("keydown", e => {
+        if (e.key === "Enter") {
+            e.preventDefault();
+            listingsState.page = 1;
+            loadListings();
+        }
+    });
+
+    // =============================
+    // Favoritlər
+    // =============================
+    const favGrid = document.getElementById("favoritesGrid");
+    const favEmpty = document.getElementById("favoritesEmpty");
+    const favCountLabel = document.getElementById("favCountLabel");
+
+    async function toggleFavorite(id, source, btnEl, cardEl) {
+        try {
+            const resp = await fetch("/api/favorites/toggle", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ listing_id: id, source })
+            });
+            const data = await resp.json();
+            if (!data.ok) {
+                showToast("Favori əməliyyatı alınmadı", "err");
+                return;
+            }
+
+            const inFav = !!data.in_favorites;
+            if (btnEl) {
+                btnEl.classList.toggle("active", inFav);
+                btnEl.textContent = inFav ? "❤ Favoridə" : "♡ Favoriyə əlavə et";
+            }
+            if (cardEl) {
+                cardEl.classList.toggle("favorite", inFav);
+            }
+
+            showToast(inFav ? "Elan favorilərə əlavə olundu" : "Elan favoritdən çıxarıldı", "ok");
+            loadFavorites();
+        } catch (e) {
+            console.error(e);
+            showToast("Server xətası (favorites)", "err");
+        }
+    }
+
+    async function loadFavorites() {
+        try {
+            const resp = await fetch("/api/favorites/list");
+            const data = await resp.json();
+            if (!data.ok) {
+                favGrid.innerHTML = "";
+                favEmpty.style.display = "block";
+                favEmpty.textContent = "Favorilər yüklənmədi.";
+                return;
+            }
+
+            const items = data.items || [];
+            favGrid.innerHTML = "";
+            favEmpty.style.display = items.length ? "none" : "block";
+            favCountLabel.textContent = `${items.length} favorit`;
+
+            if (!items.length) return;
+
+            items.forEach(l => {
+                const card = document.createElement("div");
+                card.className = "listing-card favorite";
+                const title = l.summary && l.summary.length > 120
+                    ? l.summary.slice(0, 120) + "..."
+                    : (l.summary || "");
+
+                card.innerHTML = `
+                    <div class="listing-header-row">
+                        <div class="pill-op">${l.operation || "Elan"}</div>
+                        <div class="price-label">${(l.price || "?")} ${l.currency || "AZN"}</div>
+                    </div>
+                    <div class="listing-title">${l.rayon || ""} · ${l.rooms || ""}</div>
+                    <div class="listing-summary">${title}</div>
+                    <div class="listing-actions-row">
+                        <button class="link-btn" ${l.link ? "" : "disabled"} data-link="${l.link || ""}">Elana keçid</button>
+                        <button class="fav-toggle active" data-id="${l.id}" data-source="${l.source || "besthome"}">
+                            Favoridən çıxar
+                        </button>
+                    </div>
+                `;
+                favGrid.appendChild(card);
+            });
+
+            favGrid.querySelectorAll(".link-btn").forEach(btn => {
+                if (!btn.dataset.link) return;
+                btn.addEventListener("click", () => {
+                    window.open(btn.dataset.link, "_blank");
+                });
+            });
+
+            favGrid.querySelectorAll(".fav-toggle").forEach(btn => {
+                btn.addEventListener("click", async () => {
+                    const id = Number(btn.getAttribute("data-id"));
+                    const source = btn.getAttribute("data-source") || "besthome";
+                    await toggleFavorite(id, source, btn, btn.closest(".listing-card"));
+                });
+            });
+        } catch (e) {
+            console.error(e);
+            favGrid.innerHTML = "";
+            favEmpty.style.display = "block";
+            favEmpty.textContent = "Server xətası səbəbindən favorilər alınmadı.";
+        }
+    }
+
+    // =============================
+    // Admin pending list
+    // =============================
+    async function fetchPendingListings() {
+        try {
+            const resp = await fetch("/api/admin/pending");
+            const data = await resp.json();
+            if (!data.ok) return [];
+            return data.items || [];
+        } catch (e) {
+            console.error(e);
+            return [];
+        }
+    }
+
+    async function renderAdminList() {
+        const adminList = document.getElementById("adminList");
+        adminList.innerHTML = "";
+
+        const items = await fetchPendingListings();
+        if (!items.length) {
+            adminList.innerHTML = `<div class="empty-state">Təsdiq gözləyən elan yoxdur.</div>`;
+            return;
+        }
+
+        items.forEach(l => {
+            const div = document.createElement("div");
+            div.className = "listing-card";
+            div.innerHTML = `
+                <div class="listing-title" style="margin-bottom:4px;">${l.title}</div>
+                <div class="listing-summary" style="max-height:60px;">${l.summary || ""}</div>
+                <div class="listing-meta-row" style="margin-top:4px;">
+                    <span>${l.price || ""}</span>
+                    <span>${l.city || ""}</span>
+                </div>
+                <div class="listing-actions-row">
+                    <button class="btn-mini" data-act="approve" data-id="${l.id}">Təsdiq et</button>
+                    <button class="btn-mini" style="background:rgba(248,113,113,0.2);color:#fecaca;"
+                        data-act="reject" data-id="${l.id}">Rədd et</button>
+                </div>
+            `;
+            adminList.appendChild(div);
+        });
+
+        adminList.querySelectorAll("button[data-act]").forEach(btn => {
+            btn.addEventListener("click", async () => {
+                const id = Number(btn.getAttribute("data-id"));
+                const act = btn.getAttribute("data-act");
+                const url = act === "approve" ? "/api/admin/approve" : "/api/admin/reject";
+
+                try {
+                    const resp = await fetch(url, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ id })
+                    });
+                    const data = await resp.json();
+                    if (!data.ok) {
+                        showToast("Əməliyyat alınmadı", "err");
+                        return;
+                    }
+                    showToast(act === "approve" ? "Elan təsdiq olundu" : "Elan rədd edildi", "ok");
+                    renderAdminList();
+                } catch (e) {
+                    console.error(e);
+                    showToast("Server xətası (admin)", "err");
+                }
+            });
+        });
+    }
+
+    // =============================
+    // Vasitəçilər – Agents
+    // =============================
+    const agentsGrid = document.getElementById("agentsGrid");
+    const agentsInfo = document.getElementById("agentsInfo");
+    const agentsInfoRight = document.getElementById("agentsInfoRight");
+    const agentsRange = document.getElementById("agentsRange");
+
+    async function loadAgents(pageOverride) {
+        const page = pageOverride || agentsState.page || 1;
+
+        const q = document.getElementById("agentsText").value.trim();
+        const phone = document.getElementById("agentsPhone").value.trim();
+        const rayon = document.getElementById("agentsRayon").value.trim();
+        const op = document.getElementById("agentsOperation").value;
+
+        agentsInfo.textContent = "Yüklənir...";
+        agentsGrid.innerHTML = "";
+
+        const params = new URLSearchParams();
+        params.set("page", page);
+        if (q) params.set("q", q);
+        if (phone) params.set("phone", phone);
+        if (rayon) params.set("rayon", rayon);
+        if (op) params.set("operation", op);
+
+        try {
+            const resp = await fetch("/api/agents?" + params.toString());
+            const data = await resp.json();
+            if (!data.ok) {
+                agentsInfo.textContent = "Xəta baş verdi: " + (data.error || "bilinmir");
+                return;
+            }
+
+            const items = data.items || [];
+            agentsState.page = data.page || page;
+            agentsState.total = data.total || items.length;
+            agentsState.pageSize = data.page_size || items.length;
+            agentsState.totalPages = data.total_pages || 1;
+
+            renderAgents(items);
+
+            const from = agentsState.total === 0 ? 0 : ((agentsState.page - 1) * agentsState.pageSize + 1);
+            const to = (agentsState.page - 1) * agentsState.pageSize + items.length;
+
+            agentsInfo.textContent = `${agentsState.total} vasitəçi elanı tapıldı`;
+            agentsInfoRight.textContent = `Səhifə ${agentsState.page} / ${agentsState.totalPages}`;
+            agentsRange.textContent = `${from}–${to}`;
+        } catch (e) {
+            console.error(e);
+            agentsInfo.textContent = "Serverə qoşulmaq mümkün olmadı.";
+        }
+    }
+
+    function renderAgents(items) {
+        agentsGrid.innerHTML = "";
+        if (!items.length) {
+            agentsGrid.innerHTML = `<div class="empty-state">Bu filtrlərlə vasitəçi elanı tapılmadı.</div>`;
+            return;
+        }
+
+        items.forEach(l => {
+            const card = document.createElement("div");
+            card.className = "agent-card";
+            const text = l.summary && l.summary.length > 120
+                ? l.summary.slice(0, 120) + "..."
+                : (l.summary || "");
+
+            card.innerHTML = `
+                <div class="agent-header">
+                    <div class="agent-name">${l.agent_name || "Vasitəçi"}</div>
+                    <div class="agent-phone">${l.phone || ""}</div>
+                </div>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                    <span class="tag-badge">${l.operation || ""}</span>
+                    <span style="font-size:10px;">${l.rayon || ""}</span>
+                </div>
+                <div style="font-size:11px;margin-bottom:6px;">${text}</div>
+                <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <button class="link-btn" ${l.link ? "" : "disabled"} data-link="${l.link || ""}">
+                        Elana keçid
+                    </button>
+                    <button class="fav-toggle ${l.is_favorite ? "active" : ""}"
+                        data-id="${l.id}" data-source="agents">
+                        ${l.is_favorite ? "❤ Favoridə" : "♡ Favoriyə əlavə et"}
+                    </button>
+                </div>
+            `;
+            agentsGrid.appendChild(card);
+        });
+
+        agentsGrid.querySelectorAll(".link-btn").forEach(btn => {
+            if (!btn.dataset.link) return;
+            btn.addEventListener("click", () => {
+                window.open(btn.dataset.link, "_blank");
+            });
+        });
+
+        agentsGrid.querySelectorAll(".fav-toggle").forEach(btn => {
+            btn.addEventListener("click", async () => {
+                const id = Number(btn.getAttribute("data-id"));
+                const source = btn.getAttribute("data-source") || "agents";
+                await toggleFavorite(id, source, btn, btn.closest(".agent-card"));
+            });
+        });
+    }
+
+    document.getElementById("agentsPrev").addEventListener("click", () => {
+        if (agentsState.page > 1) {
+            agentsState.page--;
+            loadAgents();
+        }
+    });
+
+    document.getElementById("agentsNext").addEventListener("click", () => {
+        if (agentsState.page < agentsState.totalPages) {
+            agentsState.page++;
+            loadAgents();
+        }
+    });
+
+    document.getElementById("agentsSearchBtn").addEventListener("click", () => {
+        agentsState.page = 1;
+        loadAgents();
+    });
+
+    document.getElementById("agentsResetBtn").addEventListener("click", () => {
+        document.getElementById("agentsText").value = "";
+        document.getElementById("agentsPhone").value = "";
+        document.getElementById("agentsRayon").value = "";
+        document.getElementById("agentsOperation").value = "";
+        agentsState.page = 1;
+        loadAgents();
+    });
+
+    // =============================
+    // Elan əlavə et – submit
+    // =============================
+    const addForm = document.getElementById("addListingForm");
+
+    addForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+
+        const payload = {
+            operation: document.getElementById("addOperation").value.trim(),
+            prop_type: document.getElementById("addPropType").value.trim(),
+            rayon: document.getElementById("addRayon").value.trim(),
+            metro: document.getElementById("addMetro").value.trim(),
+            rooms: document.getElementById("addRooms").value.trim(),
+            area_kvm: document.getElementById("addArea").value.trim(),
+            price: document.getElementById("addPrice").value.trim(),
+            currency: document.getElementById("addCurrency").value.trim(),
+            phone: document.getElementById("addPhone").value.trim(),
+            contact_name: document.getElementById("addContact").value.trim(),
+            link: document.getElementById("addLink").value.trim(),
+            summary: document.getElementById("addSummary").value.trim()
+        };
+
+        if (!payload.price || !payload.summary) {
+            showToast("Qiymət və elan mətnini doldurmaq mütləqdir", "err");
+            return;
+        }
+
+        try {
+            const resp = await fetch("/api/listings/add", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+
+            const data = await resp.json().catch(() => null);
+            if (!resp.ok || !data || !data.ok) {
+                showToast("Elan əlavə olunmadı (server cavabı düzgün deyil)", "err");
+                return;
+            }
+
+            showToast("Elan uğurla əlavə olundu", "ok");
+            addForm.reset();
+        } catch (err) {
+            console.error(err);
+            showToast("Server xətası (elan əlavə)", "err");
+        }
+    });
+
+    document.getElementById("addListingReset").addEventListener("click", () => {
+        addForm.reset();
+    });
+
+    // =============================
+    // İlk yükləmə
+    // =============================
+    (function init() {
+        loadListings();
+        loadFavorites();
+        renderAdminList();
+        // Vasitəçilər hissəsini istifadəçi keçəndə ayrıca yükləyirik
+    })();
+</script>
+</body>
+</html>
