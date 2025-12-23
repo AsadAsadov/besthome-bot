@@ -161,6 +161,8 @@ DB_UPDATE_UNZIP_TIMEOUT_SECONDS = 120
 DB_UPDATE_VALIDATE_TIMEOUT_SECONDS = 60
 DB_UPDATE_REPLACE_TIMEOUT_SECONDS = 60
 DB_UPDATE_STATE_PATH = os.path.join(DATA_DIR, "db_update_state.json")
+DB_UPDATE_TMP_DIR = "/data/tmp"
+DB_UPDATE_BACKUP_DIR = "/data/backups"
 complaint_flow_state = {}
 complaint_records = {}
 admin_reply_state = {}
@@ -204,7 +206,7 @@ TEXTS_AZ = {
     "admin_panel_reset_limits": "♻️ Limitləri sıfırla",
     "admin_panel_send_update": "🚀 Yeniləmə göndər",
     "admin_panel_topviews": "🔥 Ən çox baxılan elanlar",
-    "admin_panel_db_update": "📦 Baza yenilə",
+    "admin_panel_db_update": "📦 Bazanı yenilə (Dropbox)",
     "admin_panel_direct_message": "📨 İstifadəçiyə mesaj göndər",
     "admin_panel_customer_requests_access": "📌 Müştəri istəkləri icazəsi",
     "admin_panel_archived_requests": "🗄 Arxivlənmiş müştəri istəkləri",
@@ -730,8 +732,9 @@ def backup_main_db_file() -> Optional[str]:
     if not os.path.exists(MAIN_DB):
         return None
 
-    ts = now_utc().strftime("%Y-%m-%d_%H-%M")
-    backup_path = os.path.join(DATA_DIR, f"besthome_backup_{ts}.db")
+    os.makedirs(DB_UPDATE_BACKUP_DIR, exist_ok=True)
+    ts = now_utc().strftime("%Y%m%d_%H%M")
+    backup_path = os.path.join(DB_UPDATE_BACKUP_DIR, f"besthome_{ts}.db")
     shutil.copy2(MAIN_DB, backup_path)
     return backup_path
 
@@ -764,6 +767,8 @@ def normalize_dropbox_urls(url: str) -> List[str]:
     if not url:
         return []
     parts = urlsplit(url)
+    if parts.scheme.lower() != "https":
+        return []
     query = parse_qs(parts.query)
     query["dl"] = ["1"]
     base = urlunsplit(
@@ -779,7 +784,8 @@ def normalize_dropbox_urls(url: str) -> List[str]:
 def download_zip_stream(url: str) -> str:
     last_error = None
     for candidate in normalize_dropbox_urls(url):
-        fd, temp_path = tempfile.mkstemp(suffix=".zip")
+        os.makedirs(DB_UPDATE_TMP_DIR, exist_ok=True)
+        fd, temp_path = tempfile.mkstemp(suffix=".zip", dir=DB_UPDATE_TMP_DIR)
         os.close(fd)
         try:
             with requests.get(
@@ -824,24 +830,22 @@ def extract_main_db_from_zip(zip_path: str) -> Tuple[str, str]:
     if not zipfile.is_zipfile(zip_path):
         raise RuntimeError("Fayl ZIP formatında deyil")
 
-    temp_dir = tempfile.mkdtemp()
+    os.makedirs(DB_UPDATE_TMP_DIR, exist_ok=True)
+    temp_dir = tempfile.mkdtemp(dir=DB_UPDATE_TMP_DIR)
     with zipfile.ZipFile(zip_path, "r") as zf:
-        names = zf.namelist()
-        candidates = []
-        for name in names:
-            lower = name.lower()
-            if lower.endswith((".db", ".sqlite", ".db3")):
-                candidates.append(name)
-        if not candidates:
-            raise RuntimeError("ZIP daxilində DB faylı tapılmadı")
-        preferred = None
-        for name in candidates:
-            if "besthome" in name.lower():
-                preferred = name
+        bad_file = zf.testzip()
+        if bad_file:
+            raise RuntimeError(f"ZIP faylında zədəli fayl var: {bad_file}")
+        target = None
+        for name in zf.namelist():
+            if os.path.basename(name).lower() == "besthome.db":
+                target = name
                 break
-        target = preferred or candidates[0]
-        zf.extract(target, path=temp_dir)
-    extracted_path = os.path.join(temp_dir, target)
+        if not target:
+            raise RuntimeError("ZIP daxilində besthome.db tapılmadı")
+        extracted_path = os.path.join(temp_dir, "besthome.db")
+        with zf.open(target) as src, open(extracted_path, "wb") as dst:
+            shutil.copyfileobj(src, dst)
     return extracted_path, temp_dir
 
 
@@ -3352,20 +3356,11 @@ def count_local_active_listings(
 
 
 def count_today_listings(filters: dict, op_override: Optional[str] = None) -> int:
-    op_code = op_override if op_override is not None else filters.get("op", "all")
-    prop_code = filters.get("prop", "all")
-    rayon = filters.get("rayon")
-    return count_main_active_listings(
-        op_code=op_code,
-        prop_code=prop_code,
-        rayon=rayon,
-        only_today=True,
-    ) + count_local_active_listings(
-        op_code=op_code,
-        prop_code=prop_code,
-        rayon=rayon,
-        only_today=True,
-    )
+    filters = dict(filters or {})
+    if op_override is not None:
+        filters["op"] = op_override
+    _, total = query_today_results(filters, offset=0, limit=None)
+    return total
 
 
 def build_pagination_keyboard(page: int, total_pages: int):
@@ -9459,6 +9454,23 @@ def matches_region_rayon(ev: dict, filters: dict) -> bool:
     return True
 
 
+def normalize_rayon_name(value: Optional[str]) -> str:
+    return str(value or "").strip().lower()
+
+
+def matches_today_rayon(ev: dict, filters: dict) -> bool:
+    rayon = filters.get("rayon")
+    if not rayon or rayon == "all":
+        return True
+    target = normalize_rayon_name(rayon)
+    candidates = (
+        ev.get("rayon"),
+        ev.get("Rayon_Qesebe"),
+        ev.get("Rayon"),
+    )
+    return any(normalize_rayon_name(val) == target for val in candidates if val)
+
+
 def matches_rooms(ev: dict, room_code: str) -> bool:
     if not room_code or room_code == "r0":
         return True
@@ -9849,10 +9861,12 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
             continue
         if not (start <= ev_dt <= end):
             continue
+        if not matches_today_rayon(ev, filters):
+            continue
         filtered.append(ev)
 
     filtered.sort(key=safe_date, reverse=True)
-    total = count_today_listings(filters)
+    total = len(filtered)
     if limit is not None:
         filtered = filtered[offset : offset + limit]
     return filtered, total
@@ -13737,7 +13751,7 @@ def start_admin_update_db(chat_id: int, callback_id: Optional[str] = None):
     logger.info("Admin requested db update chat_id=%s", chat_id)
     safe_admin_step(
         chat_id,
-        "🔗 Yeni besthome.zip yükləmə linkini göndərin.",
+        "🔗 Dropbox ZIP linkini göndərin (besthome.db daxilində olmalıdır).",
     )
 
 
@@ -13767,8 +13781,13 @@ def handle_admin_db_upload(message):
 
     url = message.text.strip() if message.text else ""
     url_lower = url.lower()
-    if not url or not re.match(r"https?://", url) or "dropbox" not in url_lower:
-        safe_admin_step(chat_id, "❌ Zəhmət olmasa Dropbox ZIP linki göndərin.")
+    parts = urlsplit(url)
+    if (
+        not url
+        or parts.scheme.lower() != "https"
+        or "dropbox" not in parts.netloc.lower()
+    ):
+        safe_admin_step(chat_id, "❌ Zəhmət olmasa HTTPS Dropbox ZIP linki göndərin.")
         return
 
     running = get_running_db_update()
@@ -15484,26 +15503,11 @@ def cb_user_approve_action(c):
     conn.commit()
     conn.close()
 
-    if not is_user_active(uid):
-        conn = get_local_conn()
-        cur = conn.cursor()
-        cur.execute("UPDATE users SET approved=0 WHERE chat_id=?", (uid,))
-        conn.commit()
-        conn.close()
-        safe_answer_callback_query(c.id, TEXTS_AZ["admin_user_no_plan"])
-        return
-
-    status_text = "Aktiv"
-    expires_at = get_effective_expires_at(uid)
-
-    apply_referral_bonus(uid)
-
-    safe_answer_callback_query(c.id, TEXTS_AZ["admin_user_activated"])
+    safe_answer_callback_query(c.id, "✅ İstifadəçi təsdiqləndi.")
     try:
-        expiry_txt = format_effective_expiry_for_ui(expires_at)
         bot.send_message(
             uid,
-            f"✅ Hesabınız {status_text} olaraq aktiv edildi.\n📅 Bitmə tarixi: {expiry_txt}",
+            "✅ Hesabınız təsdiqləndi. Admin tərəfindən demo və ya uzatma verilə bilər.",
         )
     except Exception:
         pass
@@ -15588,30 +15592,12 @@ def cb_user_approve(c):
     cur.execute("UPDATE users SET approved=1 WHERE chat_id=?", (uid,))
     conn.commit()
     conn.close()
-    if not is_user_active(uid):
-        conn = get_local_conn()
-        cur = conn.cursor()
-        cur.execute("UPDATE users SET approved=0 WHERE chat_id=?", (uid,))
-        conn.commit()
-        conn.close()
-        bot.answer_callback_query(c.id, "⚠️ Aktiv plan tapılmadı")
-        bot.send_message(
-            c.message.chat.id,
-            "Ödəniş və ya demo aktiv deyil. Limitsiz et və ya ödəniş gözləyin.",
-        )
-        return
 
-    status_text = "✅ Aktiv"
-    expires_at = get_effective_expires_at(uid)
-
-    apply_referral_bonus(uid)
-
-    bot.answer_callback_query(c.id, "✅ İstifadəçi aktiv edildi.")
+    bot.answer_callback_query(c.id, "✅ İstifadəçi təsdiqləndi.")
     try:
-        expiry_txt = format_effective_expiry_for_ui(expires_at)
         bot.send_message(
             uid,
-            f"🎉 Hesabınız {status_text} kimi aktiv edildi.\n📅 Bitmə tarixi: {expiry_txt}",
+            "✅ Hesabınız təsdiqləndi.",
         )
     except Exception:
         pass
