@@ -180,6 +180,7 @@ keyword_alert_state = {}
 notification_rule_state = {}
 notification_menu_state = {}
 keyword_hits_context = {}
+keyword_notification_state: Dict[int, Dict[str, Any]] = {}
 BLOCKED_MESSAGE_TEXT = "Hesabınız müvəqqəti olaraq dayandırıldı."
 STATUS_PENDING = "pending"
 STATUS_ACTIVE_PAID = "active_paid"
@@ -4113,8 +4114,10 @@ def send_with_reply_keyboard(
     send_menu_visibility_hint(chat_id)
 
 
-def send_main_menu(chat_id: int):
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+def send_main_menu(chat_id: int, text: Optional[str] = None):
+    kb = types.ReplyKeyboardMarkup(
+        resize_keyboard=True, one_time_keyboard=False, is_persistent=True
+    )
     buttons = [
         "🔎 Axtarış sistemi",
         "🆕 Bu gün daxil olan elanlar",
@@ -4135,7 +4138,8 @@ def send_main_menu(chat_id: int):
         row = buttons[i : i + 2]
         kb.row(*row)
     kb.row(MENU_REFRESH_BUTTON)
-    send_with_reply_keyboard(chat_id, "🏠 Əsas menyu:", kb)
+    kb = ensure_refresh_button(kb)
+    send_with_reply_keyboard(chat_id, text or "🏠 Əsas menyu:", kb)
 
 
 def build_search_menu_keyboard():
@@ -5278,6 +5282,21 @@ def build_listing_text_blob(ev: dict) -> str:
     return normalize_text(" ".join([str(p) for p in parts if p]))
 
 
+def build_listing_unique_key(ev: dict, source: str) -> Optional[str]:
+    listing_id = ev.get("id") or ev.get("ID") or ev.get("Elan_kodu")
+    if listing_id:
+        return f"{source}:{listing_id}".strip()
+    link = (
+        ev.get("source_link")
+        or ev.get("source_url")
+        or ev.get("link")
+        or ev.get("Link")
+    )
+    if link:
+        return f"{source}:{str(link).strip()}"
+    return None
+
+
 def build_request_text_blob(req_row: dict) -> str:
     parts = [
         req_row.get("request_type"),
@@ -5335,13 +5354,45 @@ def record_keyword_alert_hit(
     return inserted
 
 
-def process_keyword_alerts_for_listing(ev: dict, source: str = "main"):
+def store_keyword_notification_match(
+    user_id: int,
+    listing: dict,
+    source: str,
+    matched_keywords: List[str],
+    scan_state: Dict[int, Dict[str, Any]],
+    listing_key: Optional[str] = None,
+):
+    if not listing_key:
+        listing_key = build_listing_unique_key(listing, source)
+    if not listing_key:
+        return
+
+    ctx = scan_state.setdefault(user_id, {"items": [], "seen": set(), "index": {}})
+    if listing_key in ctx["seen"]:
+        existing = ctx["index"].get(listing_key)
+        if existing is not None:
+            kw = set(existing.get("__matched_keywords", []))
+            kw.update(matched_keywords or [])
+            existing["__matched_keywords"] = sorted(kw)
+        return
+
+    listing_copy = dict(listing or {})
+    listing_copy["__source"] = source or "main"
+    listing_copy["__matched_keywords"] = matched_keywords or []
+    ctx["seen"].add(listing_key)
+    ctx["items"].append(listing_copy)
+    ctx["index"][listing_key] = listing_copy
+
+
+def process_keyword_alerts_for_listing(
+    ev: dict, source: str = "main", alerts: Optional[List[dict]] = None, scan_state=None
+):
     if not ev:
         return
-    alerts = fetch_active_keyword_alerts()
+    alerts = alerts or fetch_active_keyword_alerts()
     if not alerts:
         return
-    listing_text = build_listing_text_blob(ev)
+    listing_text = normalize_text(build_listing_text_blob(ev))
     listing_rayon = (
         ev.get("rayon")
         or ev.get("Rayon_Qesebe")
@@ -5349,11 +5400,14 @@ def process_keyword_alerts_for_listing(ev: dict, source: str = "main"):
         or ev.get("Unvan")
         or ""
     )
-    listing_id = ev.get("id") or ev.get("ID") or ev.get("Elan_kodu")
+    listing_id_raw = ev.get("id") or ev.get("ID") or ev.get("Elan_kodu")
     try:
-        listing_id = int(listing_id)
+        listing_id_int = int(listing_id_raw)
     except Exception:
-        return
+        listing_id_int = None
+
+    listing_key = build_listing_unique_key(ev, source)
+    matches_by_user: Dict[int, Dict[str, Any]] = {}
 
     for alert in alerts:
         user_id = alert.get("user_id")
@@ -5366,26 +5420,59 @@ def process_keyword_alerts_for_listing(ev: dict, source: str = "main"):
             continue
         if not keyword_region_matches(listing_rayon, alert.get("regions") or ""):
             continue
-        if not record_keyword_alert_hit(
-            alert.get("id"), user_id, "listing", listing_id, source=source
-        ):
-            continue
-        try:
-            bot.send_message(
-                user_id,
-                f'🔔 Açar söz bildirişi: "{keyword_raw}"',
+        entry = matches_by_user.setdefault(user_id, {"keywords": set(), "alerts": set()})
+        entry["keywords"].add(keyword_raw)
+        if alert.get("id"):
+            entry["alerts"].add(alert.get("id"))
+
+    if not matches_by_user:
+        return
+
+    for user_id, info in matches_by_user.items():
+        for alert_id in info.get("alerts", set()):
+            if listing_id_int is not None:
+                record_keyword_alert_hit(
+                    alert_id, user_id, "listing", listing_id_int, source=source
+                )
+        matched_keywords = sorted(info.get("keywords") or [])
+        if scan_state is not None and matched_keywords:
+            store_keyword_notification_match(
+                user_id, ev, source, matched_keywords, scan_state, listing_key
             )
-            send_listing_card(
-                user_id,
-                ev,
-                source=source,
-                with_fav_button=True,
-                status_controls=False,
-                track_view=False,
-                viewer_id=user_id,
+        logger.info(
+            "keyword match listing_key=%s user_id=%s keywords=%s", listing_key, user_id, matched_keywords
+        )
+
+
+def send_keyword_notification_summaries(scan_state: Dict[int, Dict[str, Any]]):
+    global keyword_notification_state
+    keyword_notification_state = {}
+    for user_id, ctx in (scan_state or {}).items():
+        items = ctx.get("items") or []
+        if not items:
+            continue
+        keyword_notification_state[user_id] = {
+            "items": items,
+            "seen": ctx.get("seen", set()),
+            "index": ctx.get("index", {}),
+            "ts": time.time(),
+        }
+        total = len(items)
+        mk = types.InlineKeyboardMarkup()
+        mk.add(
+            types.InlineKeyboardButton(
+                f"👁 Elanlara bax ({total})", callback_data="kw_notif_view"
+            )
+        )
+        summary_text = f"🔔 Açar söz bildirişi\nBu gün {total} uyğun elan tapıldı."
+        try:
+            bot.send_message(user_id, summary_text, reply_markup=mk)
+            send_main_menu(user_id)
+            logger.info(
+                "keyword notification summary sent chat_id=%s total=%s", user_id, total
             )
         except Exception:
-            continue
+            logger.exception("Failed to send keyword summary chat_id=%s", user_id)
 
 
 def process_keyword_alerts_for_request(req_row: dict):
@@ -5495,16 +5582,30 @@ def process_keyword_alerts_for_existing_requests(alert_id: int):
 
 def process_keyword_alerts_for_new_listings():
     last_checked = get_keyword_alert_last_checked("listings")
+    now = datetime.utcnow()
     if last_checked is None:
-        set_keyword_alert_last_checked("listings", datetime.utcnow())
+        set_keyword_alert_last_checked("listings", now)
+        keyword_notification_state.clear()
         return
     candidates = load_recent_listings(last_checked)
-    if not candidates:
-        set_keyword_alert_last_checked("listings", datetime.utcnow())
+    alerts = fetch_active_keyword_alerts()
+    if not candidates or not alerts:
+        set_keyword_alert_last_checked("listings", now)
+        keyword_notification_state.clear()
         return
+
+    scan_state: Dict[int, Dict[str, Any]] = {}
     for ev in candidates:
-        process_keyword_alerts_for_listing(ev, source=ev.get("__source", "main"))
-    set_keyword_alert_last_checked("listings", datetime.utcnow())
+        process_keyword_alerts_for_listing(
+            ev,
+            source=ev.get("__source", "main"),
+            alerts=alerts,
+            scan_state=scan_state,
+        )
+
+    send_keyword_notification_summaries(scan_state)
+
+    set_keyword_alert_last_checked("listings", now)
 
 
 def show_request_type_menu(chat_id: int):
@@ -5820,12 +5921,7 @@ def complaint_message_handler(message):
         notify_admin_complaint(message, category, text)
     except Exception:
         pass
-    bot.send_message(
-        chat_id,
-        "✅ Mesajınız qəbul edildi.\nTəşəkkür edirik! 🙏",
-        reply_markup=types.ReplyKeyboardRemove(),
-    )
-    send_main_menu(chat_id)
+    send_main_menu(chat_id, "✅ Mesajınız qəbul edildi.\nTəşəkkür edirik! 🙏")
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("complaint_reply:"))
@@ -8632,6 +8728,20 @@ def cb_open_notifications(c):
         pass
 
 
+@bot.callback_query_handler(func=lambda c: c.data == "kw_notif_view")
+@callback_guard
+def cb_keyword_notification_view(c):
+    chat_id = c.message.chat.id if c.message else None
+    ctx = keyword_notification_state.get(chat_id or 0, {}) if chat_id else {}
+    items = ctx.get("items") or []
+    if not items:
+        bot.send_message(chat_id, "⚠️ Baxmaq üçün yeni elan yoxdur.")
+        send_main_menu(chat_id)
+        return
+    send_paginated_results(chat_id, mode="keyword_notif", params={}, page=1)
+    send_main_menu(chat_id)
+
+
 @bot.callback_query_handler(func=lambda c: c.data == "notif_menu")
 @callback_guard
 def cb_notifications_menu(c):
@@ -8993,12 +9103,9 @@ def finalize_notification_rule(chat_id: int):
         "prop_type": state.get("prop_type"),
     }
     rule_id = save_notification_rule(chat_id, data)
-    bot.send_message(
-        chat_id,
-        f"✅ Bildiriş qaydası yaradıldı (ID: {rule_id}).",
-        reply_markup=types.ReplyKeyboardRemove(),
-    )
+    bot.send_message(chat_id, f"✅ Bildiriş qaydası yaradıldı (ID: {rule_id}).")
     send_criteria_list(chat_id)
+    send_main_menu(chat_id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_stopcrit:"))
@@ -10432,6 +10539,10 @@ def fetch_page_results(chat_id: int, mode: str, params: dict, page: int):
         return query_today_results(
             params.get("filters", {}), offset=offset, limit=PAGE_SIZE
         )
+    if mode == "keyword_notif":
+        items = keyword_notification_state.get(chat_id, {}).get("items", [])
+        total = len(items)
+        return items[offset : offset + PAGE_SIZE], total
     return [], 0
 
 
@@ -10532,6 +10643,7 @@ def send_paginated_results(
 
     nav = build_pagination_keyboard(page, total_pages)
     bot.send_message(chat_id, f"📄 Səhifə {page}/{total_pages}", reply_markup=nav)
+    send_main_menu(chat_id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("pg:"))
@@ -10927,7 +11039,6 @@ def handle_price_min_input(message):
         bot.send_message(
             chat_id,
             "↩️ Qiymət seçiminə qayıdıldı.",
-            reply_markup=types.ReplyKeyboardRemove(),
         )
         render_price_step(chat_id)
         return
@@ -10989,9 +11100,7 @@ def handle_price_max_input(message):
     st["awaiting_price_max"] = False
     st["step"] = "price"
     structured_push_history(chat_id)
-    bot.send_message(
-        chat_id, "✅ Qiymət aralığı seçildi.", reply_markup=types.ReplyKeyboardRemove()
-    )
+    bot.send_message(chat_id, "✅ Qiymət aralığı seçildi.")
     render_room_step(chat_id)
 
 
@@ -10999,6 +11108,7 @@ def perform_structured_search(chat_id, offset=0, edit_msg=None):
     st = search_state.get(chat_id)
     if not st or st.get("mode") != "structured":
         bot.send_message(chat_id, "Sessiya tapılmadı. Yenidən başlayın.")
+        send_main_menu(chat_id)
         return
 
     filters = st.get("filters", {})
@@ -15446,7 +15556,10 @@ def handle_admin_approve(c):
             status_controls=False,
             track_view=False,
         )
-        process_keyword_alerts_for_listing(ev, source="local")
+        scan_state = {}
+        process_keyword_alerts_for_listing(ev, source="local", scan_state=scan_state)
+        if scan_state:
+            send_keyword_notification_summaries(scan_state)
 
         bot.answer_callback_query(c.id, "Elan təsdiqləndi ✅")
 
@@ -17501,31 +17614,7 @@ def run_bot(polling_started: Optional[threading.Event] = None):
 
 
 def main_menu(chat_id):
-    mk = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    buttons = [
-        "🔎 Axtarış sistemi",
-        "🆕 Bu gün daxil olan elanlar",
-        "📂 Elan statusları",
-        "📋 Elanlarım",
-        "💳 Ödəniş",
-        "ℹ️ Haqqında",
-        "📩 Şikayət və təkliflər",
-    ]
-
-    if is_admin(chat_id) or has_customer_requests_access(chat_id):
-        buttons.append("📌 Müştəri istəkləri")
-
-    if not is_admin(chat_id):
-        buttons.append("🤝 Dostunu dəvət et")
-
-    if is_admin(chat_id):
-        buttons.append(TEXTS_AZ["admin_panel_button"])
-
-    for i in range(0, len(buttons), 2):
-        mk.row(*buttons[i : i + 2])
-    mk.add(MENU_REFRESH_BUTTON)
-
-    send_with_reply_keyboard(chat_id, "📋 Əsas menyudan seçim et:", mk)
+    send_main_menu(chat_id, "📋 Əsas menyudan seçim et:")
 
 
 @bot.callback_query_handler(func=lambda c: True)
@@ -17537,6 +17626,8 @@ def cb_unhandled_callback(c):
         c.data,
     )
     safe_answer_callback_query(c.id)
+    if c.message:
+        recover_main_menu(c.message.chat.id, c.message)
 
 
 def main():
