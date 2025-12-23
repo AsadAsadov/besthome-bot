@@ -30,7 +30,7 @@ from urllib.parse import quote, unquote, urlsplit, urlunsplit, parse_qs, urlenco
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 import requests
-from flask import Flask
+from flask import Flask, jsonify, request, send_from_directory
 import telebot
 from telebot import types
 
@@ -103,6 +103,12 @@ ADMIN_ID = PRIMARY_ADMIN_ID or ADMIN_ID
 ADMIN_IDS = CONFIG_ADMIN_IDS or [ADMIN_ID]
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+WEB_APP_URL = (
+    os.environ.get("WEB_APP_URL")
+    or os.environ.get("PUBLIC_WEB_APP_URL")
+    or os.environ.get("PUBLIC_BASE_URL")
+)
 
 if ENV == "dev":
     DATA_DIR = BASE_DIR
@@ -2127,6 +2133,44 @@ def get_user_record(chat_id: int) -> Optional[dict]:
     return dict(row)
 
 
+def ensure_user_exists(chat_id: int, username: str = "", full_name: str = "") -> dict:
+    record = get_user_record(chat_id)
+    if record:
+        return record
+
+    first_seen = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO users (
+            chat_id, username, full_name, first_seen, approved, is_admin,
+            last_version, referred_by, referral_bonus_used, referral_milestone_used,
+            is_first_start
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(chat_id) DO NOTHING
+        """,
+        (
+            chat_id,
+            username or "",
+            full_name or "",
+            first_seen,
+            1 if is_admin(chat_id) else 0,
+            1 if is_admin(chat_id) else 0,
+            CURRENT_VERSION,
+            None,
+            0,
+            0,
+            0,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    ensure_subscription_record(chat_id)
+    return get_user_record(chat_id) or {}
+
+
 def get_user_computed_status(chat_id: int) -> Optional[str]:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -3964,6 +4008,40 @@ def fetch_listing_by_any(listing_id: int):
     return None
 
 
+def add_favorite_entry(chat_id: int, source: str, listing_id: int) -> bool:
+    source = source or "main"
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO favorites (chat_id, listing_id, source, added_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (chat_id, listing_id, source, datetime.utcnow().isoformat()),
+    )
+    inserted = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    if inserted:
+        record_favorite_price(source, listing_id)
+        record_listing_stat(listing_id, "favorite", chat_id)
+        record_agent_activity(chat_id, metric="favorites")
+    return inserted
+
+
+def remove_favorite_entry(chat_id: int, source: str, listing_id: int) -> bool:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM favorites WHERE chat_id=? AND listing_id=? AND source=?",
+        (chat_id, listing_id, source),
+    )
+    removed = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return removed
+
+
 def should_track_interaction(
     chat_id: Optional[int], listing_id: int, action: str
 ) -> bool:
@@ -4191,6 +4269,13 @@ def build_main_menu(
         resize_keyboard=True, one_time_keyboard=False, is_persistent=True
     )
     unique_buttons: List[str] = []
+
+    if WEB_APP_URL:
+        kb.row(
+            types.KeyboardButton(
+                "🌐 Web Panel", web_app=types.WebAppInfo(url=WEB_APP_URL)
+            )
+        )
 
     def add_button(text: str):
         if text not in unique_buttons:
@@ -6882,22 +6967,7 @@ def cb_add_favorite(c):
     chat_id = c.message.chat.id
     _, src, sid = c.data.split("|")
     lid = int(sid)
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT OR IGNORE INTO favorites (chat_id, listing_id, source, added_at)
-        VALUES (?, ?, ?, ?)
-    """,
-        (chat_id, lid, src, datetime.utcnow().isoformat()),
-    )
-    added = cur.rowcount
-    conn.commit()
-    conn.close()
-    record_favorite_price(src, lid)
-    if added:
-        record_listing_stat(lid, "favorite", chat_id)
-        record_agent_activity(chat_id, metric="favorites")
+    add_favorite_entry(chat_id, src, lid)
     bot.answer_callback_query(c.id, "⭐ Favoriyə əlavə olundu.")
 
 
@@ -6947,14 +7017,7 @@ def cb_remove_favorite(c):
     except Exception:
         lid = sid
 
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "DELETE FROM favorites WHERE chat_id=? AND listing_id=? AND source=?",
-        (chat_id, lid, src),
-    )
-    conn.commit()
-    conn.close()
+    remove_favorite_entry(chat_id, src, lid)
 
     try:
         bot.answer_callback_query(c.id, "⭐ Elan favoritlərdən çıxarıldı.")
@@ -17665,6 +17728,67 @@ def admin_search_handler(message):
 # =============== RUN (Render / Lokal) ===============
 
 
+def api_error_response(message: str, status_code: int = 400):
+    logger.warning("API error status=%s message=%s", status_code, message)
+    return jsonify({"ok": False, "error": message}), status_code
+
+
+def api_ok_response(payload: dict, status_code: int = 200):
+    body = {"ok": True}
+    body.update(payload)
+    return jsonify(body), status_code
+
+
+def resolve_user_from_payload(payload: dict):
+    uid_raw = (
+        payload.get("telegram_user_id")
+        or payload.get("user_id")
+        or payload.get("chat_id")
+    )
+    if uid_raw is None:
+        return None, api_error_response("telegram_user_id tələb olunur", 400)
+    try:
+        uid = int(uid_raw)
+    except Exception:
+        return None, api_error_response("Düzgün telegram_user_id daxil edin", 400)
+
+    user = ensure_user_exists(
+        uid,
+        username=payload.get("username") or "",
+        full_name=payload.get("full_name") or "",
+    )
+    return uid, None if user else api_error_response("İstifadəçi yaradılmadı", 500)
+
+
+def map_date_range_to_days(code: Optional[str]) -> Optional[int]:
+    if not code:
+        return None
+    val = str(code).lower()
+    if val == "today":
+        return 1
+    if val in ("1_month", "month", "30d"):
+        return 30
+    return None
+
+
+def filter_results_by_rayon(items: List[dict], rayon: Optional[str]):
+    if not rayon or rayon == "all":
+        return items
+    filters = {"region": "all", "rayon": rayon}
+    return [ev for ev in items if matches_region_rayon(ev, filters)]
+
+
+def parse_int_value(val, default: Optional[int] = None) -> Optional[int]:
+    try:
+        return int(val)
+    except Exception:
+        return default
+
+
+def log_api_call(name: str, user_id: Optional[int], payload: dict):
+    logger.info("API call %s user=%s payload=%s", name, user_id, payload)
+
+
 def subscription_notifier():
     while True:
         try:
@@ -17766,7 +17890,209 @@ def main():
 
     @app.route("/")
     def home():
-        return "✅ BestHome Bot işləyir."
+        try:
+            return send_from_directory(BASE_DIR, "index.html")
+        except Exception:
+            logger.exception("UI serve error")
+            return "❌ index.html tapılmadı", 500
+
+    @app.route("/api/search", methods=["POST"])
+    def api_search():
+        payload = request.get_json(silent=True) or {}
+        user_id, error = resolve_user_from_payload(payload)
+        if error:
+            return error
+        query = str(payload.get("query") or "").strip()
+        filters = payload.get("filters") or {}
+        op = normalize_operation_value(filters.get("operation"))
+        date_days = map_date_range_to_days(filters.get("date_range"))
+        district = filters.get("district") or filters.get("rayon")
+        limit = parse_int_value(payload.get("limit"), PAGE_SIZE) or PAGE_SIZE
+        limit = max(1, min(limit, 200))
+
+        try:
+            results, total = query_keyword_results(
+                op, [query] if query else [], date_days, offset=0, limit=limit
+            )
+            if district:
+                results = filter_results_by_rayon(results, district)
+                total = len(results)
+            log_api_call("search", user_id, {"query": query, "filters": filters})
+            return api_ok_response({"count": total, "results": results})
+        except Exception:
+            logger.exception("API search failed user=%s", user_id)
+            return api_error_response("Axtarış alınmadı", 500)
+
+    @app.route("/api/favorites", methods=["GET"])
+    def api_favorites():
+        payload = request.args.to_dict() or {}
+        user_id, error = resolve_user_from_payload(payload)
+        if error:
+            return error
+        limit = parse_int_value(payload.get("limit"), PAGE_SIZE)
+        try:
+            items, total = query_favorites_page(
+                user_id, offset=0, limit=limit or PAGE_SIZE
+            )
+            results = [item.get("data") for item in items if item.get("data")]
+            log_api_call("favorites_list", user_id, {"count": total})
+            return api_ok_response({"count": total, "results": results})
+        except Exception:
+            logger.exception("API favorites failed user=%s", user_id)
+            return api_error_response("Favorilər yüklənmədi", 500)
+
+    @app.route("/api/favorites/add", methods=["POST"])
+    def api_favorites_add():
+        payload = request.get_json(silent=True) or {}
+        user_id, error = resolve_user_from_payload(payload)
+        if error:
+            return error
+        listing_id = parse_int_value(payload.get("listing_id"))
+        if listing_id is None:
+            return api_error_response("listing_id tələb olunur", 400)
+        source = payload.get("source") or "main"
+        ev = fetch_listing_by_source(source, listing_id)
+        if not ev:
+            return api_error_response("Elan tapılmadı", 404)
+        added = add_favorite_entry(user_id, source, listing_id)
+        log_api_call(
+            "favorites_add",
+            user_id,
+            {"listing_id": listing_id, "source": source, "added": added},
+        )
+        return api_ok_response({"added": added, "listing": ev})
+
+    @app.route("/api/favorites/remove", methods=["POST"])
+    def api_favorites_remove():
+        payload = request.get_json(silent=True) or {}
+        user_id, error = resolve_user_from_payload(payload)
+        if error:
+            return error
+        listing_id = parse_int_value(payload.get("listing_id"))
+        if listing_id is None:
+            return api_error_response("listing_id tələb olunur", 400)
+        source = payload.get("source") or "main"
+        removed = remove_favorite_entry(user_id, source, listing_id)
+        log_api_call(
+            "favorites_remove",
+            user_id,
+            {"listing_id": listing_id, "source": source, "removed": removed},
+        )
+        return api_ok_response({"removed": removed})
+
+    @app.route("/api/keywords", methods=["GET"])
+    def api_keywords_list():
+        payload = request.args.to_dict() or {}
+        user_id, error = resolve_user_from_payload(payload)
+        if error:
+            return error
+        try:
+            rows, total, _, _ = fetch_keyword_alerts_page(user_id, page=1)
+            log_api_call("keywords_list", user_id, {"count": total})
+            return api_ok_response({"count": total, "results": rows})
+        except Exception:
+            logger.exception("API keywords list failed user=%s", user_id)
+            return api_error_response("Açar sözlər alınmadı", 500)
+
+    @app.route("/api/keywords/add", methods=["POST"])
+    def api_keywords_add():
+        payload = request.get_json(silent=True) or {}
+        user_id, error = resolve_user_from_payload(payload)
+        if error:
+            return error
+        keyword = (payload.get("keyword") or "").strip()
+        regions_raw = payload.get("regions") or payload.get("rayons") or []
+        regions_list = regions_raw if isinstance(regions_raw, list) else [regions_raw]
+        regions = [str(r).strip() for r in regions_list if str(r).strip()]
+        if not keyword:
+            return api_error_response("keyword tələb olunur", 400)
+        regions_value = ", ".join(regions)
+        try:
+            conn = get_local_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT id FROM keyword_alerts WHERE user_id=? AND keywords=? AND regions=?",
+                (user_id, keyword, regions_value),
+            )
+            row = cur.fetchone()
+            conn.close()
+            if row:
+                alert_id = row[0]
+            else:
+                alert_id = save_keyword_alert(user_id, keyword, regions)
+                process_keyword_alerts_for_existing_requests(alert_id)
+            log_api_call(
+                "keywords_add",
+                user_id,
+                {"keyword": keyword, "regions": regions, "id": alert_id},
+            )
+            return api_ok_response({"id": alert_id, "keyword": keyword, "regions": regions})
+        except Exception:
+            logger.exception("API keyword add failed user=%s", user_id)
+            return api_error_response("Açar söz əlavə olunmadı", 500)
+
+    @app.route("/api/keywords/remove", methods=["DELETE"])
+    def api_keywords_remove():
+        payload = request.get_json(silent=True) or {}
+        user_id, error = resolve_user_from_payload(payload)
+        if error:
+            return error
+        alert_id = parse_int_value(payload.get("id"))
+        if alert_id is None:
+            return api_error_response("id tələb olunur", 400)
+        try:
+            removed = delete_keyword_alert(user_id, alert_id)
+            log_api_call(
+                "keywords_remove", user_id, {"id": alert_id, "removed": removed}
+            )
+            return api_ok_response({"removed": removed})
+        except Exception:
+            logger.exception("API keyword remove failed user=%s", user_id)
+            return api_error_response("Açar söz silinmədi", 500)
+
+    @app.route("/api/admin/db-update", methods=["POST"])
+    def api_admin_db_update():
+        payload = request.get_json(silent=True) or {}
+        user_id, error = resolve_user_from_payload(payload)
+        if error:
+            return error
+        if not is_admin(user_id):
+            return api_error_response("Yalnız admin icazəlidir", 403)
+        dropbox_url = str(payload.get("dropbox_url") or "").strip()
+        if not dropbox_url:
+            return api_error_response("dropbox_url tələb olunur", 400)
+        parts = urlsplit(dropbox_url)
+        if parts.scheme.lower() != "https" or "dropbox" not in parts.netloc.lower():
+            return api_error_response("Yalnız Dropbox HTTPS linki qəbul edilir", 400)
+
+        stale = cleanup_stale_db_updates()
+        if stale:
+            logger.info("Stale DB updates cleaned via API user=%s", user_id)
+        running = get_running_db_update()
+        if running:
+            return api_error_response("Baza yenilənməsi artıq işləyir", 409)
+        if not acquire_db_update_lock(user_id):
+            return api_error_response("Baza yenilənməsi artıq işləyir", 409)
+
+        try:
+            admin_update_state[user_id] = "api_updating_db"
+            set_db_update_state(user_id, "running")
+            threading.Thread(
+                target=run_db_update_pipeline,
+                args=(user_id, dropbox_url),
+                daemon=True,
+            ).start()
+        except Exception:
+            release_db_update_lock(user_id)
+            admin_update_state.pop(user_id, None)
+            clear_db_update_state(user_id)
+            logger.exception("Failed to start db update via API user=%s", user_id)
+            return api_error_response("Yenilənmə başladılmadı", 500)
+
+        log_api_call(
+            "admin_db_update", user_id, {"dropbox_url": dropbox_url, "started": True}
+        )
+        return api_ok_response({"message": "Baza yenilənməsi başladı"})
 
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
