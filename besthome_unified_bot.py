@@ -184,6 +184,8 @@ notification_rule_state = {}
 notification_menu_state = {}
 keyword_hits_context = {}
 keyword_notification_state: Dict[int, Dict[str, Any]] = {}
+user_callback_locks: Dict[int, threading.Lock] = defaultdict(threading.Lock)
+admin_user_last_list: Dict[int, str] = {}
 BLOCKED_MESSAGE_TEXT = "Hesabınız müvəqqəti olaraq dayandırıldı."
 STATUS_PENDING = "pending"
 STATUS_ACTIVE_PAID = "active_paid"
@@ -538,6 +540,66 @@ def callback_guard(handler):
                 recover_main_menu(chat_id, getattr(call, "message", None))
 
     return wrapper
+
+
+def acquire_user_action_lock(user_id: Optional[int]) -> Optional[threading.Lock]:
+    if not user_id:
+        return None
+    lock = user_callback_locks.setdefault(user_id, threading.Lock())
+    if lock.acquire(blocking=False):
+        return lock
+    return None
+
+
+def run_callback_background(
+    call,
+    task,
+    *,
+    waiting_text: str = "⏳ Zəhmət olmasa gözləyin...",
+    send_menu_on_finish: bool = True,
+):
+    chat_id = None
+    try:
+        chat_id = call.message.chat.id
+    except Exception:
+        chat_id = getattr(getattr(call, "from_user", None), "id", None)
+
+    user_id = getattr(getattr(call, "from_user", None), "id", chat_id)
+    lock = acquire_user_action_lock(user_id)
+    if not lock:
+        if chat_id:
+            safe_send(
+                chat_id,
+                "⏳ Əvvəlki əməliyyat davam edir, zəhmət olmasa gözləyin...",
+            )
+        return
+
+    wait_message = None
+    if chat_id:
+        try:
+            wait_message = safe_send(chat_id, waiting_text)
+        except Exception:
+            wait_message = None
+
+    def runner():
+        try:
+            task()
+        except Exception:
+            logger.exception("Background task failed")
+            if chat_id:
+                safe_send(chat_id, "⚠️ Xəta baş verdi, zəhmət olmasa yenidən cəhd edin.")
+        finally:
+            if chat_id:
+                try:
+                    if wait_message:
+                        bot.delete_message(chat_id, wait_message.message_id)
+                except Exception:
+                    pass
+                if send_menu_on_finish:
+                    send_main_menu(chat_id)
+            lock.release()
+
+    threading.Thread(target=runner, daemon=True).start()
 
 
 def run_with_timeout(step_name: str, timeout_seconds: int, func, *args, **kwargs):
@@ -4077,17 +4139,6 @@ def send_refresh_button(chat_id: int):
     bot.send_message(chat_id, MENU_REFRESH_BUTTON, reply_markup=mk)
 
 
-def ensure_refresh_button(kb: types.ReplyKeyboardMarkup) -> types.ReplyKeyboardMarkup:
-    try:
-        for row in kb.keyboard:
-            if any(btn == MENU_REFRESH_BUTTON for btn in row):
-                return kb
-    except Exception:
-        pass
-    kb.row(MENU_REFRESH_BUTTON)
-    return kb
-
-
 def send_menu_visibility_hint(chat_id: int):
     now = time.time()
     last_ts = menu_visibility_hint_last_sent.get(chat_id, 0)
@@ -4133,31 +4184,36 @@ def send_with_reply_keyboard(
     send_menu_visibility_hint(chat_id)
 
 
-def build_main_menu_keyboard(chat_id: Optional[int] = None) -> types.ReplyKeyboardMarkup:
+def build_main_menu(
+    is_admin_user: bool, has_customer_access: bool = False
+) -> types.ReplyKeyboardMarkup:
     kb = types.ReplyKeyboardMarkup(
         resize_keyboard=True, one_time_keyboard=False, is_persistent=True
     )
-    buttons = [
-        "🔎 Axtarış sistemi",
-        "🆕 Bu gün daxil olan elanlar",
-        "📂 Elan statusları",
-        "📋 Elanlarım",
-        "💳 Ödəniş",
-        "ℹ️ Haqqında",
-        "📩 Şikayət və təkliflər",
-    ]
-    if chat_id and (is_admin(chat_id) or has_customer_requests_access(chat_id)):
-        buttons.append("📌 Müştəri istəkləri")
-    if chat_id and not is_admin(chat_id):
-        buttons.append("🤝 Dostunu dəvət et")
-    if chat_id and is_admin(chat_id):
-        buttons.append(TEXTS_AZ["admin_panel_button"])
+    unique_buttons: List[str] = []
 
-    for i in range(0, len(buttons), 2):
-        row = buttons[i : i + 2]
-        kb.row(*row)
+    def add_button(text: str):
+        if text not in unique_buttons:
+            unique_buttons.append(text)
+
+    add_button("🔎 Axtarış sistemi")
+    add_button("🆕 Bu gün daxil olan elanlar")
+    add_button("📂 Elan statusları")
+    add_button("📋 Elanlarım")
+    add_button("💳 Ödəniş")
+    add_button("ℹ️ Haqqında")
+    add_button("📩 Şikayət və təkliflər")
+
+    if has_customer_access or is_admin_user:
+        add_button("📌 Müştəri istəkləri")
+    if not is_admin_user:
+        add_button("🤝 Dostunu dəvət et")
+    if is_admin_user:
+        add_button(TEXTS_AZ["admin_panel_button"])
+
+    for i in range(0, len(unique_buttons), 2):
+        kb.row(*unique_buttons[i : i + 2])
     kb.row(MENU_REFRESH_BUTTON)
-    kb = ensure_refresh_button(kb)
     return kb
 
 
@@ -4168,7 +4224,9 @@ def send_main_menu(
     parse_mode: Optional[str] = None,
     disable_preview: Optional[bool] = None,
 ):
-    kb = build_main_menu_keyboard(chat_id)
+    kb = build_main_menu(
+        is_admin(chat_id), has_customer_requests_access(chat_id)
+    )
     send_with_reply_keyboard(
         chat_id,
         text or "🏠 Əsas menyu:",
@@ -14891,6 +14949,7 @@ def cb_admin_user_panel_actions(c):
         uid = int(parts[2])
     except Exception:
         return
+    list_type = admin_user_last_list.get(c.message.chat.id)
 
     if action in {"extend", "demo"} and len(parts) > 3:
         try:
@@ -14921,6 +14980,15 @@ def cb_admin_user_panel_actions(c):
         return
 
     admin_show_user_panel(c.message.chat.id, uid, message=c.message)
+    if list_type in {"expired", "pending", "demo"}:
+        page = get_admin_user_page(c.message.chat.id, list_type)
+        show_all_users(
+            c.message.chat.id,
+            status=list_type,
+            page=page,
+            message=None,
+            force_new=True,
+        )
 
 
 def show_users_menu(chat_id):
@@ -15206,6 +15274,7 @@ def show_all_users(
 
         base_query = admin_user_status_subquery()
         where_clause, params = admin_user_status_where(list_status)
+        admin_user_last_list[chat_id] = list_status
 
         if list_status in ("active", "expired", "demo"):
             order_clause = "ORDER BY CAST(effective_expires_at AS INTEGER) DESC"
@@ -15398,13 +15467,14 @@ def cb_userlist(c):
 
     logger.info("ADMIN USERLIST CLICK status=%s chat_id=%s", status, c.message.chat.id)
 
-    try:
-        show_all_users(
+    run_callback_background(
+        c,
+        lambda: show_all_users(
             c.message.chat.id, status=status, page=1, message=None, force_new=True
-        )
-    except Exception:
-        logger.exception("show_all_users crashed")
-        safe_send(c.message.chat.id, TEXTS_AZ["admin_userlist_load_error"])
+        ),
+        waiting_text="⏳ Zəhmət olmasa gözləyin...",
+        send_menu_on_finish=False,
+    )
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_u:"))
@@ -15412,14 +15482,20 @@ def cb_userlist(c):
 def cb_admin_user_pagination(c):
     if not is_admin(c.message.chat.id):
         return
-    safe_answer_callback_query(c.id)
     try:
         _, list_type, page_raw = c.data.split(":")
         page = int(page_raw)
     except Exception:
         list_type = "active"
         page = 1
-    show_all_users(c.message.chat.id, list_type, page=page, message=c.message)
+    run_callback_background(
+        c,
+        lambda: show_all_users(
+            c.message.chat.id, list_type, page=page, message=c.message
+        ),
+        waiting_text="⏳ Zəhmət olmasa gözləyin...",
+        send_menu_on_finish=False,
+    )
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_upd:"))
@@ -17643,13 +17719,13 @@ def main_menu(chat_id):
 
 @bot.callback_query_handler(func=lambda c: True)
 def cb_unhandled_callback(c):
+    safe_answer_callback_query(c.id)
     logger.warning(
         "UNHANDLED CALLBACK chat_id=%s from=%s data=%s",
         c.message.chat.id if c.message else None,
         c.from_user.id if c.from_user else None,
         c.data,
     )
-    safe_answer_callback_query(c.id)
     if c.message:
         recover_main_menu(c.message.chat.id, c.message)
 
