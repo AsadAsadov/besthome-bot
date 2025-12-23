@@ -3079,7 +3079,8 @@ def check_subscription(chat_id: int, silent: bool = False) -> bool:
         if not silent:
             try:
                 bot.send_message(
-                    chat_id, "❌ Hesabınız deaktiv edilib. Admin ilə əlaqə saxlayın @esedovesed."
+                    chat_id,
+                    "❌ Hesabınız deaktiv edilib. Admin ilə əlaqə saxlayın @esedovesed.",
                 )
             except Exception:
                 pass
@@ -4398,7 +4399,8 @@ def start_cmd(message):
     user_status = get_user_computed_status(chat_id)
     if user_status == "BLOCKED":
         bot.send_message(
-            chat_id, "❌ Hesabınız deaktiv edilib. Admin ilə əlaqə saxlayın @esedovesed."
+            chat_id,
+            "❌ Hesabınız deaktiv edilib. Admin ilə əlaqə saxlayın @esedovesed.",
         )
         return
 
@@ -9930,7 +9932,9 @@ def query_keyword_results(
                 return col
         return None
 
-    def build_keyword_where(fields: List[str], tokens: List[str]) -> Tuple[str, List[str]]:
+    def build_keyword_where(
+        fields: List[str], tokens: List[str]
+    ) -> Tuple[str, List[str]]:
         if not fields or not tokens:
             return "1=0", []
         token_clauses = []
@@ -14248,7 +14252,9 @@ def admin_show_user_panel(
     if not record:
         bot.send_message(admin_chat_id, "⚠️ İstifadəçi tapılmadı.")
         return
-    computed_status = record.get("computed_status") or get_user_computed_status(target_id)
+    computed_status = record.get("computed_status") or get_user_computed_status(
+        target_id
+    )
     effective_raw = record.get("effective_expires_at")
     blocked_state = "Bəli" if record.get("blocked") else "Xeyr"
 
@@ -14621,7 +14627,9 @@ def cb_subscription_control(c):
     elif action == "act":
         unblock_user(uid)
         base = resolve_extension_base(uid)
-        new_exp = base if base > datetime.utcnow() else datetime.utcnow() + timedelta(days=1)
+        new_exp = (
+            base if base > datetime.utcnow() else datetime.utcnow() + timedelta(days=1)
+        )
         insert_subscription(
             uid,
             sub.get("plan") or "manual",
@@ -14641,7 +14649,9 @@ def cb_subscription_control(c):
     admin_show_user_panel(c.message.chat.id, uid, message=c.message)
 
 
-def admin_extend_user_time(user_id: int, days: int, note: str = "admin_extend") -> Optional[datetime]:
+def admin_extend_user_time(
+    user_id: int, days: int, note: str = "admin_extend"
+) -> Optional[datetime]:
     ensure_subscription_record(user_id)
     sub = get_subscription(user_id) or {}
     base = resolve_extension_base(user_id)
@@ -14658,7 +14668,9 @@ def admin_grant_demo_days(user_id: int, days: int) -> Optional[datetime]:
     new_exp = base + timedelta(days=days)
     update_user_demo_end(user_id, new_exp, approve=True)
     if not sub.get("plan") or sub.get("is_demo") or sub.get("plan") == "demo":
-        set_subscription(user_id, "demo", new_exp, is_active=1, is_demo=1, note="admin_demo")
+        set_subscription(
+            user_id, "demo", new_exp, is_active=1, is_demo=1, note="admin_demo"
+        )
     return new_exp
 
 
@@ -14787,7 +14799,9 @@ def format_display_date(dt_raw: Optional[str]) -> str:
     return dt.strftime("%d.%m.%Y")
 
 
-def normalize_effective_expiry(raw: Optional[Union[str, datetime]]) -> Optional[datetime]:
+def normalize_effective_expiry(
+    raw: Optional[Union[str, datetime]],
+) -> Optional[datetime]:
     if raw in (None, 0, "0"):
         return None
     if isinstance(raw, datetime):
@@ -15074,7 +15088,9 @@ def show_all_users(
                 remaining_text = "—"
             else:
                 expiry_text = format_effective_expiry_for_ui(expiry_raw)
-                remaining_text = format_remaining_days_for_ui(computed_status, expiry_raw)
+                remaining_text = format_remaining_days_for_ui(
+                    computed_status, expiry_raw
+                )
 
             entry_lines = [
                 f"[{idx}]",
@@ -17310,9 +17326,7 @@ def admin_search_handler(message):
     def build_keyword_where(columns: List[str]) -> Tuple[str, List[str]]:
         if not columns:
             return "1=0", []
-        conds = [
-            "LOWER(COALESCE(" + col + ", '')) LIKE ?" for col in columns
-        ]
+        conds = ["LOWER(COALESCE(" + col + ", '')) LIKE ?" for col in columns]
         return "(" + " OR ".join(conds) + ")", [like] * len(columns)
 
     # MAIN DB listings
