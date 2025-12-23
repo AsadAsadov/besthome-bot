@@ -532,6 +532,8 @@ def callback_guard(handler):
                     notify_chat_id,
                     f"⚠️ Xəta oldu: {exc} (chat_id={chat_id})",
                 )
+            if chat_id:
+                recover_main_menu(chat_id, getattr(call, "message", None))
 
     return wrapper
 
@@ -1945,13 +1947,37 @@ def admin_effective_expires_expr() -> str:
 
 def admin_user_status_subquery() -> str:
     return (
-        "(SELECT chat_id, full_name, username, effective_expires_at, computed_status "
-        "FROM users_with_status)"
+        "(SELECT uw.chat_id, uw.full_name, uw.username, uw.effective_expires_at, "
+        "uw.computed_status, u.demo_end_at, u.demo_expires_at, u.paid_until "
+        "FROM users_with_status uw "
+        "LEFT JOIN users u ON u.chat_id = uw.chat_id)"
     )
 
 
 def admin_user_status_case_sql() -> str:
     return "computed_status"
+
+
+def demo_user_clause(prefix_status: str = "uw", prefix_user: str = "u") -> str:
+    def col(prefix: str, name: str) -> str:
+        return f"{prefix}.{name}" if prefix else name
+
+    status_col = col(prefix_status, "computed_status")
+    effective_col = col(prefix_status, "effective_expires_at")
+    demo_end_col = (
+        f"COALESCE({col(prefix_user, 'demo_end_at')}, {col(prefix_user, 'demo_expires_at')})"
+        if prefix_user is not None
+        else "COALESCE(demo_end_at, demo_expires_at)"
+    )
+    paid_until_col = col(prefix_user, "paid_until") if prefix_user is not None else "paid_until"
+    effective_int = f"CAST({effective_col} AS INTEGER)"
+    paid_blank = f"TRIM(COALESCE({paid_until_col}, ''))"
+    return (
+        f"({status_col} = 'DEMO' OR "
+        f"({effective_int} > strftime('%s','now') AND {demo_end_col} IS NOT NULL "
+        f"AND ({paid_until_col} IS NULL OR {paid_blank}=''))"
+        ")"
+    )
 
 
 def admin_user_status_where(status: str) -> tuple:
@@ -1965,6 +1991,9 @@ def admin_user_status_where(status: str) -> tuple:
         "blocked": "BLOCKED",
         "demo": "DEMO",
     }
+    if normalized == "demo":
+        clause = demo_user_clause(prefix_status="", prefix_user="")
+        return clause, ()
     computed = status_map.get(normalized, "ACTIVE")
     return "computed_status = ?", (computed,)
 
@@ -1972,9 +2001,8 @@ def admin_user_status_where(status: str) -> tuple:
 def admin_user_status_count(cur: sqlite3.Cursor, status: str) -> int:
     where_clause, params = admin_user_status_where(status)
     try:
-        cur.execute(
-            "SELECT COUNT(*) FROM users_with_status WHERE " + where_clause, params
-        )
+        base_query = admin_user_status_subquery()
+        cur.execute(f"SELECT COUNT(*) FROM {base_query} WHERE " + where_clause, params)
         row = cur.fetchone()
         return (row[0] if row else 0) or 0
     except Exception:
@@ -4062,6 +4090,20 @@ def send_menu_visibility_hint(chat_id: int):
         return
     menu_visibility_hint_last_sent[chat_id] = now
     bot.send_message(chat_id, MENU_VISIBILITY_HINT_TEXT)
+
+
+def recover_main_menu(chat_id: Optional[int], message: Optional[types.Message] = None):
+    if not chat_id:
+        return
+    if message:
+        try:
+            bot.edit_message_reply_markup(chat_id, message.message_id, reply_markup=None)
+        except Exception:
+            logger.debug("Menu recovery edit failed chat_id=%s", chat_id)
+    try:
+        send_main_menu(chat_id)
+    except Exception:
+        logger.exception("Failed to send main menu chat_id=%s", chat_id)
 
 
 def send_with_reply_keyboard(
@@ -6988,6 +7030,7 @@ def handle_today_callbacks(c):
             bot.answer_callback_query(c.id)
         except Exception:
             pass
+        recover_main_menu(c.message.chat.id, c.message)
         return
 
     chat_id = c.message.chat.id
@@ -7011,13 +7054,15 @@ def handle_today_callbacks(c):
         else:
             try:
                 idx = int(value)
-                st["rayon"] = rayons[idx]
+                st["rayon"] = (rayons[idx] or "").strip()
             except Exception:
                 st["rayon"] = "all"
         send_today_stats_message(chat_id, st)
         send_today_results(
             chat_id, st, message=(c.message.chat.id, c.message.message_id)
         )
+    else:
+        recover_main_menu(chat_id, c.message)
 
     try:
         bot.answer_callback_query(c.id)
@@ -9458,17 +9503,20 @@ def normalize_rayon_name(value: Optional[str]) -> str:
     return str(value or "").strip().lower()
 
 
+def normalize_today_rayon(value: Optional[str]) -> str:
+    return normalize_rayon_name(value)
+
+
 def matches_today_rayon(ev: dict, filters: dict) -> bool:
-    rayon = filters.get("rayon")
-    if not rayon or rayon == "all":
+    rayon = normalize_today_rayon(filters.get("rayon"))
+    if not rayon or rayon in {"all", "hamısı"}:
         return True
-    target = normalize_rayon_name(rayon)
     candidates = (
-        ev.get("rayon"),
-        ev.get("Rayon_Qesebe"),
-        ev.get("Rayon"),
+        normalize_today_rayon(ev.get("rayon")),
+        normalize_today_rayon(ev.get("Rayon_Qesebe")),
+        normalize_today_rayon(ev.get("Rayon")),
     )
-    return any(normalize_rayon_name(val) == target for val in candidates if val)
+    return any(candidate and candidate == rayon for candidate in candidates)
 
 
 def matches_rooms(ev: dict, room_code: str) -> bool:
@@ -9854,12 +9902,12 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
     start, end = get_today_bounds()
     filtered = []
     for ev in results:
-        if not is_listing_active(ev, status_map):
-            continue
         ev_dt = safe_date(ev)
         if ev_dt == datetime.min:
             continue
         if not (start <= ev_dt <= end):
+            continue
+        if not is_listing_active(ev, status_map):
             continue
         if not matches_today_rayon(ev, filters):
             continue
@@ -13403,17 +13451,20 @@ def deactivate_expired_demo(
 def build_demo_users_view(page: int = 1) -> Tuple[str, types.InlineKeyboardMarkup, int]:
     conn = get_local_conn()
     cur = conn.cursor()
+    base_query = admin_user_status_subquery()
+    clause = demo_user_clause(prefix_status="", prefix_user="")
     cur.execute(
-        """
-        SELECT u.chat_id,
-               u.full_name,
-               u.username,
-               u.demo_end_at,
-               u.demo_expires_at,
-               u.demo_start_at
-        FROM users u
-        WHERE u.demo_end_at IS NOT NULL
-           OR u.demo_expires_at IS NOT NULL
+        f"""
+        SELECT chat_id,
+               full_name,
+               username,
+               demo_end_at,
+               demo_expires_at,
+               effective_expires_at,
+               computed_status,
+               paid_until
+        FROM {base_query}
+        WHERE {clause}
         """
     )
     rows = cur.fetchall()
@@ -14671,6 +14722,7 @@ def cb_subscription_control(c):
 def admin_extend_user_time(
     user_id: int, days: int, note: str = "admin_extend"
 ) -> Optional[datetime]:
+    logger.info("ADMIN EXTEND user_id=%s days=%s note=%s", user_id, days, note)
     ensure_subscription_record(user_id)
     sub = get_subscription(user_id) or {}
     base = resolve_extension_base(user_id)
@@ -14681,6 +14733,7 @@ def admin_extend_user_time(
 
 
 def admin_grant_demo_days(user_id: int, days: int) -> Optional[datetime]:
+    logger.info("ADMIN DEMO GRANT user_id=%s days=%s", user_id, days)
     ensure_subscription_record(user_id)
     sub = get_subscription(user_id) or {}
     base = resolve_extension_base(user_id)
