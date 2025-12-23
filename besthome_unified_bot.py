@@ -96,8 +96,11 @@ bot = _BotProxy()
 # ==============================
 # 💾 DATABASE KONFİQURASİYASI
 # ==============================
-from config import ENV
+from config import ENV, ADMIN_IDS as CONFIG_ADMIN_IDS, PRIMARY_ADMIN_ID
 import os
+
+ADMIN_ID = PRIMARY_ADMIN_ID or ADMIN_ID
+ADMIN_IDS = CONFIG_ADMIN_IDS or [ADMIN_ID]
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -527,13 +530,15 @@ def callback_guard(handler):
             chat_id = None
             if call and getattr(call, "message", None):
                 chat_id = call.message.chat.id
-            notify_chat_id = chat_id if chat_id and is_admin(chat_id) else ADMIN_ID
+            primary_admin = ADMIN_IDS[0] if ADMIN_IDS else ADMIN_ID
+            notify_chat_id = chat_id if chat_id and is_admin(chat_id) else primary_admin
             if notify_chat_id is not None:
                 safe_admin_step(
                     notify_chat_id,
                     f"⚠️ Xəta oldu: {exc} (chat_id={chat_id})",
                 )
             if chat_id:
+                safe_send(chat_id, "Əsas menyu bərpa edildi")
                 recover_main_menu(chat_id, getattr(call, "message", None))
 
     return wrapper
@@ -1820,7 +1825,10 @@ def ensure_fts_tables():
 
 
 def is_admin(chat_id: int) -> bool:
-    return chat_id == ADMIN_ID
+    try:
+        return int(chat_id) in set(int(x) for x in ADMIN_IDS)
+    except Exception:
+        return False
 
 
 def format_price(v) -> str:
@@ -4093,7 +4101,11 @@ def send_menu_visibility_hint(chat_id: int):
     bot.send_message(chat_id, MENU_VISIBILITY_HINT_TEXT)
 
 
-def recover_main_menu(chat_id: Optional[int], message: Optional[types.Message] = None):
+def recover_main_menu(
+    chat_id: Optional[int],
+    message: Optional[types.Message] = None,
+    text: Optional[str] = None,
+):
     if not chat_id:
         return
     if message:
@@ -4102,19 +4114,30 @@ def recover_main_menu(chat_id: Optional[int], message: Optional[types.Message] =
         except Exception:
             logger.debug("Menu recovery edit failed chat_id=%s", chat_id)
     try:
-        send_main_menu(chat_id)
+        send_main_menu(chat_id, text)
     except Exception:
         logger.exception("Failed to send main menu chat_id=%s", chat_id)
 
 
 def send_with_reply_keyboard(
-    chat_id: int, text: str, keyboard: types.ReplyKeyboardMarkup
+    chat_id: int,
+    text: str,
+    keyboard: types.ReplyKeyboardMarkup,
+    *,
+    parse_mode: Optional[str] = None,
+    disable_preview: Optional[bool] = None,
 ):
-    bot.send_message(chat_id, text, reply_markup=keyboard)
+    bot.send_message(
+        chat_id,
+        text,
+        reply_markup=keyboard,
+        parse_mode=parse_mode,
+        disable_web_page_preview=disable_preview,
+    )
     send_menu_visibility_hint(chat_id)
 
 
-def send_main_menu(chat_id: int, text: Optional[str] = None):
+def build_main_menu_keyboard(chat_id: Optional[int] = None) -> types.ReplyKeyboardMarkup:
     kb = types.ReplyKeyboardMarkup(
         resize_keyboard=True, one_time_keyboard=False, is_persistent=True
     )
@@ -4127,11 +4150,11 @@ def send_main_menu(chat_id: int, text: Optional[str] = None):
         "ℹ️ Haqqında",
         "📩 Şikayət və təkliflər",
     ]
-    if is_admin(chat_id) or has_customer_requests_access(chat_id):
+    if chat_id and (is_admin(chat_id) or has_customer_requests_access(chat_id)):
         buttons.append("📌 Müştəri istəkləri")
-    if not is_admin(chat_id):
+    if chat_id and not is_admin(chat_id):
         buttons.append("🤝 Dostunu dəvət et")
-    if is_admin(chat_id):
+    if chat_id and is_admin(chat_id):
         buttons.append(TEXTS_AZ["admin_panel_button"])
 
     for i in range(0, len(buttons), 2):
@@ -4139,7 +4162,24 @@ def send_main_menu(chat_id: int, text: Optional[str] = None):
         kb.row(*row)
     kb.row(MENU_REFRESH_BUTTON)
     kb = ensure_refresh_button(kb)
-    send_with_reply_keyboard(chat_id, text or "🏠 Əsas menyu:", kb)
+    return kb
+
+
+def send_main_menu(
+    chat_id: int,
+    text: Optional[str] = None,
+    *,
+    parse_mode: Optional[str] = None,
+    disable_preview: Optional[bool] = None,
+):
+    kb = build_main_menu_keyboard(chat_id)
+    send_with_reply_keyboard(
+        chat_id,
+        text or "🏠 Əsas menyu:",
+        kb,
+        parse_mode=parse_mode,
+        disable_preview=disable_preview,
+    )
 
 
 def build_search_menu_keyboard():
@@ -4298,6 +4338,11 @@ def send_listing_card(
     if link:
         text += f"\n🔗 {link}"
 
+    matched_kw = ev.get("__matched_keywords") or []
+    if matched_kw:
+        uniq_kw = sorted(dict.fromkeys(matched_kw))
+        text += "\n🔑 Uyğun açar sözlər: " + ", ".join(uniq_kw)
+
     if ev.get("__views") is not None:
         text += f"\n👁️ Baxış: {ev['__views']}"
 
@@ -4419,7 +4464,7 @@ def start_cmd(message):
         send_payment_menu(chat_id)
 
     # 🧩 Admin üçün avtomatik təsdiq
-    if chat_id == ADMIN_ID:
+    if is_admin(chat_id):
         cur.execute(
             "UPDATE users SET approved=1, is_admin=1 WHERE chat_id=?", (chat_id,)
         )
@@ -5294,7 +5339,12 @@ def build_listing_unique_key(ev: dict, source: str) -> Optional[str]:
     )
     if link:
         return f"{source}:{str(link).strip()}"
-    return None
+    phone = ev.get("phone") or ev.get("Elaqe_nomresi") or ""
+    price_val = get_listing_price(ev)
+    date_val = ev.get("date_read") or ev.get("date_added") or ev.get("created_at")
+    components = [normalize_text(str(phone)), str(price_val or ""), str(date_val or "")]
+    fallback = ":".join([source] + [c for c in components if c])
+    return fallback if fallback else None
 
 
 def build_request_text_blob(req_row: dict) -> str:
@@ -5464,7 +5514,9 @@ def send_keyword_notification_summaries(scan_state: Dict[int, Dict[str, Any]]):
                 f"👁 Elanlara bax ({total})", callback_data="kw_notif_view"
             )
         )
-        summary_text = f"🔔 Açar söz bildirişi\nBu gün {total} uyğun elan tapıldı."
+        summary_text = (
+            f"🔔 Açar söz bildirişləri (Bu gün) — {total} uyğun elan tapıldı"
+        )
         try:
             bot.send_message(user_id, summary_text, reply_markup=mk)
             send_main_menu(user_id)
@@ -7084,6 +7136,7 @@ def send_today_results(chat_id: int, filters: dict, message=None):
     if not total:
         if not replace_loading_message(loading_ref, "Bu gün üçün uyğun elan yoxdur."):
             bot.send_message(chat_id, "Bu gün üçün uyğun elan yoxdur.")
+        send_main_menu(chat_id)
         return
 
     log_search_event(
@@ -7158,7 +7211,7 @@ def handle_today_callbacks(c):
             chat_id, st, message=(c.message.chat.id, c.message.message_id)
         )
     else:
-        recover_main_menu(chat_id, c.message)
+        recover_main_menu(chat_id, c.message, "Əsas menyu bərpa edildi")
 
     try:
         bot.answer_callback_query(c.id)
@@ -9611,19 +9664,29 @@ def normalize_rayon_name(value: Optional[str]) -> str:
 
 
 def normalize_today_rayon(value: Optional[str]) -> str:
-    return normalize_rayon_name(value)
+    val = str(value or "").strip().lower()
+    val = re.sub(r"\s+", " ", val)
+    return val
+
+
+def extract_today_rayon_candidates(ev: dict) -> List[str]:
+    address_raw = ev.get("address") or ev.get("Unvan") or ""
+    address_first = address_raw.split(",")[0]
+    candidates = [
+        ev.get("rayon"),
+        ev.get("Rayon_Qesebe"),
+        ev.get("Rayon"),
+        address_first,
+    ]
+    return [normalize_today_rayon(c) for c in candidates if normalize_today_rayon(c)]
 
 
 def matches_today_rayon(ev: dict, filters: dict) -> bool:
     rayon = normalize_today_rayon(filters.get("rayon"))
     if not rayon or rayon in {"all", "hamısı"}:
         return True
-    candidates = (
-        normalize_today_rayon(ev.get("rayon")),
-        normalize_today_rayon(ev.get("Rayon_Qesebe")),
-        normalize_today_rayon(ev.get("Rayon")),
-    )
-    return any(candidate and candidate == rayon for candidate in candidates)
+    candidates = extract_today_rayon_candidates(ev)
+    return any(candidate == rayon for candidate in candidates)
 
 
 def matches_rooms(ev: dict, room_code: str) -> bool:
@@ -9969,6 +10032,9 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
     op_code = filters.get("op", "all")
     prop_code = filters.get("prop", "all")
     results = []
+    logger.info(
+        "today query start filters=%s offset=%s limit=%s", filters, offset, limit
+    )
 
     if os.path.exists(MAIN_DB):
         conn = get_main_conn()
@@ -10022,6 +10088,9 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
 
     filtered.sort(key=safe_date, reverse=True)
     total = len(filtered)
+    logger.info(
+        "today query filtered count=%s op=%s rayon=%s", total, op_code, filters.get("rayon")
+    )
     if limit is not None:
         filtered = filtered[offset : offset + limit]
     return filtered, total
@@ -10570,6 +10639,7 @@ def send_paginated_results(
     if total == 0:
         if not replace_loading_message(loading_ref, "Siyahı boşdur."):
             bot.send_message(chat_id, "Siyahı boşdur.")
+        send_main_menu(chat_id)
         return
 
     summary_map = {
@@ -10658,6 +10728,7 @@ def cb_pagination(c):
             bot.answer_callback_query(c.id, "Səhifə tapılmadı.")
         except Exception:
             pass
+        send_main_menu(chat_id, "Əsas menyu bərpa edildi")
         return
 
     action = c.data.split(":", 1)[1]
@@ -13580,6 +13651,8 @@ def build_demo_users_view(page: int = 1) -> Tuple[str, types.InlineKeyboardMarku
     rows = cur.fetchall()
     conn.close()
 
+    logger.info("demo users fetched rows=%s", len(rows))
+
     if not rows:
         return "❌ Demo istifadəçisi yoxdur.", types.InlineKeyboardMarkup(), 1
 
@@ -13729,6 +13802,7 @@ def send_demo_users_report(chat_id: int, page: int = 1, message=None):
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
+    send_main_menu(chat_id)
 
 
 def extend_demo_for_user(user_id: int, days: int) -> Optional[datetime]:
@@ -15196,9 +15270,8 @@ def show_all_users(
             list_status,
             where_clause,
         )
-        cur.execute(
-            "SELECT COUNT(*) FROM users_with_status WHERE " + where_clause, params
-        )
+        base_query = admin_user_status_subquery()
+        cur.execute(f"SELECT COUNT(*) FROM {base_query} WHERE " + where_clause, params)
         total = cur.fetchone()[0] or 0
         logger.info(
             "users count query done chat_id=%s status=%s total=%s",
@@ -15311,6 +15384,23 @@ def show_all_users(
         ]
 
         mk = types.InlineKeyboardMarkup()
+        if list_status == "pending":
+            for row in rows:
+                uid = _row_value_safe(row, "chat_id", None)
+                try:
+                    uid_val = int(uid)
+                except Exception:
+                    continue
+                mk.row(
+                    types.InlineKeyboardButton(
+                        "✅ Təsdiqlə",
+                        callback_data=f"adm_upd:approve:{uid_val}:{list_status}:{page}",
+                    ),
+                    types.InlineKeyboardButton(
+                        "⛔ Blokla",
+                        callback_data=f"adm_upd:block:{uid_val}:{list_status}:{page}",
+                    ),
+                )
         mk.row(*nav_buttons)
 
         text = "\n\n".join(text_lines)
@@ -15325,6 +15415,7 @@ def show_all_users(
         except Exception:
             logger.error("Admin send failed", exc_info=True)
             safe_admin_step(chat_id, text, reply_markup=mk)
+        send_main_menu(chat_id)
     except Exception:
         logger.exception("show_all_users fatal error")
         safe_send(chat_id, TEXTS_AZ["admin_userlist_open_error"])
@@ -15381,6 +15472,43 @@ def cb_admin_user_pagination(c):
         list_type = "active"
         page = 1
     show_all_users(c.message.chat.id, list_type, page=page, message=c.message)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_upd:"))
+@callback_guard
+def cb_admin_pending_actions(c):
+    chat_id = c.message.chat.id if c.message else None
+    if not is_admin(chat_id):
+        return
+    try:
+        _, action, uid_raw, list_status, page_raw = c.data.split(":")
+        uid = int(uid_raw)
+        page = int(page_raw)
+    except Exception:
+        safe_answer_callback_query(c.id, "Xəta")
+        if chat_id:
+            send_main_menu(chat_id, "Əsas menyu bərpa edildi")
+        return
+
+    conn = get_local_conn()
+    cur = conn.cursor()
+    try:
+        if action == "approve":
+            cur.execute("UPDATE users SET approved=1 WHERE chat_id=?", (uid,))
+            logger.info("admin approved user_id=%s by=%s", uid, chat_id)
+            bot.send_message(uid, "✅ Hesabınız təsdiqləndi.")
+        elif action == "block":
+            cur.execute("UPDATE users SET blocked=1 WHERE chat_id=?", (uid,))
+            logger.info("admin blocked user_id=%s by=%s", uid, chat_id)
+            bot.send_message(uid, "⛔ Hesabınız bloklandı.")
+        conn.commit()
+    except Exception:
+        logger.exception("admin pending action failed uid=%s action=%s", uid, action)
+    finally:
+        conn.close()
+
+    show_all_users(chat_id, status=list_status, page=page, message=c.message, force_new=True)
+    send_main_menu(chat_id)
 
 
 def get_admin_user_page(chat_id: int, list_type: str) -> int:
@@ -15595,60 +15723,8 @@ def handle_admin_delete(c):
 
 
 def show_pending_users(chat_id):
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT chat_id, full_name, username
-        FROM users_with_status
-        WHERE computed_status = 'PENDING'
-        ORDER BY chat_id ASC
-        LIMIT 100
-        """,
-    )
-    rows = cur.fetchall()
-    conn.close()
-
-    if not rows:
-        bot.send_message(chat_id, TEXTS_AZ["admin_pending_users_none"])
-        return
-
-    for uid, full_name, username in rows:
-        mk = types.InlineKeyboardMarkup()
-        mk.row(
-            types.InlineKeyboardButton(
-                TEXTS_AZ["admin_pending_user_approve"],
-                callback_data=f"user_approve|{uid}",
-            ),
-            types.InlineKeyboardButton(
-                TEXTS_AZ["admin_pending_user_demo"],
-                callback_data=f"user_demo|{uid}",
-            ),
-        )
-        mk.add(
-            types.InlineKeyboardButton(
-                TEXTS_AZ["admin_pending_user_free"], callback_data=f"user_free|{uid}"
-            )
-        )
-        mk.row(
-            types.InlineKeyboardButton(
-                TEXTS_AZ["admin_pending_user_reject"],
-                callback_data=f"user_reject|{uid}",
-            ),
-            types.InlineKeyboardButton(
-                TEXTS_AZ["admin_pending_user_block"],
-                callback_data=f"user_block|{uid}",
-            ),
-        )
-        prof = f"@{username}" if username else "yoxdur"
-        txt = (
-            f"{TEXTS_AZ['admin_pending_users_title']}\n\n"
-            f"• 👤 Ad: {full_name or '-'}\n"
-            f"• 🆔 ID: <code>{uid}</code>\n"
-            f"• 👤 Username: {prof}\n"
-            f"• 📅 Sorğu tarixi: —"
-        )
-        bot.send_message(chat_id, txt, parse_mode="HTML", reply_markup=mk)
+    show_all_users(chat_id, status="pending", page=1, force_new=True)
+    send_main_menu(chat_id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_approve|"))
