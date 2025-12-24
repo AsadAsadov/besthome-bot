@@ -1310,6 +1310,42 @@
         }
     }
 
+    function formatDate(value) {
+        const val = normalizeField(value);
+        if (!val) return "";
+        const clean = val.replace(/T.+$/, "");
+        const parts = clean.split(/[./-]/);
+        if (parts.length === 3) {
+            const [a, b, c] = parts.map(p => p.padStart(2, "0"));
+            if (a.length === 4) return `${c}.${b}.${a}`; // YYYY-MM-DD
+            if (c.length === 4) return `${a}.${b}.${c}`; // DD.MM.YYYY
+        }
+        const dt = new Date(val);
+        if (!Number.isNaN(dt.getTime())) {
+            const d = String(dt.getDate()).padStart(2, "0");
+            const m = String(dt.getMonth() + 1).padStart(2, "0");
+            const y = dt.getFullYear();
+            return `${d}.${m}.${y}`;
+        }
+        return val;
+    }
+
+    function buildWhatsappLink(phone) {
+        const raw = normalizeField(phone);
+        if (!raw) return "";
+        const digits = raw.replace(/\D+/g, "");
+        if (!digits) return "";
+        let normalized = digits;
+        if (normalized.startsWith("994")) {
+            normalized = normalized;
+        } else if (normalized.startsWith("0")) {
+            normalized = "994" + normalized.slice(1);
+        } else if (!normalized.startsWith("994")) {
+            normalized = "994" + normalized;
+        }
+        return `https://wa.me/${normalized}`;
+    }
+
     function performSearch() {
         if (isListingsLoading) return;
         listingsState.page = 1;
@@ -1405,8 +1441,10 @@
             const rooms = normalizeField(l.rooms);
             const metro = normalizeField(l.metro);
             const phone = normalizeField(l.phone);
+            const addressLine = normalizeField(metro) || normalizeField(l.address);
             const locationLine = [rayon, rooms].filter(Boolean).join(" · ");
-            const metaHtml = [metro, phone].filter(Boolean).map(v => `<div>${v}</div>`).join("");
+            const dateLabel = formatDate(l.date_read);
+            const metaHtml = [addressLine, phone].filter(Boolean).map(v => `<div style="user-select:text;">${v}</div>`).join("");
 
             card.innerHTML = `
                 <div class="listing-header-row">
@@ -1416,6 +1454,7 @@
                 <div class="listing-title">${locationLine || rooms || ""}</div>
                 <div class="listing-summary">${title}</div>
                 <div class="listing-meta-row">${metaHtml}</div>
+                ${dateLabel ? `<div class="listing-meta-row"><span class="pill-soft">${dateLabel}</span></div>` : ""}
                 <div class="listing-actions-row">
                     <button class="link-btn" data-id="${l.id || l.listing_id || ""}" data-link="${l.link || ""}">Elana keçid</button>
                     <button class="fav-toggle ${l.is_favorite ? "active" : ""}" data-id="${l.id}" data-source="${l.source || "main"}">
@@ -1505,24 +1544,43 @@
         if (item) renderListingDetailPanel(item);
     }
 
+    function collectDetailRows(item) {
+        const rows = [];
+        const addRow = (label, value) => {
+            const val = normalizeField(value);
+            if (val) rows.push({ label, value: val });
+        };
+
+        const price = item.price ? `${item.price} ${item.currency || "AZN"}` : "";
+        const link = normalizeField(item.source_link || item.link);
+        const whatsapp = buildWhatsappLink(item.phone);
+
+        addRow("Qiymət", price);
+        addRow("Əlaqə", item.phone);
+        if (whatsapp) rows.push({ label: "WhatsApp", value: `<a href="${whatsapp}" target="_blank">Yaz</a>` });
+        addRow("Otaq sayı", item.rooms || item.Otaq_sayi);
+        addRow("Ümumi sahə", item.area_kvm);
+        addRow("Əmlak növü", item.prop_type);
+        addRow("Əməliyyat", item.operation);
+        addRow("Mərtəbə", item.floor);
+        addRow("Bina tipi", item.building);
+        addRow("Metro", item.metro);
+        addRow("Rayon", item.rayon || item.district || item.Rayon_Qesebe);
+        addRow("Ünvan", item.address);
+        addRow("Elan tarixi", formatDate(item.date_read));
+        addRow("Əmlak sahibi", item.contact_name || item.ad);
+        addRow("Mənbə", item.source);
+        if (link) rows.push({ label: "Orijinal elan linki", value: `<a href="${link}" target="_blank">${link}</a>` });
+        return rows;
+    }
+
     function renderListingDetailPanel(item) {
         if (!item || Object.keys(item).length === 0) return;
-        const rows = [
-            { label: "Əməliyyat", value: normalizeField(item.operation) },
-            { label: "Rayon", value: normalizeField(item.rayon || item.Rayon_Qesebe) },
-            { label: "Metro", value: normalizeField(item.metro) },
-            { label: "Otaq", value: normalizeField(item.rooms || item.Otaq_sayi) },
-            { label: "Qiymət", value: item.price ? `${item.price} ${item.currency || "AZN"}` : "" },
-            { label: "Telefon", value: normalizeField(item.phone) },
-            { label: "Əlaqə", value: normalizeField(item.contact_name || item.ad) },
-            { label: "Link", value: normalizeField(item.link) }
-        ].filter(r => r.value);
-
-        const locationLine = [normalizeField(item.rayon), normalizeField(item.metro)].filter(Boolean).join(" · ");
+        const rows = collectDetailRows(item);
+        const description = normalizeField(item.description) || normalizeField(item.summary) || "";
 
         listingDetailBody.innerHTML = `
-            <div class="listing-title" style="margin-bottom:6px;">${item.summary || item.description || ""}</div>
-            <div class="listing-meta-row" style="flex-wrap:wrap;gap:8px;">${locationLine}</div>
+            ${description ? `<div class="listing-summary" style="margin-bottom:6px;">${description}</div>` : ""}
             <div class="listing-meta-row" style="flex-wrap:wrap;gap:8px;">
                 ${rows.map(r => `<span class="pill-soft">${r.label}: ${r.value}</span>`).join("")}
             </div>
@@ -1538,28 +1596,18 @@
 
     function openListingModal(item) {
         if (!item) return;
-        const rayon = normalizeField(item.rayon || item.district);
-        const metro = normalizeField(item.metro);
-        const rooms = normalizeField(item.rooms);
-        const description = item.description || item.summary || "";
-        const metaParts = [
-            item.price ? `Qiymət: ${item.price} ${item.currency || "AZN"}` : "",
-            item.phone ? `Telefon: ${item.phone}` : "",
-            rayon ? `Rayon: ${rayon}` : "",
-            metro ? `Metro: ${metro}` : "",
-            rooms ? `Otaq: ${rooms}` : ""
-        ].filter(Boolean).map(m => `<span class="pill-soft">${m}</span>`).join("");
-        const link = item.link || "";
+        const description = normalizeField(item.description) || normalizeField(item.summary) || "";
+        const rows = collectDetailRows(item);
+        const link = normalizeField(item.source_link || item.link);
+        const whatsapp = buildWhatsappLink(item.phone);
+        const metaParts = rows.map(r => `<span class="pill-soft">${r.label}: ${r.value}</span>`).join("");
 
         listingModalBody.innerHTML = `
-            <div class="modal-header">
-                <div class="listing-title">${item.summary || item.description || ""}</div>
-                <div class="listing-meta-row" style="gap:8px;">${[rayon, metro].filter(Boolean).join(" · ")}</div>
-            </div>
             ${metaParts ? `<div class="modal-meta">${metaParts}</div>` : ""}
             <div class="modal-description">${description || "Təsvir yoxdur."}</div>
             <div class="modal-actions">
-                <button class="btn-primary" id="modalOpenLink" ${link ? "" : "disabled"}>${link ? "Linkə keç" : "Link yoxdur"}</button>
+                ${whatsapp ? `<button class="btn-outline" id="modalWhatsapp">WhatsApp</button>` : ""}
+                <button class="btn-primary" id="modalOpenLink" ${link ? "" : "disabled"}>${link ? "Elana keçid" : "Link yoxdur"}</button>
             </div>
         `;
 
@@ -1569,6 +1617,10 @@
         const modalLink = document.getElementById("modalOpenLink");
         if (modalLink && link) {
             modalLink.addEventListener("click", () => window.open(link, "_blank"));
+        }
+        const modalWhatsapp = document.getElementById("modalWhatsapp");
+        if (modalWhatsapp && whatsapp) {
+            modalWhatsapp.addEventListener("click", () => window.open(whatsapp, "_blank"));
         }
     }
 
