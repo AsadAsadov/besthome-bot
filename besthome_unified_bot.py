@@ -18461,6 +18461,39 @@ def main():
 
     def _normalize_listing_response(ev: dict) -> dict:
         data = dict(ev or {})
+        def pick_col(cols: List[str]):
+            for col in cols:
+                val = data.get(col)
+                cleaned = clean_field(val)
+                if cleaned:
+                    return cleaned
+            return ""
+
+        op_raw = pick_col(["operation", "Emeliyyat"])
+        op_norm = op_raw
+        if op_raw:
+            low = op_raw.lower()
+            if low in {"sale", "satilir", "satılır"}:
+                op_norm = "Satılır"
+            elif low in {"rent", "kiraye", "kirayə", "kirayə verilir"}:
+                op_norm = "Kirayə verilir"
+
+        data["operation"] = op_norm or op_raw
+        data["prop_type"] = pick_col(["prop_type", "emlak_novu", "property_type"])
+        data["price"] = pick_col(["price", "Qiymet", "qiymet", "qiymet_azn"])
+        data["currency"] = pick_col(["currency", "valyuta"])
+        data["phone"] = pick_col(["phone", "Telefon", "tel"])
+        data["rooms"] = pick_col(["rooms", "Otaq_sayi", "otaq_sayi"])
+        data["area_kvm"] = pick_col(["area_kvm", "area", "Sahe_kvm", "sahe_kvm", "sahe"])
+        data["floor"] = pick_col(["floor", "mertebe", "Mertebe"])
+        data["building"] = pick_col(["building", "bina", "bina_tipi"])
+        data["address"] = pick_col(["address", "unvan", "ünvan"])
+        data["date_read"] = pick_col(["date_read", "date", "date_created", "elan_tarixi"])
+        data["contact_name"] = pick_col(["contact_name", "ad", "elaqe_adi", "owner"])
+        data["source"] = pick_col(["source", "Mənbə", "menbe"])
+        source_link = pick_col(["source_link", "link", "elan_linki"])
+        data["source_link"] = source_link
+        data["link"] = source_link or data.get("link")
         rayon_val = data.get("rayon") or data.get("Rayon_Qesebe") or data.get("district")
         data["rayon"] = clean_field(rayon_val)
         data["district"] = clean_field(data.get("district") or data.get("rayon"))
@@ -18484,7 +18517,10 @@ def main():
         return desired in ev_phone if ev_phone else False
 
     def _matches_credit(ev: dict, credit: Optional[str]) -> bool:
-        if not credit:
+        if credit in (None, "", False):
+            return True
+        credit_str = str(credit).strip().lower()
+        if credit_str in {"0", "false", "no", "x", "off"}:
             return True
         val = str(ev.get("credit") or ev.get("ipotekaya_uygun") or "").lower()
         return val in {"1", "true", "beli", "yes"}
@@ -19143,7 +19179,13 @@ def main():
             for src in sources:
                 ev = fetch_listing_by_source(src, listing_id)
                 if ev:
-                    return api_ok_response({"item": _normalize_listing_response(ev)})
+                    normalized = _normalize_listing_response(ev)
+                    logger.info("Listing detail fetched id=%s source=%s", listing_id, src)
+                    if not normalized.get("source_link"):
+                        logger.debug(
+                            "Listing detail missing source_link id=%s source=%s", listing_id, src
+                        )
+                    return api_ok_response({"item": normalized})
             return api_error_response("Elan tapılmadı", 404)
 
         return _wrap_api("listing_detail", _handler)
