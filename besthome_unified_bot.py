@@ -18104,6 +18104,14 @@ def main():
     if os.environ.get("ENV") == "prod":
         app.config["SESSION_COOKIE_SECURE"] = True
 
+    try:
+        from admin import create_admin_blueprint
+
+        app.register_blueprint(create_admin_blueprint(DATA_DIR))
+        logger.info("Web admin panel registered at /admin")
+    except Exception:
+        logger.exception("Failed to register web admin panel")
+
     def _get_admin_password_hash(identifier: str) -> Optional[str]:
         ident = str(identifier or "").strip().lower()
         if not ident:
@@ -18559,7 +18567,7 @@ def main():
             ev["is_favorite"] = (lid_int, src) in favs
         return items
 
-    @app.route("/admin/login", methods=["GET", "POST"])
+    @app.route("/legacy-admin/login", methods=["GET", "POST"])
     def admin_login():
         def _login_form(error: Optional[str] = None):
             error_block = (
@@ -18618,7 +18626,7 @@ def main():
         logger.warning("Admin login failed identifier=%s", identifier)
         return _render_admin_template("Admin Login", _login_form(error), 401)
 
-    @app.route("/admin/logout", methods=["POST"])
+    @app.route("/legacy-admin/logout", methods=["POST"])
     def admin_logout():
         admin_data = _get_session_admin()
         session.pop("admin", None)
@@ -18626,7 +18634,7 @@ def main():
             logger.info("Admin logout chat_id=%s", admin_data.get("chat_id"))
         return redirect(url_for("admin_login"))
 
-    @app.route("/admin/dashboard")
+    @app.route("/legacy-admin/dashboard")
     @_admin_login_required
     def admin_dashboard():
         user_counts = _compute_admin_user_counts()
@@ -18651,7 +18659,7 @@ def main():
         """
         return _render_admin_template("Dashboard", content)
 
-    @app.route("/admin/users")
+    @app.route("/legacy-admin/users")
     @_admin_login_required
     def admin_users():
         filter_name = request.args.get("filter", "all").lower()
@@ -18730,7 +18738,7 @@ def main():
         """
         return _render_admin_template("Users", content)
 
-    @app.route("/admin/users/extend", methods=["POST"])
+    @app.route("/legacy-admin/users/extend", methods=["POST"])
     @_admin_login_required
     def admin_user_extend():
         payload = request.get_json(silent=True) or {}
@@ -18813,7 +18821,7 @@ def main():
         )
         return jsonify({"status": "ok", "expires_at": new_exp.isoformat(), "type": ext_type})
 
-    @app.route("/admin/keywords")
+    @app.route("/legacy-admin/keywords")
     @_admin_login_required
     def admin_keywords():
         conn = get_local_conn()
@@ -18904,7 +18912,7 @@ def main():
         """
         return _render_admin_template("Keywords", content)
 
-    @app.route("/admin/keywords/add", methods=["POST"])
+    @app.route("/legacy-admin/keywords/add", methods=["POST"])
     @_admin_login_required
     def admin_keywords_add():
         payload = request.get_json(silent=True)
@@ -18945,7 +18953,7 @@ def main():
             return jsonify({"status": "ok"})
         return redirect(url_for("admin_keywords"))
 
-    @app.route("/admin/keywords/remove", methods=["POST"])
+    @app.route("/legacy-admin/keywords/remove", methods=["POST"])
     @_admin_login_required
     def admin_keywords_remove():
         payload = request.get_json(silent=True)

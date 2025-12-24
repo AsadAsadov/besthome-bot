@@ -1,0 +1,17 @@
+{% extends 'layout.html' %}
+{% block content %}
+<div class="header">
+  <h1>Dashboard</h1>
+  <div class="nav-actions">
+    <a href="{{ url_for('web_admin.users') }}">İstifadəçilər</a>
+    <a href="{{ url_for('web_admin.keywords') }}">Açar sözlər</a>
+    <a href="{{ url_for('web_admin.logout') }}">Çıxış</a>
+  </div>
+</div>
+<div class="grid">
+  <div class="card"><div class="label">Cəmi istifadəçi</div><div class="value">{{ stats.total }}</div></div>
+  <div class="card"><div class="label">Aktiv</div><div class="value">{{ stats.active }}</div></div>
+  <div class="card"><div class="label">Demo</div><div class="value">{{ stats.demo }}</div></div>
+  <div class="card"><div class="label">Bitmiş</div><div class="value">{{ stats.expired }}</div></div>
+</div>
+{% endblock %}

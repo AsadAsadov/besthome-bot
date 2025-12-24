@@ -1,0 +1,71 @@
+{% extends 'layout.html' %}
+{% block content %}
+<div class="header">
+  <h1>İstifadəçilər</h1>
+</div>
+<form method="get" class="card">
+  <label>chat_id ilə axtar</label>
+  <input type="number" name="chat_id" value="{{ request.args.get('chat_id') or request.form.get('chat_id','') }}" />
+  <button type="submit">Axtar</button>
+</form>
+
+{% if message %}<div class="message">{{ message }}</div>{% endif %}
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+{% if user %}
+  <div class="card">
+    <div><strong>chat_id:</strong> {{ user.chat_id }}</div>
+    <div><strong>Username:</strong> {{ user.username or '-' }}</div>
+    <div><strong>Ad:</strong> {{ user.full_name or '-' }}</div>
+    <div><strong>Status:</strong> {{ status }}</div>
+    <div><strong>Təsdiq:</strong> {{ 'Bəli' if user.approved else 'Xeyr' }}</div>
+    <div><strong>Bitmə tarixi:</strong> {{ effective if effective else '—' }}</div>
+    <div><strong>Paid until:</strong> {{ user.paid_until or '—' }}</div>
+    <div><strong>Demo:</strong> {{ user.demo_end_at or user.demo_expires_at or '—' }}</div>
+    <div><strong>Bloklu:</strong> {{ 'Bəli' if user.blocked else 'Xeyr' }}</div>
+  </div>
+
+  <div class="card actions">
+    <h3>Müddət uzat</h3>
+    <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <input type="hidden" name="chat_id" value="{{ user.chat_id }}" />
+      <input type="hidden" name="action" value="extend" />
+      <div class="quick-buttons">
+        {% for days in [1,7,15,30] %}
+          <button type="submit" name="days" value="{{ days }}">+{{ days }} gün</button>
+        {% endfor %}
+      </div>
+      <div class="inline">
+        <input type="number" name="days" placeholder="Gün sayı" min="1" />
+        <button type="submit">Təsdiq</button>
+      </div>
+    </form>
+
+    <h3>İdarəetmə</h3>
+    <div class="quick-buttons">
+      <form method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <input type="hidden" name="chat_id" value="{{ user.chat_id }}" />
+        <input type="hidden" name="action" value="approve" />
+        <button type="submit">Təsdiqlə</button>
+      </form>
+      {% if not user.blocked %}
+      <form method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <input type="hidden" name="chat_id" value="{{ user.chat_id }}" />
+        <input type="hidden" name="action" value="block" />
+        <button type="submit" class="danger">Blokla</button>
+      </form>
+      {% else %}
+      <form method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <input type="hidden" name="chat_id" value="{{ user.chat_id }}" />
+        <input type="hidden" name="action" value="unblock" />
+        <button type="submit">Blokdan çıxar</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+{% endif %}
+{% endblock %}
