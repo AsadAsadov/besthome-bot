@@ -1,0 +1,49 @@
+{% extends 'layout.html' %}
+{% block content %}
+<div class="header">
+  <h1>Açar sözlər</h1>
+</div>
+<form method="get" class="card inline">
+  <label>İstifadəçi ID ilə filtrlə</label>
+  <input type="number" name="user_id" value="{{ user_filter or '' }}" />
+  <button type="submit">Filtrlə</button>
+  <a href="{{ url_for('web_admin.keywords') }}" class="link">Hamısı</a>
+</form>
+
+{% if message %}<div class="message">{{ message }}</div>{% endif %}
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+<table class="card">
+  <thead>
+    <tr>
+      <th>ID</th><th>User</th><th>Açar söz</th><th>Regionlar</th><th>Aktiv</th><th>Əməliyyat</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for alert in alerts %}
+      <tr>
+        <td>{{ alert.id }}</td>
+        <td>{{ alert.user_id }}</td>
+        <td>{{ alert.keywords }}</td>
+        <td>{{ alert.regions or '-' }}</td>
+        <td>{{ 'Bəli' if alert.is_active else 'Xeyr' }}</td>
+        <td>
+          <form method="post" class="inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <input type="hidden" name="alert_id" value="{{ alert.id }}" />
+            <input type="hidden" name="user_id" value="{{ user_filter or '' }}" />
+            {% if alert.is_active %}
+              <button type="submit" name="action" value="disable">Söndür</button>
+            {% else %}
+              <button type="submit" name="action" value="enable">Aktiv et</button>
+            {% endif %}
+            <button type="submit" name="action" value="delete" class="danger">Sil</button>
+          </form>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="6">Məlumat yoxdur</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

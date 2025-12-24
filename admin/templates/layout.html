@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="az">
+<head>
+  <meta charset="utf-8" />
+  <title>Admin Panel</title>
+  <link rel="stylesheet" href="{{ url_for('web_admin.static', filename='admin.css') }}" />
+</head>
+<body>
+  <div class="admin-container">
+    {% if session.get('admin_authenticated') %}
+    <div class="topbar">
+      <div>Admin: {{ session.get('admin_username') }}</div>
+      <a href="{{ url_for('web_admin.dashboard') }}">Dashboard</a>
+      <a href="{{ url_for('web_admin.users') }}">İstifadəçilər</a>
+      <a href="{{ url_for('web_admin.keywords') }}">Açar sözlər</a>
+      <a href="{{ url_for('web_admin.logout') }}">Çıxış</a>
+    </div>
+    {% endif %}
+    {% block content %}{% endblock %}
+  </div>
+</body>
+</html>

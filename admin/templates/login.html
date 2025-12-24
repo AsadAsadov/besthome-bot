@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="az">
+<head>
+  <meta charset="utf-8" />
+  <title>Admin Login</title>
+  <link rel="stylesheet" href="{{ url_for('web_admin.static', filename='admin.css') }}" />
+</head>
+<body>
+  <div class="admin-container">
+    <h1>Admin Panel</h1>
+    <form method="post" class="card">
+      <label>İstifadəçi adı</label>
+      <input type="text" name="username" required />
+      <label>Şifrə</label>
+      <input type="password" name="password" required />
+      {% if error %}<div class="error">{{ error }}</div>{% endif %}
+      <button type="submit">Daxil ol</button>
+    </form>
+  </div>
+</body>
+</html>
