@@ -1949,22 +1949,29 @@ def parse_price_value(raw) -> Optional[int]:
         return None
 
 
-def safe_date(row: dict):
+def extract_listing_datetime(row: dict) -> Optional[datetime]:
+    if not row:
+        return None
     for key in (
-        "inserted_at",
         "created_at",
-        "date_read",
+        "published_at",
+        "inserted_at",
         "date_added",
+        "date_read",
         "Elanin_tarixi",
         "added_at",
     ):
         v = row.get(key)
         if v:
-            try:
-                return datetime.fromisoformat(str(v).replace(" ", "T"))
-            except:
-                pass
-    return datetime.min
+            dt = parse_dt_safe(v)
+            if dt:
+                return dt
+    return None
+
+
+def safe_date(row: dict):
+    dt = extract_listing_datetime(row)
+    return dt or datetime.min
 
 
 def parse_dt_safe(raw: Optional[str]) -> Optional[datetime]:
@@ -9756,16 +9763,15 @@ def get_date_range_options(op_code: Optional[str]):
 
 
 def is_within_date_range(ev: dict, date_days: Optional[Union[int, str]]) -> bool:
+    ev_dt = extract_listing_datetime(ev)
     if date_days == "today":
-        ev_dt = safe_date(ev)
-        if ev_dt == datetime.min:
+        if not ev_dt:
             return False
         return ev_dt.date() == datetime.utcnow().date()
 
     if not date_days:
         return True
-    ev_dt = safe_date(ev)
-    if ev_dt == datetime.min:
+    if not ev_dt:
         return False
     cutoff = datetime.utcnow() - timedelta(days=date_days)
     return ev_dt >= cutoff
@@ -17803,13 +17809,86 @@ def map_date_range_to_days(code: Optional[str]) -> Optional[Union[int, str]]:
     if not code:
         return None
     val = str(code).lower()
-    if val == "today":
-        return "today"
-    if val in ("1_month", "month", "30d"):
-        return 30
-    if val == "all":
-        return None
-    return None
+    mapping = {
+        "today": "today",
+        "7_days": 7,
+        "7d": 7,
+        "1_month": 30,
+        "month": 30,
+        "30d": 30,
+        "2_months": 60,
+        "60d": 60,
+        "3_months": 90,
+        "90d": 90,
+        "all": None,
+    }
+    return mapping.get(val)
+
+
+def compute_besthome_overview_stats():
+    stats = {
+        "today_total": 0,
+        "today_sale": 0,
+        "today_rent": 0,
+        "last_24h": 0,
+        "total_active": 0,
+    }
+
+    if not os.path.exists(MAIN_DB):
+        return stats
+
+    conn = None
+    try:
+        conn = get_main_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='listings'"
+        )
+        if not cur.fetchone():
+            return stats
+        cur.execute("SELECT * FROM listings")
+        rows = [dict(r) for r in cur.fetchall()]
+    except Exception:
+        logger.exception("Failed to compute stats from besthome.db")
+        return stats
+    finally:
+        if conn:
+            try:
+                close_main_conn(conn)
+            except Exception:
+                pass
+
+    status_map = get_status_map()
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    last_24h_dt = datetime.utcnow() - timedelta(hours=24)
+
+    for row in rows:
+        row["__source"] = "main"
+        approved_raw = row.get("approved")
+        if approved_raw is None:
+            approved_raw = row.get("is_approved")
+        if approved_raw is not None:
+            if str(approved_raw).lower() in {"0", "false", "pending", "rejected", "reject"}:
+                continue
+        if not is_listing_active(row, status_map):
+            continue
+
+        stats["total_active"] += 1
+        ev_dt = extract_listing_datetime(row)
+        if not ev_dt:
+            continue
+
+        if ev_dt >= last_24h_dt:
+            stats["last_24h"] += 1
+        if ev_dt >= today_start:
+            stats["today_total"] += 1
+            op = normalize_operation_value(row.get("operation") or row.get("Emeliyyat"))
+            if op == "sale":
+                stats["today_sale"] += 1
+            elif op == "rent":
+                stats["today_rent"] += 1
+
+    return stats
 
 
 def filter_results_by_rayon(items: List[dict], rayon: Optional[str]):
@@ -18110,6 +18189,14 @@ def main():
             return api_ok_response({"time": datetime.utcnow().isoformat(), "db": db_status})
 
         return _wrap_api("health", _handler)
+
+    @app.route("/api/stats/overview", methods=["GET"])
+    def api_stats_overview():
+        def _handler():
+            stats = compute_besthome_overview_stats()
+            return api_ok_response(stats)
+
+        return _wrap_api("stats_overview", _handler)
 
     @app.route("/api/listings/search", methods=["GET"])
     def api_listings_search():
