@@ -1,3 +1,11 @@
-from .routes import create_admin_blueprint
+from flask import Blueprint
 
-__all__ = ["create_admin_blueprint"]
+admin_bp = Blueprint(
+    "admin",
+    __name__,
+    url_prefix="/admin",
+    template_folder="templates",
+    static_folder="static",
+)
+
+__all__ = ["admin_bp"]

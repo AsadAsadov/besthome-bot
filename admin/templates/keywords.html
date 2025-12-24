@@ -7,7 +7,7 @@
   <label>İstifadəçi ID ilə filtrlə</label>
   <input type="number" name="user_id" value="{{ user_filter or '' }}" />
   <button type="submit">Filtrlə</button>
-  <a href="{{ url_for('web_admin.keywords') }}" class="link">Hamısı</a>
+  <a href="{{ url_for('admin.keywords') }}" class="link">Hamısı</a>
 </form>
 
 {% if message %}<div class="message">{{ message }}</div>{% endif %}
