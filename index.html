@@ -29,6 +29,32 @@
             padding: 0;
         }
 
+        .app-shell *,
+        .filter-bar *,
+        .cards-grid *,
+        .listing-card *,
+        .agent-card * {
+            min-width: 0;
+        }
+
+        .btn-page,
+        .link-btn,
+        .btn-mini,
+        .fav-toggle,
+        .pill-soft,
+        .chip-outline {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .listing-summary,
+        .agent-card,
+        .card-sub,
+        .listing-detail-body {
+            overflow-wrap: anywhere;
+        }
+
         body {
             font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
             background: radial-gradient(circle at top left, #111827, #020617 60%);
@@ -822,6 +848,16 @@
 
                 <div id="listingsGrid" class="cards-grid"></div>
 
+                <div id="listingDetailPanel" class="card-soft" style="margin-top:12px; display:none;">
+                    <div class="card-header">
+                        <div>
+                            <div class="card-title">Elan detalları</div>
+                            <div class="card-sub">Seçilmiş elan haqqında ətraflı məlumat.</div>
+                        </div>
+                    </div>
+                    <div id="listingDetailBody" class="listing-detail-body"></div>
+                </div>
+
                 <div class="pagination-row">
                     <div>Göstərilir: <span id="listingsRange">0–0</span></div>
                     <div class="pagination-buttons">
@@ -1095,6 +1131,8 @@
     // =============================
     const resultSummary = document.getElementById("resultSummary");
 
+    const tgUserId = Number(window.Telegram?.WebApp?.initDataUnsafe?.user?.id || 0);
+
     const listingsState = {
         page: 1,
         total: 0,
@@ -1116,6 +1154,8 @@
     const listingsInfo = document.getElementById("listingsInfo");
     const listingsInfoRight = document.getElementById("listingsInfoRight");
     const listingsRange = document.getElementById("listingsRange");
+    const listingDetailPanel = document.getElementById("listingDetailPanel");
+    const listingDetailBody = document.getElementById("listingDetailBody");
 
     async function loadListings(pageOverride) {
         const page = pageOverride || listingsState.page || 1;
@@ -1135,14 +1175,15 @@
         params.set("page", page);
         if (q) params.set("q", q);
         if (phone) params.set("phone", phone);
-        if (rayon) params.set("rayon", rayon);
+        if (rayon) params.set("district", rayon);
         if (minPrice) params.set("min_price", minPrice);
         if (maxPrice) params.set("max_price", maxPrice);
         if (rooms) params.set("rooms", rooms);
         if (credit) params.set("credit", "1");
+        if (tgUserId) params.set("user_id", tgUserId);
 
         try {
-            const resp = await fetch("/api/listings?" + params.toString());
+            const resp = await fetch("/api/listings/search?" + params.toString());
             const data = await resp.json();
 
             if (!data.ok) {
@@ -1153,8 +1194,8 @@
             const items = data.items || [];
             listingsState.page = data.page || page;
             listingsState.total = data.total || items.length;
-            listingsState.pageSize = data.page_size || items.length;
-            listingsState.totalPages = data.total_pages || 1;
+            listingsState.pageSize = data.page_size || items.length || 1;
+            listingsState.totalPages = data.pages || data.total_pages || 1;
 
             renderListings(items);
 
@@ -1217,6 +1258,11 @@
 
             listingsGrid.appendChild(card);
 
+            card.addEventListener("click", (ev) => {
+                if (ev.target.closest(".fav-toggle") || ev.target.closest(".link-btn")) return;
+                if (l.id) loadListingDetail(l.id);
+            });
+
             // İlk 4 elanı panel üçün də göstərək
             if (idx < 4) {
                 const mini = card.cloneNode(true);
@@ -1242,6 +1288,46 @@
                 await toggleFavorite(id, source, btn, btn.closest(".listing-card"));
             });
         });
+    }
+
+    async function loadListingDetail(id) {
+        try {
+            const url = new URL("/api/listings/detail", window.location.origin);
+            url.searchParams.set("id", id);
+            const resp = await fetch(url.toString());
+            const data = await resp.json();
+            if (!data.ok) {
+                showToast(data.error || "Detallar alınmadı", "err");
+                return;
+            }
+            renderListingDetail(data.item || {});
+        } catch (e) {
+            console.error(e);
+            showToast("Server xətası (detallar)", "err");
+        }
+    }
+
+    function renderListingDetail(item) {
+        if (!item || Object.keys(item).length === 0) return;
+        const rows = [
+            { label: "Əməliyyat", value: item.operation || "" },
+            { label: "Rayon", value: item.rayon || item.Rayon_Qesebe || "" },
+            { label: "Metro", value: item.metro || "" },
+            { label: "Otaq", value: item.rooms || item.Otaq_sayi || "" },
+            { label: "Qiymət", value: `${item.price || "?"} ${item.currency || "AZN"}` },
+            { label: "Telefon", value: item.phone || "" },
+            { label: "Əlaqə", value: item.contact_name || item.ad || "" },
+            { label: "Link", value: item.link || "" }
+        ];
+
+        listingDetailBody.innerHTML = `
+            <div class="listing-title" style="margin-bottom:6px;">${item.summary || item.description || ""}</div>
+            <div class="listing-meta-row" style="flex-wrap:wrap;gap:8px;">
+                ${rows.map(r => `<span class="pill-soft">${r.label}: ${r.value || "-"}</span>`).join("")}
+            </div>
+        `;
+        listingDetailPanel.style.display = "block";
+        listingDetailPanel.scrollIntoView({ behavior: "smooth" });
     }
 
     document.getElementById("listingsPrev").addEventListener("click", () => {
@@ -1282,11 +1368,15 @@
     const favCountLabel = document.getElementById("favCountLabel");
 
     async function toggleFavorite(id, source, btnEl, cardEl) {
+        if (!tgUserId) {
+            showToast("Telegram user_id missing", "err");
+            return;
+        }
         try {
             const resp = await fetch("/api/favorites/toggle", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ listing_id: id, source })
+                body: JSON.stringify({ listing_id: id, source, user_id: tgUserId })
             });
             const data = await resp.json();
             if (!data.ok) {
@@ -1294,7 +1384,7 @@
                 return;
             }
 
-            const inFav = !!data.in_favorites;
+            const inFav = !!data.is_favorite;
             if (btnEl) {
                 btnEl.classList.toggle("active", inFav);
                 btnEl.textContent = inFav ? "❤ Favoridə" : "♡ Favoriyə əlavə et";
@@ -1312,13 +1402,21 @@
     }
 
     async function loadFavorites() {
+        if (!tgUserId) {
+            favGrid.innerHTML = "";
+            favEmpty.style.display = "block";
+            favEmpty.textContent = "Telegram user_id missing";
+            return;
+        }
         try {
-            const resp = await fetch("/api/favorites/list");
+            const url = new URL("/api/favorites/list", window.location.origin);
+            if (tgUserId) url.searchParams.set("user_id", tgUserId);
+            const resp = await fetch(url.toString());
             const data = await resp.json();
             if (!data.ok) {
                 favGrid.innerHTML = "";
                 favEmpty.style.display = "block";
-                favEmpty.textContent = "Favorilər yüklənmədi.";
+                favEmpty.textContent = data.error || "Favorilər yüklənmədi.";
                 return;
             }
 
@@ -1380,7 +1478,9 @@
     // =============================
     async function fetchPendingListings() {
         try {
-            const resp = await fetch("/api/admin/pending");
+            const url = new URL("/api/admin/pending", window.location.origin);
+            if (tgUserId) url.searchParams.set("admin_id", tgUserId);
+            const resp = await fetch(url.toString());
             const data = await resp.json();
             if (!data.ok) return [];
             return data.items || [];
@@ -1429,7 +1529,7 @@
                     const resp = await fetch(url, {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ id })
+                        body: JSON.stringify({ user_id: id, admin_id: tgUserId })
                     });
                     const data = await resp.json();
                     if (!data.ok) {
@@ -1469,11 +1569,11 @@
         params.set("page", page);
         if (q) params.set("q", q);
         if (phone) params.set("phone", phone);
-        if (rayon) params.set("rayon", rayon);
-        if (op) params.set("operation", op);
+        if (rayon) params.set("district", rayon);
+        if (op) params.set("op", op);
 
         try {
-            const resp = await fetch("/api/agents?" + params.toString());
+            const resp = await fetch("/api/agents/search?" + params.toString());
             const data = await resp.json();
             if (!data.ok) {
                 agentsInfo.textContent = "Xəta baş verdi: " + (data.error || "bilinmir");
@@ -1483,8 +1583,8 @@
             const items = data.items || [];
             agentsState.page = data.page || page;
             agentsState.total = data.total || items.length;
-            agentsState.pageSize = data.page_size || items.length;
-            agentsState.totalPages = data.total_pages || 1;
+            agentsState.pageSize = items.length || 0;
+            agentsState.totalPages = data.pages || data.total_pages || 1;
 
             renderAgents(items);
 
