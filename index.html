@@ -349,7 +349,7 @@
         /* DASHBOARD */
         .dashboard-grid {
             display: grid;
-            grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
             gap: 12px;
         }
 
@@ -382,15 +382,6 @@
         .card-sub {
             font-size: 11px;
             color: var(--text-soft);
-        }
-
-        .map-placeholder {
-            border-radius: var(--radius-md);
-            border: 1px dashed rgba(148,163,184,0.35);
-            padding: 10px;
-            font-size: 11px;
-            color: var(--text-soft);
-            background: rgba(15,23,42,0.85);
         }
 
         .stats-row {
@@ -440,16 +431,24 @@
             border-radius: var(--radius-md);
             border: 1px solid rgba(30,64,175,0.6);
             padding: 10px;
-            display: grid;
-            grid-template-columns: repeat(6, minmax(0, 1fr));
+            display: flex;
+            flex-direction: column;
             gap: 8px;
             margin-bottom: 10px;
+        }
+
+        .filter-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
         }
 
         .filter-group {
             display: flex;
             flex-direction: column;
             gap: 4px;
+            flex: 1 1 200px;
+            min-width: 0;
         }
 
         .filter-label {
@@ -477,6 +476,7 @@
             display: flex;
             align-items: flex-end;
             gap: 6px;
+            flex-wrap: wrap;
         }
 
         .btn-primary {
@@ -488,6 +488,11 @@
             padding: 7px 14px;
             cursor: pointer;
             white-space: nowrap;
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.65;
+            cursor: not-allowed;
         }
 
         .btn-outline {
@@ -516,6 +521,34 @@
             font-size: 11px;
             color: var(--text-soft);
             margin-top: 6px;
+        }
+
+        .date-filter-group {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+
+        .date-filter-option {
+            border-radius: 999px;
+            border: 1px solid rgba(55,65,81,0.9);
+            background: rgba(15,23,42,0.9);
+            color: var(--text-main);
+            padding: 6px 10px;
+            font-size: 11px;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+        }
+
+        .date-filter-option input {
+            accent-color: #3b82f6;
+        }
+
+        .inline-error {
+            color: #fca5a5;
+            font-size: 11px;
         }
 
         .filter-checkbox input {
@@ -829,7 +862,7 @@
         <header class="main-header">
             <div class="page-title-block">
                 <div class="page-title" id="pageTitle">Panel</div>
-                <div class="page-sub" id="pageSub">Ən son elanların xülasəsi və xəritə görünüşü.</div>
+                <div class="page-sub" id="pageSub">Ən son elanların xülasəsi və statistika.</div>
             </div>
             <div class="top-actions">
                 <div class="pill-soft" id="resultSummary">Hazırda 0 elan yüklənib</div>
@@ -841,19 +874,6 @@
             <!-- DASHBOARD -->
             <div class="section active" id="page-dashboard">
                 <div class="dashboard-grid">
-                    <div class="card">
-                        <div class="card-header">
-                            <div>
-                                <div class="card-title">Xəritə görünüşü</div>
-                                <div class="card-sub">Ərazı üzrə elanların vizual xəritəsi.</div>
-                            </div>
-                            <button class="btn-mini">Tezliklə real map</button>
-                        </div>
-                        <div class="map-placeholder">
-                            Xəritə inteqrasiyası növbəti addımda əlavə olunacaq.
-                            Hal-hazırda bu panel yalnız UI olaraq işləyir.
-                        </div>
-                    </div>
                     <div class="card-soft">
                         <div class="card-header">
                             <div>
@@ -897,33 +917,52 @@
             <!-- BÜTÜN ELANLAR -->
             <div class="section" id="page-listings">
                 <div class="filter-bar">
-                    <div class="filter-group">
-                        <label class="filter-label">Açar söz</label>
-                        <input id="filterText" class="filter-input" placeholder="mətn, ünvan, metro..." />
+                    <div class="filter-row">
+                        <div class="filter-group">
+                            <label class="filter-label">Açar söz</label>
+                            <input id="filterText" class="filter-input" placeholder="mətn, ünvan, metro..." />
+                        </div>
+                        <div class="filter-group">
+                            <label class="filter-label">Əlaqə nömrəsi</label>
+                            <input id="filterPhone" class="filter-input" placeholder="+994..." />
+                        </div>
+                        <div class="filter-group">
+                            <label class="filter-label">Rayon / qəsəbə</label>
+                            <input id="filterRayon" class="filter-input" placeholder="Saray, Yasamal..." />
+                        </div>
                     </div>
-                    <div class="filter-group">
-                        <label class="filter-label">Əlaqə nömrəsi</label>
-                        <input id="filterPhone" class="filter-input" placeholder="+994..." />
-                    </div>
-                    <div class="filter-group">
-                        <label class="filter-label">Rayon / qəsəbə</label>
-                        <input id="filterRayon" class="filter-input" placeholder="Saray, Yasamal..." />
-                    </div>
-                    <div class="filter-group">
-                        <label class="filter-label">Minimum qiymət</label>
-                        <input id="filterPriceMin" type="number" class="filter-input" placeholder="AZN" />
-                    </div>
-                    <div class="filter-group">
-                        <label class="filter-label">Maksimum qiymət</label>
-                        <input id="filterPriceMax" type="number" class="filter-input" placeholder="AZN" />
-                    </div>
-                    <div class="filter-group">
-                        <label class="filter-label">Otaq sayı</label>
-                        <input id="filterRooms" class="filter-input" placeholder="1,2,3..." />
-                        <label class="filter-checkbox">
-                            <input type="checkbox" id="filterCredit" />
-                            <span>Kredit / ipoteka</span>
-                        </label>
+                    <div class="filter-row">
+                        <div class="filter-group">
+                            <label class="filter-label">Minimum qiymət</label>
+                            <input id="filterPriceMin" type="number" class="filter-input" placeholder="AZN" />
+                        </div>
+                        <div class="filter-group">
+                            <label class="filter-label">Maksimum qiymət</label>
+                            <input id="filterPriceMax" type="number" class="filter-input" placeholder="AZN" />
+                        </div>
+                        <div class="filter-group">
+                            <label class="filter-label">Otaq sayı</label>
+                            <input id="filterRooms" class="filter-input" placeholder="1,2,3..." />
+                            <label class="filter-checkbox">
+                                <input type="checkbox" id="filterCredit" />
+                                <span>Kredit / ipoteka</span>
+                            </label>
+                        </div>
+                        <div class="filter-group">
+                            <label class="filter-label">Tarix aralığı</label>
+                            <div class="date-filter-group" id="dateRangeGroup">
+                                <label class="date-filter-option"><input type="radio" name="dateRange" value="today" /> Bugün</label>
+                                <label class="date-filter-option"><input type="radio" name="dateRange" value="7_days" /> Son 7 gün</label>
+                                <label class="date-filter-option"><input type="radio" name="dateRange" value="1_month" /> Son 1 ay</label>
+                                <label class="date-filter-option"><input type="radio" name="dateRange" value="2_months" /> Son 2 ay</label>
+                                <label class="date-filter-option"><input type="radio" name="dateRange" value="3_months" /> Son 3 ay</label>
+                                <label class="date-filter-option"><input type="radio" name="dateRange" value="all" checked /> Hamısı</label>
+                            </div>
+                        </div>
+                        <div class="filter-actions">
+                            <button class="btn-primary" id="searchButton">Axtar</button>
+                            <div class="inline-error" id="listingsError"></div>
+                        </div>
                     </div>
                 </div>
 
@@ -1169,7 +1208,7 @@
     const pageMeta = {
         dashboard: {
             title: "Panel",
-            sub: "Ən son elanların xülasəsi və xəritə görünüşü."
+            sub: "Ən son elanların xülasəsi və statistika."
         },
         listings: {
             title: "Bütün elanlar",
@@ -1205,6 +1244,8 @@
             if (page === "listings") {
                 listingsState.page = 1;
                 loadListings();
+            } else if (page === "dashboard") {
+                fetchStatsOverview();
             } else if (page === "favorites") {
                 loadFavorites();
             } else if (page === "admin") {
@@ -1249,6 +1290,31 @@
     const listingModal = document.getElementById("listingModal");
     const listingModalBody = document.getElementById("listingModalBody");
     const listingModalClose = listingModal.querySelector(".modal-close");
+    const searchButton = document.getElementById("searchButton");
+    const listingsError = document.getElementById("listingsError");
+    const todayLabel = document.getElementById("todayLabel");
+    const dateRangeInputs = document.querySelectorAll("input[name='dateRange']");
+
+    let isListingsLoading = false;
+
+    function getSelectedDateRange() {
+        const checked = document.querySelector("input[name='dateRange']:checked");
+        return checked ? checked.value : "";
+    }
+
+    function setSearchLoading(isLoading) {
+        isListingsLoading = isLoading;
+        if (searchButton) {
+            searchButton.disabled = isLoading;
+            searchButton.textContent = isLoading ? "Yüklənir..." : "Axtar";
+        }
+    }
+
+    function performSearch() {
+        if (isListingsLoading) return;
+        listingsState.page = 1;
+        loadListings(1);
+    }
 
     async function loadListings(pageOverride) {
         const page = pageOverride || listingsState.page || 1;
@@ -1260,9 +1326,13 @@
         const maxPrice = document.getElementById("filterPriceMax").value.trim();
         const rooms = document.getElementById("filterRooms").value.trim();
         const credit = document.getElementById("filterCredit").checked ? 1 : 0;
+        const dateRange = getSelectedDateRange();
 
         listingsInfo.textContent = "Yüklənir...";
+        listingsInfoRight.textContent = "";
+        if (listingsError) listingsError.textContent = "";
         listingsGrid.innerHTML = "";
+        setSearchLoading(true);
 
         const params = new URLSearchParams();
         params.set("page", page);
@@ -1273,6 +1343,7 @@
         if (maxPrice) params.set("max_price", maxPrice);
         if (rooms) params.set("rooms", rooms);
         if (credit) params.set("credit", "1");
+        if (dateRange) params.set("date_range", dateRange);
         if (tgUserId !== null && tgUserId !== undefined && (tgUserId || userContext.isDev)) {
             params.set("user_id", tgUserId);
         }
@@ -1283,6 +1354,7 @@
 
             if (!data.ok) {
                 listingsInfo.textContent = "Xəta baş verdi: " + (data.error || "bilinmir");
+                if (listingsError) listingsError.textContent = "Axtarış alınmadı. " + (data.error || "");
                 return;
             }
 
@@ -1301,16 +1373,13 @@
             listingsInfoRight.textContent = `Səhifə ${listingsState.page} / ${listingsState.totalPages}`;
             listingsRange.textContent = `${from}–${to}`;
             resultSummary.textContent = `BestHome: ${listingsState.total} aktiv elan`;
-
-            // Dashboard statistikaları
-            if (data.stats) {
-                document.getElementById("statToday").textContent = data.stats.today_total ?? 0;
-                document.getElementById("statSale").textContent = data.stats.sale_total ?? 0;
-                document.getElementById("statRent").textContent = data.stats.rent_total ?? 0;
-            }
+            if (listingsError) listingsError.textContent = "";
         } catch (e) {
             console.error(e);
             listingsInfo.textContent = "Serverə qoşulmaq mümkün olmadı.";
+            if (listingsError) listingsError.textContent = "Serverə qoşulmaq mümkün olmadı.";
+        } finally {
+            setSearchLoading(false);
         }
     }
 
@@ -1391,9 +1460,26 @@
         });
     }
 
-    const listingModal = document.getElementById("listingModal");
-    const listingModalBody = document.getElementById("listingModalBody");
-    const listingModalClose = listingModal.querySelector(".modal-close");
+    async function fetchStatsOverview() {
+        if (todayLabel) todayLabel.textContent = "Yüklənir...";
+        try {
+            const resp = await fetch("/api/stats/overview");
+            const data = await resp.json();
+            if (!resp.ok || !data.ok) {
+                throw new Error(data.error || "Statistika alınmadı");
+            }
+
+            const stats = data;
+            document.getElementById("statToday").textContent = stats.today_total ?? 0;
+            document.getElementById("statSale").textContent = stats.today_sale ?? 0;
+            document.getElementById("statRent").textContent = stats.today_rent ?? 0;
+            resultSummary.textContent = `BestHome: ${stats.total_active ?? 0} aktiv elan`;
+            if (todayLabel) todayLabel.textContent = "BestHome · canlı məlumat";
+        } catch (err) {
+            console.error(err);
+            if (todayLabel) todayLabel.textContent = "Statistika yüklənmədi";
+        }
+    }
 
     async function fetchListingDetailData(id) {
         if (!id) return null;
@@ -1505,20 +1591,23 @@
         }
     });
 
-    document.getElementById("filterText").addEventListener("keydown", e => {
-        if (e.key === "Enter") {
-            e.preventDefault();
-            listingsState.page = 1;
-            loadListings();
-        }
+    if (searchButton) {
+        searchButton.addEventListener("click", () => {
+            performSearch();
+        });
+    }
+
+    dateRangeInputs.forEach(input => {
+        input.addEventListener("change", () => performSearch());
     });
 
-    document.getElementById("filterPhone").addEventListener("keydown", e => {
-        if (e.key === "Enter") {
-            e.preventDefault();
-            listingsState.page = 1;
-            loadListings();
-        }
+    document.querySelectorAll("#filterText, #filterPhone, #filterRayon, #filterPriceMin, #filterPriceMax, #filterRooms").forEach(inp => {
+        inp.addEventListener("keydown", e => {
+            if (e.key === "Enter") {
+                e.preventDefault();
+                performSearch();
+            }
+        });
     });
 
     // =============================
@@ -1820,6 +1909,7 @@
     // İlk yükləmə
     // =============================
     (function init() {
+        fetchStatsOverview();
         loadListings();
         loadFavorites();
         renderAdminList();
