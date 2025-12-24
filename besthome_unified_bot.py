@@ -1890,9 +1890,27 @@ def ensure_fts_tables():
 
 def is_admin(chat_id: int) -> bool:
     try:
-        return int(chat_id) in set(int(x) for x in ADMIN_IDS)
+        cid = int(chat_id)
     except Exception:
         return False
+
+    try:
+        if cid in set(int(x) for x in ADMIN_IDS):
+            return True
+    except Exception:
+        return False
+
+    try:
+        conn = get_local_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT is_admin FROM users WHERE chat_id=?", (cid,))
+        row = cur.fetchone()
+        conn.close()
+        if row and (row[0] == 1 or row[0] == "1"):
+            return True
+    except Exception:
+        logger.exception("Admin check failed for chat_id=%s", chat_id)
+    return False
 
 
 def format_price(v) -> str:
@@ -2134,11 +2152,22 @@ def get_user_record(chat_id: int) -> Optional[dict]:
 
 
 def ensure_user_exists(chat_id: int, username: str = "", full_name: str = "") -> dict:
+    now_iso = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     record = get_user_record(chat_id)
     if record:
+        try:
+            conn = get_local_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE users SET last_seen=?, username=COALESCE(NULLIF(?, ''), username), full_name=COALESCE(NULLIF(?, ''), full_name) WHERE chat_id=?",
+                (now_iso, username or "", full_name or "", chat_id),
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            logger.exception("Failed to update last_seen for chat_id=%s", chat_id)
         return record
 
-    first_seen = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn = get_local_conn()
     cur = conn.cursor()
     cur.execute(
@@ -2146,16 +2175,16 @@ def ensure_user_exists(chat_id: int, username: str = "", full_name: str = "") ->
         INSERT INTO users (
             chat_id, username, full_name, first_seen, approved, is_admin,
             last_version, referred_by, referral_bonus_used, referral_milestone_used,
-            is_first_start
+            is_first_start, last_seen
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(chat_id) DO NOTHING
         """,
         (
             chat_id,
             username or "",
             full_name or "",
-            first_seen,
+            now_iso,
             1 if is_admin(chat_id) else 0,
             1 if is_admin(chat_id) else 0,
             CURRENT_VERSION,
@@ -2163,6 +2192,7 @@ def ensure_user_exists(chat_id: int, username: str = "", full_name: str = "") ->
             0,
             0,
             0,
+            now_iso,
         ),
     )
     conn.commit()
@@ -9725,7 +9755,13 @@ def get_date_range_options(op_code: Optional[str]):
     ]
 
 
-def is_within_date_range(ev: dict, date_days: Optional[int]) -> bool:
+def is_within_date_range(ev: dict, date_days: Optional[Union[int, str]]) -> bool:
+    if date_days == "today":
+        ev_dt = safe_date(ev)
+        if ev_dt == datetime.min:
+            return False
+        return ev_dt.date() == datetime.utcnow().date()
+
     if not date_days:
         return True
     ev_dt = safe_date(ev)
@@ -17763,14 +17799,16 @@ def resolve_user_from_payload(payload: dict):
     return uid, None if user else api_error_response("İstifadəçi yaradılmadı", 500)
 
 
-def map_date_range_to_days(code: Optional[str]) -> Optional[int]:
+def map_date_range_to_days(code: Optional[str]) -> Optional[Union[int, str]]:
     if not code:
         return None
     val = str(code).lower()
     if val == "today":
-        return 1
+        return "today"
     if val in ("1_month", "month", "30d"):
         return 30
+    if val == "all":
+        return None
     return None
 
 
@@ -17786,6 +17824,31 @@ def parse_int_value(val, default: Optional[int] = None) -> Optional[int]:
         return int(val)
     except Exception:
         return default
+
+
+def get_user_id_from_request() -> Optional[int]:
+    uid_raw = request.args.get("user_id") if request else None
+    if uid_raw in (None, "", "null"):
+        payload = request.get_json(silent=True) if request else None
+        if isinstance(payload, dict):
+            uid_raw = payload.get("user_id")
+
+    if uid_raw in (None, "", "null"):
+        return None
+
+    try:
+        return int(uid_raw)
+    except Exception:
+        return None
+
+
+def clean_field(value: Optional[str]) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text in ("-", "—", "–", "None", "null"):
+        return ""
+    return text
 
 
 def log_api_call(name: str, user_id: Optional[int], payload: dict):
@@ -17892,10 +17955,35 @@ def main():
     app = Flask(__name__)
 
     def _wrap_api(handler_name, func):
+        start = time.time()
+        path = request.path if request else handler_name
+        params = {"args": request.args.to_dict() if request else {}, "json": None}
+        if request:
+            try:
+                params["json"] = request.get_json(silent=True)
+            except Exception:
+                params["json"] = None
+
         try:
-            return func()
+            resp = func()
+            duration = (time.time() - start) * 1000
+            logger.info(
+                "API %s %s params=%s took=%.1fms",
+                request.method if request else "",
+                path,
+                params,
+                duration,
+            )
+            return resp
         except Exception:
-            logger.exception("API %s failed", handler_name)
+            duration = (time.time() - start) * 1000
+            logger.exception(
+                "API %s failed path=%s params=%s took=%.1fms",
+                handler_name,
+                path,
+                params,
+                duration,
+            )
             return api_error_response("Xəta baş verdi", 500)
 
     def _parse_page(value):
@@ -17926,6 +18014,15 @@ def main():
             return True
         raw = _raw_text_blob(ev)
         return phrase.lower() in raw
+
+    def _normalize_listing_response(ev: dict) -> dict:
+        data = dict(ev or {})
+        rayon_val = data.get("rayon") or data.get("Rayon_Qesebe") or data.get("district")
+        data["rayon"] = clean_field(rayon_val)
+        data["district"] = clean_field(data.get("district") or data.get("rayon"))
+        metro_val = data.get("metro") or data.get("Metro")
+        data["metro"] = clean_field(metro_val)
+        return data
 
     def _matches_tokens(ev: dict, tokens: List[str]) -> bool:
         if not tokens:
@@ -17993,21 +18090,43 @@ def main():
 
     @app.route("/api/health", methods=["GET"])
     def api_health():
-        return api_ok_response({})
+        def _handler():
+            db_status = {"main": False, "local": False}
+            try:
+                conn_main = get_main_conn()
+                conn_main.execute("SELECT 1")
+                db_status["main"] = True
+                close_main_conn(conn_main)
+            except Exception:
+                logger.exception("Health check failed for main DB")
+            try:
+                conn_local = get_local_conn()
+                conn_local.execute("SELECT 1")
+                db_status["local"] = True
+                conn_local.close()
+            except Exception:
+                logger.exception("Health check failed for local DB")
+
+            return api_ok_response({"time": datetime.utcnow().isoformat(), "db": db_status})
+
+        return _wrap_api("health", _handler)
 
     @app.route("/api/listings/search", methods=["GET"])
     def api_listings_search():
         args = request.args.to_dict() or {}
 
         def _handler():
-            user_id_raw = args.get("user_id")
-            user_id = None
-            if user_id_raw:
-                try:
-                    user_id = int(user_id_raw)
-                    ensure_user_exists(user_id)
-                except Exception:
-                    logger.warning("Invalid user_id passed to listings search: %s", user_id_raw)
+            user_id = get_user_id_from_request()
+            if user_id is not None:
+                if user_id == 0 and ENV != "dev":
+                    user_id = None
+                else:
+                    try:
+                        ensure_user_exists(user_id)
+                    except Exception:
+                        logger.warning(
+                            "Invalid user_id passed to listings search: %s", user_id
+                        )
 
             page = _parse_page(args.get("page"))
             page_size = PAGE_SIZE
@@ -18103,6 +18222,8 @@ def main():
             page_items = filtered[start:end]
             _augment_favorite_flag(user_id, page_items)
 
+            page_items = [_normalize_listing_response(ev) for ev in page_items]
+
             total_pages = max(1, math.ceil(total / page_size))
             log_api_call(
                 "listings_search",
@@ -18139,7 +18260,7 @@ def main():
             for src in sources:
                 ev = fetch_listing_by_source(src, listing_id)
                 if ev:
-                    return api_ok_response({"item": ev})
+                    return api_ok_response({"item": _normalize_listing_response(ev)})
             return api_error_response("Elan tapılmadı", 404)
 
         return _wrap_api("listing_detail", _handler)
@@ -18212,13 +18333,53 @@ def main():
         args = request.args.to_dict() or {}
 
         def _handler():
-            user_id, error = resolve_user_from_payload(args)
-            if error:
-                return error
-            items, total = query_favorites_page(user_id, offset=0, limit=PAGE_SIZE)
-            results = [item.get("data") for item in items if item.get("data")]
-            log_api_call("favorites_list", user_id, {"count": total})
-            return api_ok_response({"items": results})
+            user_id = get_user_id_from_request()
+            if user_id is None or (user_id == 0 and ENV != "dev"):
+                return api_error_response("Telegram user_id missing", 400)
+
+            ensure_user_exists(user_id)
+            conn = get_local_conn()
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT listing_id, source, added_at
+                FROM favorites
+                WHERE chat_id=?
+                ORDER BY added_at DESC
+                """,
+                (user_id,),
+            )
+            rows = cur.fetchall()
+            conn.close()
+
+            results = []
+            for r in rows:
+                src = r["source"] or "main"
+                if src == "besthome":
+                    src = "main"
+                listing = fetch_listing_by_source(src, r["listing_id"])
+                if not listing and src != "main":
+                    listing = fetch_listing_by_source("main", r["listing_id"])
+
+                base_payload = {
+                    "listing_id": r["listing_id"],
+                    "created_at": r["added_at"],
+                    "source": src,
+                }
+
+                if listing:
+                    normalized = _normalize_listing_response(listing)
+                    normalized.update(base_payload)
+                    if not normalized.get("id"):
+                        normalized["id"] = r["listing_id"]
+                    results.append(normalized)
+                else:
+                    missing_payload = dict(base_payload)
+                    missing_payload["missing"] = True
+                    results.append(missing_payload)
+
+            log_api_call("favorites_list", user_id, {"count": len(results)})
+            return api_ok_response({"items": results, "total": len(results)})
 
         return _wrap_api("favorites_list", _handler)
 
@@ -18227,25 +18388,40 @@ def main():
         payload = request.get_json(silent=True) or {}
 
         def _handler():
-            user_id, error = resolve_user_from_payload(payload)
-            if error:
-                return error
+            user_id = get_user_id_from_request()
+            if user_id is None or (user_id == 0 and ENV != "dev"):
+                return api_error_response("Telegram user_id missing", 400)
+
+            ensure_user_exists(user_id)
             listing_id = parse_int_value(payload.get("listing_id"))
             if listing_id is None:
                 return api_error_response("listing_id tələb olunur", 400)
-            source = payload.get("source") or "main"
-            ev = fetch_listing_by_source(source, listing_id)
-            if not ev:
-                return api_error_response("Elan tapılmadı", 404)
-            existing, _ = query_favorites_page(user_id, offset=0, limit=5000)
-            fav_keys = {(item.get("listing_id"), item.get("source")) for item in existing}
-            key = (listing_id, source)
-            if key in fav_keys:
-                remove_favorite_entry(user_id, source, listing_id)
+            source_raw = payload.get("source") or "main"
+            source = "main" if source_raw in ("besthome", "main") else source_raw
+
+            conn = get_local_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT 1 FROM favorites WHERE chat_id=? AND listing_id=? AND source=?",
+                (user_id, listing_id, source),
+            )
+            exists = cur.fetchone() is not None
+
+            if exists:
+                cur.execute(
+                    "DELETE FROM favorites WHERE chat_id=? AND listing_id=? AND source=?",
+                    (user_id, listing_id, source),
+                )
                 is_fav = False
             else:
-                add_favorite_entry(user_id, source, listing_id)
+                cur.execute(
+                    "INSERT OR IGNORE INTO favorites (chat_id, listing_id, source, added_at) VALUES (?, ?, ?, ?)",
+                    (user_id, listing_id, source, datetime.utcnow().isoformat()),
+                )
                 is_fav = True
+            conn.commit()
+            conn.close()
+
             log_api_call(
                 "favorites_toggle",
                 user_id,
@@ -18263,14 +18439,20 @@ def main():
             admin_id = parse_int_value(args.get("admin_id"))
             if admin_id is None or not is_admin(admin_id):
                 return api_error_response("Admin icazəsi yoxdur", 403)
+            ensure_user_exists(admin_id)
             conn = get_local_conn()
             cur = conn.cursor()
             cur.execute(
-                "SELECT id, chat_id, title, summary, price, city FROM listings_new WHERE approved=0"
+                """
+                SELECT chat_id, full_name, username, first_seen, last_seen, approved, blocked, paid_until
+                FROM users
+                WHERE COALESCE(approved,0)=0 AND COALESCE(blocked,0)=0
+                ORDER BY first_seen DESC
+                """
             )
             rows = [dict(r) for r in cur.fetchall()]
             conn.close()
-            return api_ok_response({"items": rows})
+            return api_ok_response({"items": rows, "total": len(rows)})
 
         return _wrap_api("admin_pending", _handler)
 
@@ -18285,10 +18467,12 @@ def main():
                 return api_error_response("Admin icazəsi yoxdur", 403)
             if user_id is None:
                 return api_error_response("user_id tələb olunur", 400)
+            ensure_user_exists(admin_id)
+            ensure_user_exists(user_id)
             conn = get_local_conn()
             cur = conn.cursor()
             cur.execute(
-                "UPDATE users SET approved=1 WHERE chat_id=?",
+                "UPDATE users SET approved=1, blocked=0 WHERE chat_id=?",
                 (user_id,),
             )
             conn.commit()
@@ -18297,6 +18481,89 @@ def main():
             return api_ok_response({})
 
         return _wrap_api("admin_approve", _handler)
+
+    @app.route("/api/admin/block", methods=["POST"])
+    def api_admin_block():
+        payload = request.get_json(silent=True) or {}
+
+        def _handler():
+            admin_id = parse_int_value(payload.get("admin_id"))
+            user_id = parse_int_value(payload.get("user_id"))
+            if admin_id is None or not is_admin(admin_id):
+                return api_error_response("Admin icazəsi yoxdur", 403)
+            if user_id is None:
+                return api_error_response("user_id tələb olunur", 400)
+
+            ensure_user_exists(admin_id)
+            ensure_user_exists(user_id)
+            conn = get_local_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE users SET blocked=1, blocked_at=? WHERE chat_id=?",
+                (datetime.utcnow().isoformat(), user_id),
+            )
+            conn.commit()
+            conn.close()
+            log_api_call("admin_block", admin_id, {"user_id": user_id})
+            return api_ok_response({})
+
+        return _wrap_api("admin_block", _handler)
+
+    @app.route("/api/admin/extend", methods=["POST"])
+    def api_admin_extend():
+        payload = request.get_json(silent=True) or {}
+
+        def _handler():
+            admin_id = parse_int_value(payload.get("admin_id"))
+            user_id = parse_int_value(payload.get("user_id"))
+            days = parse_int_value(payload.get("days"))
+            if admin_id is None or not is_admin(admin_id):
+                return api_error_response("Admin icazəsi yoxdur", 403)
+            if user_id is None:
+                return api_error_response("user_id tələb olunur", 400)
+            if days is None or days <= 0:
+                return api_error_response("days düzgün deyil", 400)
+
+            ensure_user_exists(admin_id)
+            ensure_user_exists(user_id)
+            ensure_subscription_record(user_id)
+
+            conn = get_local_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT expires_at FROM subscriptions WHERE chat_id=?",
+                (user_id,),
+            )
+            row = cur.fetchone()
+            current_exp = parse_dt_safe(row[0]) if row and row[0] else None
+            base_dt = current_exp if current_exp and current_exp > datetime.utcnow() else datetime.utcnow()
+            new_exp = base_dt + timedelta(days=days)
+
+            cur.execute(
+                """
+                INSERT INTO subscriptions (chat_id, plan, expires_at, is_active, is_demo, last_payment_note)
+                VALUES (?, 'admin', ?, 1, 0, 'admin_extend')
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    plan='admin', expires_at=excluded.expires_at, is_active=1, is_demo=0,
+                    last_payment_note=COALESCE(excluded.last_payment_note, subscriptions.last_payment_note)
+                """,
+                (user_id, new_exp.isoformat()),
+            )
+            cur.execute(
+                "UPDATE users SET paid_until=?, approved=1, blocked=0 WHERE chat_id=?",
+                (new_exp.isoformat(), user_id),
+            )
+            conn.commit()
+            conn.close()
+
+            log_api_call(
+                "admin_extend",
+                admin_id,
+                {"user_id": user_id, "days": days, "expires_at": new_exp.isoformat()},
+            )
+            return api_ok_response({"expires_at": new_exp.isoformat()})
+
+        return _wrap_api("admin_extend", _handler)
 
     @app.route("/api/admin/db-update", methods=["POST"])
     def api_admin_db_update():

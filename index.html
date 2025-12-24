@@ -55,11 +55,100 @@
             overflow-wrap: anywhere;
         }
 
+        .user-banner {
+            background: rgba(59,130,246,0.15);
+            border: 1px solid rgba(59,130,246,0.35);
+            color: #bfdbfe;
+            padding: 8px 12px;
+            border-radius: var(--radius-md);
+            font-size: 13px;
+            display: none;
+        }
+
+        .user-banner.warn {
+            background: rgba(248,113,113,0.15);
+            border-color: rgba(248,113,113,0.35);
+            color: #fecdd3;
+        }
+
+        .modal-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(2, 6, 23, 0.8);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 2000;
+            padding: 12px;
+        }
+
+        .modal-overlay.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: var(--bg-panel);
+            border: 1px solid var(--border-soft);
+            border-radius: var(--radius-lg);
+            box-shadow: 0 30px 80px rgba(0, 0, 0, 0.45);
+            max-width: 720px;
+            width: min(720px, 100%);
+            max-height: 90vh;
+            overflow-y: auto;
+            padding: 16px;
+            position: relative;
+        }
+
+        .modal-close {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: transparent;
+            border: none;
+            color: var(--text-main);
+            font-size: 20px;
+            cursor: pointer;
+        }
+
+        .modal-header {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            margin-bottom: 12px;
+        }
+
+        .modal-description {
+            max-height: 240px;
+            overflow-y: auto;
+            background: var(--bg-panel-soft);
+            padding: 10px;
+            border-radius: var(--radius-md);
+            border: 1px solid var(--border-soft);
+        }
+
+        .modal-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+
+        .modal-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-top: 12px;
+        }
+
         body {
             font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
             background: radial-gradient(circle at top left, #111827, #020617 60%);
             color: var(--text-main);
             min-height: 100vh;
+        }
+
+        body.modal-open {
+            overflow: hidden;
         }
 
         a {
@@ -725,10 +814,6 @@
                     <span class="icon">🛡️</span>
                     <span>Admin panel</span>
                 </div>
-                <div class="nav-item" data-page="agents">
-                    <span class="icon">🤝</span>
-                    <span>Vasitəçilər</span>
-                </div>
             </div>
         </div>
 
@@ -740,6 +825,7 @@
 
     <!-- MAIN -->
     <main class="main">
+        <div id="userBanner" class="user-banner"></div>
         <header class="main-header">
             <div class="page-title-block">
                 <div class="page-title" id="pageTitle">Panel</div>
@@ -971,65 +1057,32 @@
                             <div class="card-sub">Təsdiq gözləyən elanların siyahısı.</div>
                         </div>
                     </div>
+                    <div class="filter-bar" style="margin-bottom: 10px;">
+                        <div class="filter-group">
+                            <label class="filter-label">İstifadəçi ID</label>
+                            <input id="adminExtendUserId" class="filter-input" placeholder="user_id" />
+                        </div>
+                        <div class="filter-actions" style="flex-wrap: wrap;">
+                            <button class="btn-mini" data-extend="1">+1 gün</button>
+                            <button class="btn-mini" data-extend="7">+7 gün</button>
+                            <button class="btn-mini" data-extend="15">+15 gün</button>
+                            <button class="btn-mini" data-extend="30">+30 gün</button>
+                            <button class="btn-outline" id="adminExtendCustom">Custom gün</button>
+                        </div>
+                    </div>
+                    <div id="adminExtendResult" class="card-sub" style="margin-bottom:10px;"></div>
                     <div id="adminList" class="cards-grid"></div>
-                </div>
-            </div>
-
-            <!-- VASİTƏÇİLƏR -->
-            <div class="section" id="page-agents">
-                <div class="card-soft">
-                    <div class="card-header">
-                        <div>
-                            <div class="card-title">Vasitəçilər</div>
-                            <div class="card-sub">Agents.db mənbəli elanlar, nömrə və sözlə axtarış.</div>
-                        </div>
-                    </div>
-
-                    <div class="filter-bar" style="margin-bottom:8px;">
-                        <div class="filter-group">
-                            <label class="filter-label">Açar söz</label>
-                            <input id="agentsText" class="filter-input" placeholder="mətn, ünvan..." />
-                        </div>
-                        <div class="filter-group">
-                            <label class="filter-label">Əlaqə nömrəsi</label>
-                            <input id="agentsPhone" class="filter-input" placeholder="+994..." />
-                        </div>
-                        <div class="filter-group">
-                            <label class="filter-label">Rayon / qəsəbə</label>
-                            <input id="agentsRayon" class="filter-input" placeholder="Saray, Yasamal..." />
-                        </div>
-                        <div class="filter-group">
-                            <label class="filter-label">Əməliyyat</label>
-                            <select id="agentsOperation" class="filter-select">
-                                <option value="">Hamısı</option>
-                                <option value="Satılır">Satılır</option>
-                                <option value="Kirayə verilir">Kirayə verilir</option>
-                            </select>
-                        </div>
-                        <div class="filter-actions">
-                            <button id="agentsSearchBtn" class="btn-primary">Axtar</button>
-                            <button id="agentsResetBtn" class="btn-outline">Sıfırla</button>
-                        </div>
-                    </div>
-
-                    <div class="result-info">
-                        <div id="agentsInfo">Vasitəçi elanları hələ yüklənməyib.</div>
-                        <div id="agentsInfoRight">Səhifə 1 / 1</div>
-                    </div>
-
-                    <div id="agentsGrid" class="cards-grid"></div>
-
-                    <div class="pagination-row">
-                        <div>Göstərilir: <span id="agentsRange">0–0</span></div>
-                        <div class="pagination-buttons">
-                            <button id="agentsPrev" class="btn-page">← Əvvəlki</button>
-                            <button id="agentsNext" class="btn-page">Növbəti →</button>
-                        </div>
-                    </div>
                 </div>
             </div>
         </section>
     </main>
+</div>
+
+<div id="listingModal" class="modal-overlay">
+    <div class="modal-content">
+        <button class="modal-close" aria-label="Bağla">×</button>
+        <div id="listingModalBody"></div>
+    </div>
 </div>
 
 <div id="toast" class="toast"></div>
@@ -1051,6 +1104,59 @@
             toastEl.style.display = "none";
         }, 2600);
     }
+
+    // =============================
+    // User konteksti
+    // =============================
+    const userBannerEl = document.getElementById("userBanner");
+
+    function setUserBanner(message, type = "info") {
+        if (!message) {
+            userBannerEl.style.display = "none";
+            userBannerEl.textContent = "";
+            userBannerEl.className = "user-banner";
+            return;
+        }
+        userBannerEl.textContent = message;
+        userBannerEl.className = "user-banner" + (type === "warn" ? " warn" : "");
+        userBannerEl.style.display = "block";
+    }
+
+    function normalizeField(val) {
+        if (val === undefined || val === null) return "";
+        const text = String(val).trim();
+        if (["-", "—", "–", "None", "null"].includes(text)) return "";
+        return text;
+    }
+
+    function resolveUserContext() {
+        const ctx = { userId: null, isDev: false, isMissing: false };
+        setUserBanner("");
+        const tgId = window.Telegram?.WebApp?.initDataUnsafe?.user?.id;
+        if (tgId) {
+            ctx.userId = Number(tgId);
+            return ctx;
+        }
+        const params = new URLSearchParams(window.location.search);
+        const urlId = params.get("user_id");
+        if (urlId && !Number.isNaN(Number(urlId))) {
+            ctx.userId = Number(urlId);
+            return ctx;
+        }
+        const host = window.location.hostname;
+        if (host === "localhost" || host === "127.0.0.1") {
+            ctx.userId = 0;
+            ctx.isDev = true;
+            setUserBanner("Dev mode user");
+            return ctx;
+        }
+        ctx.isMissing = true;
+        setUserBanner("Telegram user_id missing", "warn");
+        return ctx;
+    }
+
+    const userContext = resolveUserContext();
+    const tgUserId = userContext.userId;
 
     // =============================
     // Naviqasiya
@@ -1079,11 +1185,7 @@
         },
         admin: {
             title: "Admin panel",
-            sub: "Təsdiq gözləyən elanlar üzərində nəzarət."
-        },
-        agents: {
-            title: "Vasitəçilər",
-            sub: "Agents.db məlumatlarından detallı axtarış."
+            sub: "İstifadəçi təsdiqi və müddət uzatma paneli."
         }
     };
 
@@ -1107,9 +1209,6 @@
                 loadFavorites();
             } else if (page === "admin") {
                 renderAdminList();
-            } else if (page === "agents") {
-                agentsState.page = 1;
-                loadAgents();
             }
         });
     });
@@ -1131,16 +1230,7 @@
     // =============================
     const resultSummary = document.getElementById("resultSummary");
 
-    const tgUserId = Number(window.Telegram?.WebApp?.initDataUnsafe?.user?.id || 0);
-
     const listingsState = {
-        page: 1,
-        total: 0,
-        pageSize: 0,
-        totalPages: 1
-    };
-
-    const agentsState = {
         page: 1,
         total: 0,
         pageSize: 0,
@@ -1156,6 +1246,9 @@
     const listingsRange = document.getElementById("listingsRange");
     const listingDetailPanel = document.getElementById("listingDetailPanel");
     const listingDetailBody = document.getElementById("listingDetailBody");
+    const listingModal = document.getElementById("listingModal");
+    const listingModalBody = document.getElementById("listingModalBody");
+    const listingModalClose = listingModal.querySelector(".modal-close");
 
     async function loadListings(pageOverride) {
         const page = pageOverride || listingsState.page || 1;
@@ -1180,7 +1273,9 @@
         if (maxPrice) params.set("max_price", maxPrice);
         if (rooms) params.set("rooms", rooms);
         if (credit) params.set("credit", "1");
-        if (tgUserId) params.set("user_id", tgUserId);
+        if (tgUserId !== null && tgUserId !== undefined && (tgUserId || userContext.isDev)) {
+            params.set("user_id", tgUserId);
+        }
 
         try {
             const resp = await fetch("/api/listings/search?" + params.toString());
@@ -1232,25 +1327,29 @@
         items.forEach((l, idx) => {
             const card = document.createElement("div");
             card.className = "listing-card" + (l.is_favorite ? " favorite" : "");
+            card.dataset.id = l.id || l.listing_id || "";
 
             const title = l.summary && l.summary.length > 110
                 ? l.summary.slice(0, 110) + "..."
                 : (l.summary || "");
+            const rayon = normalizeField(l.rayon || l.district);
+            const rooms = normalizeField(l.rooms);
+            const metro = normalizeField(l.metro);
+            const phone = normalizeField(l.phone);
+            const locationLine = [rayon, rooms].filter(Boolean).join(" · ");
+            const metaHtml = [metro, phone].filter(Boolean).map(v => `<div>${v}</div>`).join("");
 
             card.innerHTML = `
                 <div class="listing-header-row">
                     <div class="pill-op">${l.operation || "Elan"}</div>
                     <div class="price-label">${(l.price || "?")} ${l.currency || "AZN"}</div>
                 </div>
-                <div class="listing-title">${l.rayon || ""} · ${l.rooms || ""}</div>
+                <div class="listing-title">${locationLine || rooms || ""}</div>
                 <div class="listing-summary">${title}</div>
-                <div class="listing-meta-row">
-                    <div>${l.metro || ""}</div>
-                    <div>${l.phone || ""}</div>
-                </div>
+                <div class="listing-meta-row">${metaHtml}</div>
                 <div class="listing-actions-row">
-                    <button class="link-btn" ${l.link ? "" : "disabled"} data-link="${l.link || ""}">Elana keçid</button>
-                    <button class="fav-toggle ${l.is_favorite ? "active" : ""}" data-id="${l.id}" data-source="besthome">
+                    <button class="link-btn" data-id="${l.id || l.listing_id || ""}" data-link="${l.link || ""}">Elana keçid</button>
+                    <button class="fav-toggle ${l.is_favorite ? "active" : ""}" data-id="${l.id}" data-source="${l.source || "main"}">
                         ${l.is_favorite ? "❤ Favoridə" : "♡ Favoriyə əlavə et"}
                     </button>
                 </div>
@@ -1260,10 +1359,10 @@
 
             card.addEventListener("click", (ev) => {
                 if (ev.target.closest(".fav-toggle") || ev.target.closest(".link-btn")) return;
-                if (l.id) loadListingDetail(l.id);
+                const lid = card.dataset.id || l.id;
+                if (lid) loadListingDetail(lid);
             });
 
-            // İlk 4 elanı panel üçün də göstərək
             if (idx < 4) {
                 const mini = card.cloneNode(true);
                 mini.style.transform = "scale(0.98)";
@@ -1272,17 +1371,19 @@
             }
         });
 
-        // Link düymələri
         listingsGrid.querySelectorAll(".link-btn").forEach(btn => {
-            if (!btn.dataset.link) return;
-            btn.addEventListener("click", () => {
-                window.open(btn.dataset.link, "_blank");
+            btn.addEventListener("click", async (ev) => {
+                ev.stopPropagation();
+                const id = Number(btn.getAttribute("data-id") || btn.closest(".listing-card")?.dataset.id);
+                if (!id) return;
+                const detail = await fetchListingDetailData(id);
+                if (detail) openListingModal(detail);
             });
         });
 
-        // Favori düymələri
         listingsGrid.querySelectorAll(".fav-toggle").forEach(btn => {
-            btn.addEventListener("click", async () => {
+            btn.addEventListener("click", async (ev) => {
+                ev.stopPropagation();
                 const id = Number(btn.getAttribute("data-id"));
                 const source = btn.getAttribute("data-source") || "besthome";
                 await toggleFavorite(id, source, btn, btn.closest(".listing-card"));
@@ -1290,7 +1391,12 @@
         });
     }
 
-    async function loadListingDetail(id) {
+    const listingModal = document.getElementById("listingModal");
+    const listingModalBody = document.getElementById("listingModalBody");
+    const listingModalClose = listingModal.querySelector(".modal-close");
+
+    async function fetchListingDetailData(id) {
+        if (!id) return null;
         try {
             const url = new URL("/api/listings/detail", window.location.origin);
             url.searchParams.set("id", id);
@@ -1298,37 +1404,92 @@
             const data = await resp.json();
             if (!data.ok) {
                 showToast(data.error || "Detallar alınmadı", "err");
-                return;
+                return null;
             }
-            renderListingDetail(data.item || {});
+            return data.item || null;
         } catch (e) {
             console.error(e);
             showToast("Server xətası (detallar)", "err");
+            return null;
         }
     }
 
-    function renderListingDetail(item) {
+    async function loadListingDetail(id) {
+        const item = await fetchListingDetailData(id);
+        if (item) renderListingDetailPanel(item);
+    }
+
+    function renderListingDetailPanel(item) {
         if (!item || Object.keys(item).length === 0) return;
         const rows = [
-            { label: "Əməliyyat", value: item.operation || "" },
-            { label: "Rayon", value: item.rayon || item.Rayon_Qesebe || "" },
-            { label: "Metro", value: item.metro || "" },
-            { label: "Otaq", value: item.rooms || item.Otaq_sayi || "" },
-            { label: "Qiymət", value: `${item.price || "?"} ${item.currency || "AZN"}` },
-            { label: "Telefon", value: item.phone || "" },
-            { label: "Əlaqə", value: item.contact_name || item.ad || "" },
-            { label: "Link", value: item.link || "" }
-        ];
+            { label: "Əməliyyat", value: normalizeField(item.operation) },
+            { label: "Rayon", value: normalizeField(item.rayon || item.Rayon_Qesebe) },
+            { label: "Metro", value: normalizeField(item.metro) },
+            { label: "Otaq", value: normalizeField(item.rooms || item.Otaq_sayi) },
+            { label: "Qiymət", value: item.price ? `${item.price} ${item.currency || "AZN"}` : "" },
+            { label: "Telefon", value: normalizeField(item.phone) },
+            { label: "Əlaqə", value: normalizeField(item.contact_name || item.ad) },
+            { label: "Link", value: normalizeField(item.link) }
+        ].filter(r => r.value);
+
+        const locationLine = [normalizeField(item.rayon), normalizeField(item.metro)].filter(Boolean).join(" · ");
 
         listingDetailBody.innerHTML = `
             <div class="listing-title" style="margin-bottom:6px;">${item.summary || item.description || ""}</div>
+            <div class="listing-meta-row" style="flex-wrap:wrap;gap:8px;">${locationLine}</div>
             <div class="listing-meta-row" style="flex-wrap:wrap;gap:8px;">
-                ${rows.map(r => `<span class="pill-soft">${r.label}: ${r.value || "-"}</span>`).join("")}
+                ${rows.map(r => `<span class="pill-soft">${r.label}: ${r.value}</span>`).join("")}
             </div>
         `;
         listingDetailPanel.style.display = "block";
         listingDetailPanel.scrollIntoView({ behavior: "smooth" });
     }
+
+    function closeListingModal() {
+        listingModal.classList.remove("active");
+        document.body.classList.remove("modal-open");
+    }
+
+    function openListingModal(item) {
+        if (!item) return;
+        const rayon = normalizeField(item.rayon || item.district);
+        const metro = normalizeField(item.metro);
+        const rooms = normalizeField(item.rooms);
+        const description = item.description || item.summary || "";
+        const metaParts = [
+            item.price ? `Qiymət: ${item.price} ${item.currency || "AZN"}` : "",
+            item.phone ? `Telefon: ${item.phone}` : "",
+            rayon ? `Rayon: ${rayon}` : "",
+            metro ? `Metro: ${metro}` : "",
+            rooms ? `Otaq: ${rooms}` : ""
+        ].filter(Boolean).map(m => `<span class="pill-soft">${m}</span>`).join("");
+        const link = item.link || "";
+
+        listingModalBody.innerHTML = `
+            <div class="modal-header">
+                <div class="listing-title">${item.summary || item.description || ""}</div>
+                <div class="listing-meta-row" style="gap:8px;">${[rayon, metro].filter(Boolean).join(" · ")}</div>
+            </div>
+            ${metaParts ? `<div class="modal-meta">${metaParts}</div>` : ""}
+            <div class="modal-description">${description || "Təsvir yoxdur."}</div>
+            <div class="modal-actions">
+                <button class="btn-primary" id="modalOpenLink" ${link ? "" : "disabled"}>${link ? "Linkə keç" : "Link yoxdur"}</button>
+            </div>
+        `;
+
+        listingModal.classList.add("active");
+        document.body.classList.add("modal-open");
+
+        const modalLink = document.getElementById("modalOpenLink");
+        if (modalLink && link) {
+            modalLink.addEventListener("click", () => window.open(link, "_blank"));
+        }
+    }
+
+    listingModal.addEventListener("click", (ev) => {
+        if (ev.target === listingModal) closeListingModal();
+    });
+    listingModalClose.addEventListener("click", closeListingModal);
 
     document.getElementById("listingsPrev").addEventListener("click", () => {
         if (listingsState.page > 1) {
@@ -1368,15 +1529,16 @@
     const favCountLabel = document.getElementById("favCountLabel");
 
     async function toggleFavorite(id, source, btnEl, cardEl) {
-        if (!tgUserId) {
+        if (userContext.isMissing) {
             showToast("Telegram user_id missing", "err");
             return;
         }
+        const userIdToSend = tgUserId ?? 0;
         try {
             const resp = await fetch("/api/favorites/toggle", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ listing_id: id, source, user_id: tgUserId })
+                body: JSON.stringify({ listing_id: id, source, user_id: userIdToSend })
             });
             const data = await resp.json();
             if (!data.ok) {
@@ -1402,7 +1564,7 @@
     }
 
     async function loadFavorites() {
-        if (!tgUserId) {
+        if (userContext.isMissing) {
             favGrid.innerHTML = "";
             favEmpty.style.display = "block";
             favEmpty.textContent = "Telegram user_id missing";
@@ -1410,7 +1572,7 @@
         }
         try {
             const url = new URL("/api/favorites/list", window.location.origin);
-            if (tgUserId) url.searchParams.set("user_id", tgUserId);
+            if (tgUserId !== null && tgUserId !== undefined) url.searchParams.set("user_id", tgUserId);
             const resp = await fetch(url.toString());
             const data = await resp.json();
             if (!data.ok) {
@@ -1430,20 +1592,24 @@
             items.forEach(l => {
                 const card = document.createElement("div");
                 card.className = "listing-card favorite";
+                card.dataset.id = l.id || l.listing_id || "";
                 const title = l.summary && l.summary.length > 120
                     ? l.summary.slice(0, 120) + "..."
                     : (l.summary || "");
+                const rayon = normalizeField(l.rayon || l.district);
+                const rooms = normalizeField(l.rooms);
+                const locationLine = [rayon, rooms].filter(Boolean).join(" · ");
 
                 card.innerHTML = `
                     <div class="listing-header-row">
                         <div class="pill-op">${l.operation || "Elan"}</div>
                         <div class="price-label">${(l.price || "?")} ${l.currency || "AZN"}</div>
                     </div>
-                    <div class="listing-title">${l.rayon || ""} · ${l.rooms || ""}</div>
+                    <div class="listing-title">${locationLine || rooms || ""}</div>
                     <div class="listing-summary">${title}</div>
                     <div class="listing-actions-row">
-                        <button class="link-btn" ${l.link ? "" : "disabled"} data-link="${l.link || ""}">Elana keçid</button>
-                        <button class="fav-toggle active" data-id="${l.id}" data-source="${l.source || "besthome"}">
+                        <button class="link-btn" data-id="${l.id || l.listing_id || ""}" data-link="${l.link || ""}">Elana keçid</button>
+                        <button class="fav-toggle active" data-id="${l.id}" data-source="${l.source || "main"}">
                             Favoridən çıxar
                         </button>
                     </div>
@@ -1452,14 +1618,18 @@
             });
 
             favGrid.querySelectorAll(".link-btn").forEach(btn => {
-                if (!btn.dataset.link) return;
-                btn.addEventListener("click", () => {
-                    window.open(btn.dataset.link, "_blank");
+                btn.addEventListener("click", async (ev) => {
+                    ev.stopPropagation();
+                    const id = Number(btn.getAttribute("data-id") || btn.closest(".listing-card")?.dataset.id);
+                    if (!id) return;
+                    const detail = await fetchListingDetailData(id);
+                    if (detail) openListingModal(detail);
                 });
             });
 
             favGrid.querySelectorAll(".fav-toggle").forEach(btn => {
-                btn.addEventListener("click", async () => {
+                btn.addEventListener("click", async (ev) => {
+                    ev.stopPropagation();
                     const id = Number(btn.getAttribute("data-id"));
                     const source = btn.getAttribute("data-source") || "besthome";
                     await toggleFavorite(id, source, btn, btn.closest(".listing-card"));
@@ -1477,9 +1647,10 @@
     // Admin pending list
     // =============================
     async function fetchPendingListings() {
+        if (userContext.isMissing || tgUserId === null || tgUserId === undefined) return [];
         try {
             const url = new URL("/api/admin/pending", window.location.origin);
-            if (tgUserId) url.searchParams.set("admin_id", tgUserId);
+            url.searchParams.set("admin_id", tgUserId);
             const resp = await fetch(url.toString());
             const data = await resp.json();
             if (!data.ok) return [];
@@ -1494,26 +1665,30 @@
         const adminList = document.getElementById("adminList");
         adminList.innerHTML = "";
 
-        const items = await fetchPendingListings();
-        if (!items.length) {
-            adminList.innerHTML = `<div class="empty-state">Təsdiq gözləyən elan yoxdur.</div>`;
+        if (userContext.isMissing || tgUserId === null || tgUserId === undefined) {
+            adminList.innerHTML = `<div class="empty-state">Telegram user_id missing</div>`;
             return;
         }
 
-        items.forEach(l => {
+        const items = await fetchPendingListings();
+        if (!items.length) {
+            adminList.innerHTML = `<div class="empty-state">Təsdiq gözləyən istifadəçi yoxdur.</div>`;
+            return;
+        }
+
+        items.forEach(u => {
             const div = document.createElement("div");
             div.className = "listing-card";
             div.innerHTML = `
-                <div class="listing-title" style="margin-bottom:4px;">${l.title}</div>
-                <div class="listing-summary" style="max-height:60px;">${l.summary || ""}</div>
-                <div class="listing-meta-row" style="margin-top:4px;">
-                    <span>${l.price || ""}</span>
-                    <span>${l.city || ""}</span>
+                <div class="listing-header-row">
+                    <div class="pill-op">ID ${u.chat_id}</div>
+                    <div class="pill-soft">${u.username ? "@" + u.username : ""}</div>
                 </div>
+                <div class="listing-title" style="margin-bottom:4px;">${u.full_name || "İstifadəçi"}</div>
+                <div class="listing-summary" style="max-height:60px;">${u.first_seen || ""}</div>
                 <div class="listing-actions-row">
-                    <button class="btn-mini" data-act="approve" data-id="${l.id}">Təsdiq et</button>
-                    <button class="btn-mini" style="background:rgba(248,113,113,0.2);color:#fecaca;"
-                        data-act="reject" data-id="${l.id}">Rədd et</button>
+                    <button class="btn-mini" data-act="approve" data-id="${u.chat_id}">Təsdiq et</button>
+                    <button class="btn-mini" style="background:rgba(248,113,113,0.2);color:#fecaca;" data-act="block" data-id="${u.chat_id}">Blokla</button>
                 </div>
             `;
             adminList.appendChild(div);
@@ -1523,7 +1698,7 @@
             btn.addEventListener("click", async () => {
                 const id = Number(btn.getAttribute("data-id"));
                 const act = btn.getAttribute("data-act");
-                const url = act === "approve" ? "/api/admin/approve" : "/api/admin/reject";
+                const url = act === "approve" ? "/api/admin/approve" : "/api/admin/block";
 
                 try {
                     const resp = await fetch(url, {
@@ -1533,10 +1708,10 @@
                     });
                     const data = await resp.json();
                     if (!data.ok) {
-                        showToast("Əməliyyat alınmadı", "err");
+                        showToast(data.error || "Əməliyyat alınmadı", "err");
                         return;
                     }
-                    showToast(act === "approve" ? "Elan təsdiq olundu" : "Elan rədd edildi", "ok");
+                    showToast(act === "approve" ? "İstifadəçi təsdiqləndi" : "İstifadəçi bloklandı", "ok");
                     renderAdminList();
                 } catch (e) {
                     console.error(e);
@@ -1546,140 +1721,47 @@
         });
     }
 
-    // =============================
-    // Vasitəçilər – Agents
-    // =============================
-    const agentsGrid = document.getElementById("agentsGrid");
-    const agentsInfo = document.getElementById("agentsInfo");
-    const agentsInfoRight = document.getElementById("agentsInfoRight");
-    const agentsRange = document.getElementById("agentsRange");
-
-    async function loadAgents(pageOverride) {
-        const page = pageOverride || agentsState.page || 1;
-
-        const q = document.getElementById("agentsText").value.trim();
-        const phone = document.getElementById("agentsPhone").value.trim();
-        const rayon = document.getElementById("agentsRayon").value.trim();
-        const op = document.getElementById("agentsOperation").value;
-
-        agentsInfo.textContent = "Yüklənir...";
-        agentsGrid.innerHTML = "";
-
-        const params = new URLSearchParams();
-        params.set("page", page);
-        if (q) params.set("q", q);
-        if (phone) params.set("phone", phone);
-        if (rayon) params.set("district", rayon);
-        if (op) params.set("op", op);
-
-        try {
-            const resp = await fetch("/api/agents/search?" + params.toString());
-            const data = await resp.json();
-            if (!data.ok) {
-                agentsInfo.textContent = "Xəta baş verdi: " + (data.error || "bilinmir");
-                return;
-            }
-
-            const items = data.items || [];
-            agentsState.page = data.page || page;
-            agentsState.total = data.total || items.length;
-            agentsState.pageSize = items.length || 0;
-            agentsState.totalPages = data.pages || data.total_pages || 1;
-
-            renderAgents(items);
-
-            const from = agentsState.total === 0 ? 0 : ((agentsState.page - 1) * agentsState.pageSize + 1);
-            const to = (agentsState.page - 1) * agentsState.pageSize + items.length;
-
-            agentsInfo.textContent = `${agentsState.total} vasitəçi elanı tapıldı`;
-            agentsInfoRight.textContent = `Səhifə ${agentsState.page} / ${agentsState.totalPages}`;
-            agentsRange.textContent = `${from}–${to}`;
-        } catch (e) {
-            console.error(e);
-            agentsInfo.textContent = "Serverə qoşulmaq mümkün olmadı.";
-        }
-    }
-
-    function renderAgents(items) {
-        agentsGrid.innerHTML = "";
-        if (!items.length) {
-            agentsGrid.innerHTML = `<div class="empty-state">Bu filtrlərlə vasitəçi elanı tapılmadı.</div>`;
+    async function extendUserDays(days) {
+        if (userContext.isMissing || tgUserId === null || tgUserId === undefined) {
+            showToast("Telegram user_id missing", "err");
             return;
         }
-
-        items.forEach(l => {
-            const card = document.createElement("div");
-            card.className = "agent-card";
-            const text = l.summary && l.summary.length > 120
-                ? l.summary.slice(0, 120) + "..."
-                : (l.summary || "");
-
-            card.innerHTML = `
-                <div class="agent-header">
-                    <div class="agent-name">${l.agent_name || "Vasitəçi"}</div>
-                    <div class="agent-phone">${l.phone || ""}</div>
-                </div>
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-                    <span class="tag-badge">${l.operation || ""}</span>
-                    <span style="font-size:10px;">${l.rayon || ""}</span>
-                </div>
-                <div style="font-size:11px;margin-bottom:6px;">${text}</div>
-                <div style="display:flex;justify-content:space-between;align-items:center;">
-                    <button class="link-btn" ${l.link ? "" : "disabled"} data-link="${l.link || ""}">
-                        Elana keçid
-                    </button>
-                    <button class="fav-toggle ${l.is_favorite ? "active" : ""}"
-                        data-id="${l.id}" data-source="agents">
-                        ${l.is_favorite ? "❤ Favoridə" : "♡ Favoriyə əlavə et"}
-                    </button>
-                </div>
-            `;
-            agentsGrid.appendChild(card);
-        });
-
-        agentsGrid.querySelectorAll(".link-btn").forEach(btn => {
-            if (!btn.dataset.link) return;
-            btn.addEventListener("click", () => {
-                window.open(btn.dataset.link, "_blank");
+        const target = Number(document.getElementById("adminExtendUserId").value.trim());
+        if (!target) {
+            showToast("user_id daxil et", "err");
+            return;
+        }
+        try {
+            const resp = await fetch("/api/admin/extend", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ admin_id: tgUserId, user_id: target, days })
             });
-        });
-
-        agentsGrid.querySelectorAll(".fav-toggle").forEach(btn => {
-            btn.addEventListener("click", async () => {
-                const id = Number(btn.getAttribute("data-id"));
-                const source = btn.getAttribute("data-source") || "agents";
-                await toggleFavorite(id, source, btn, btn.closest(".agent-card"));
-            });
-        });
+            const data = await resp.json();
+            if (!data.ok) {
+                showToast(data.error || "Vaxt artırılmadı", "err");
+                return;
+            }
+            document.getElementById("adminExtendResult").textContent = `Yeni bitmə tarixi: ${data.expires_at || ""}`;
+            showToast("Abunə müddəti uzadıldı", "ok");
+        } catch (e) {
+            console.error(e);
+            showToast("Server xətası (extend)", "err");
+        }
     }
 
-    document.getElementById("agentsPrev").addEventListener("click", () => {
-        if (agentsState.page > 1) {
-            agentsState.page--;
-            loadAgents();
-        }
+    document.querySelectorAll("[data-extend]").forEach(btn => {
+        btn.addEventListener("click", () => {
+            const days = Number(btn.getAttribute("data-extend"));
+            if (days) extendUserDays(days);
+        });
     });
 
-    document.getElementById("agentsNext").addEventListener("click", () => {
-        if (agentsState.page < agentsState.totalPages) {
-            agentsState.page++;
-            loadAgents();
-        }
+    document.getElementById("adminExtendCustom").addEventListener("click", () => {
+        const val = Number(prompt("Neçə gün artırılsın?") || "");
+        if (val > 0) extendUserDays(val);
     });
 
-    document.getElementById("agentsSearchBtn").addEventListener("click", () => {
-        agentsState.page = 1;
-        loadAgents();
-    });
-
-    document.getElementById("agentsResetBtn").addEventListener("click", () => {
-        document.getElementById("agentsText").value = "";
-        document.getElementById("agentsPhone").value = "";
-        document.getElementById("agentsRayon").value = "";
-        document.getElementById("agentsOperation").value = "";
-        agentsState.page = 1;
-        loadAgents();
-    });
 
     // =============================
     // Elan əlavə et – submit
