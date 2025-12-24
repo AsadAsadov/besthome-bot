@@ -1,7 +1,10 @@
 import os
 import hashlib
 import hmac
+from functools import wraps
 from typing import Optional
+
+from flask import redirect, session, url_for
 
 ADMIN_USERNAME_ENV = "ADMIN_USERNAME"
 ADMIN_PASSWORD_HASH_ENV = "ADMIN_PASSWORD_HASH"
@@ -37,3 +40,13 @@ def authenticate(username: str, password: str) -> bool:
     if username != stored_username:
         return False
     return _verify_password_hash(password, pwd_hash)
+
+
+def admin_login_required(view_func):
+    @wraps(view_func)
+    def wrapper(*args, **kwargs):
+        if not session.get("admin_authenticated"):
+            return redirect(url_for("admin.login"))
+        return view_func(*args, **kwargs)
+
+    return wrapper
