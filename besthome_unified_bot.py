@@ -22,6 +22,7 @@ import tempfile
 import html
 import logging
 import json
+import hashlib
 from datetime import datetime, date, timedelta, timezone
 from collections import defaultdict
 from functools import wraps
@@ -30,7 +31,16 @@ from urllib.parse import quote, unquote, urlsplit, urlunsplit, parse_qs, urlenco
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 import requests
-from flask import Flask, jsonify, request, send_file
+from flask import (
+    Flask,
+    jsonify,
+    redirect,
+    render_template_string,
+    request,
+    send_file,
+    session,
+    url_for,
+)
 import telebot
 from telebot import types
 
@@ -151,6 +161,58 @@ admin_customer_request_state = {}
 CUSTOMER_REQUEST_COOLDOWN_SECONDS = 300
 
 logger = logging.getLogger("besthome_bot")
+
+
+def _pbkdf2_hash_password(password: str, iterations: int = 120_000) -> str:
+    salt = os.urandom(16).hex()
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt.encode("utf-8"), iterations
+    )
+    return f"pbkdf2_sha256${iterations}${salt}${digest.hex()}"
+
+
+def _verify_password_hash(password: str, stored_hash: str) -> bool:
+    try:
+        algo, iter_str, salt, digest = str(stored_hash).split("$")
+        iterations = int(iter_str)
+    except Exception:
+        return False
+    if algo != "pbkdf2_sha256":
+        return False
+    check_digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt.encode("utf-8"), iterations
+    ).hex()
+    return hashlib.compare_digest(check_digest, digest)
+
+
+def _load_admin_password_config():
+    mapping = {}
+    raw = os.environ.get("ADMIN_PANEL_PASSWORDS", "").strip()
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                mapping.update({str(k).lower(): str(v) for k, v in parsed.items()})
+            elif isinstance(parsed, list):
+                for item in parsed:
+                    if not isinstance(item, dict):
+                        continue
+                    ident = item.get("id") or item.get("username") or item.get("chat_id")
+                    pwd_hash = item.get("password_hash") or item.get("hash")
+                    if ident and pwd_hash:
+                        mapping[str(ident).lower()] = str(pwd_hash)
+        except Exception:
+            logger.exception("Failed to parse ADMIN_PANEL_PASSWORDS")
+
+    shared_hash = os.environ.get("ADMIN_PANEL_SHARED_PASSWORD_HASH", "").strip()
+    shared_plain = os.environ.get("ADMIN_PANEL_SHARED_PASSWORD", "").strip()
+    if not shared_hash and shared_plain:
+        shared_hash = _pbkdf2_hash_password(shared_plain)
+
+    return mapping, (shared_hash or None)
+
+
+ADMIN_PANEL_PASSWORD_HASHES, ADMIN_PANEL_SHARED_PASSWORD_HASH = _load_admin_password_config()
 
 user_state = {}  # Yeni elan proses state
 search_state = {}  # Açar sözlə axtarış paging state
@@ -18032,6 +18094,309 @@ def main():
     threading.Thread(target=subscription_notifier, daemon=True).start()
 
     app = Flask(__name__)
+    app.secret_key = os.environ.get("ADMIN_PANEL_SECRET_KEY") or os.environ.get(
+        "FLASK_SECRET_KEY"
+    ) or os.urandom(32)
+    app.config["SESSION_COOKIE_NAME"] = "besthome_admin_session"
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+    app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=12)
+    if os.environ.get("ENV") == "prod":
+        app.config["SESSION_COOKIE_SECURE"] = True
+
+    def _get_admin_password_hash(identifier: str) -> Optional[str]:
+        ident = str(identifier or "").strip().lower()
+        if not ident:
+            return None
+        if ident in ADMIN_PANEL_PASSWORD_HASHES:
+            return ADMIN_PANEL_PASSWORD_HASHES[ident]
+        if ident.isdigit() and str(int(ident)) in ADMIN_PANEL_PASSWORD_HASHES:
+            return ADMIN_PANEL_PASSWORD_HASHES[str(int(ident))]
+        return ADMIN_PANEL_SHARED_PASSWORD_HASH
+
+    def _fetch_admin_user(identifier: str):
+        ident = str(identifier or "").strip()
+        if not ident:
+            return None
+        conn = get_local_conn()
+        cur = conn.cursor()
+        row = None
+        try:
+            if ident.isdigit():
+                cur.execute(
+                    "SELECT * FROM users WHERE chat_id=? AND is_admin=1 AND blocked=0",
+                    (int(ident),),
+                )
+                row = cur.fetchone()
+            if row is None:
+                cur.execute(
+                    "SELECT * FROM users WHERE LOWER(username)=LOWER(?) AND is_admin=1 AND blocked=0",
+                    (ident.lstrip("@"),),
+                )
+                row = cur.fetchone()
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        return row
+
+    def _admin_login_required(handler):
+        @wraps(handler)
+        def wrapper(*args, **kwargs):
+            if not session.get("admin"):
+                return redirect(url_for("admin_login"))
+            return handler(*args, **kwargs)
+
+        return wrapper
+
+    def _get_session_admin():
+        data = session.get("admin") or {}
+        chat_id = data.get("chat_id")
+        username = data.get("username")
+        if chat_id is None:
+            return None
+        return {"chat_id": chat_id, "username": username}
+
+    def _render_admin_template(title: str, content: str, status: int = 200):
+        admin_ctx = _get_session_admin()
+        html_doc = render_template_string(
+            """
+            <!doctype html>
+            <html lang="en">
+            <head>
+                <meta charset="utf-8">
+                <title>{{ title }}</title>
+                <style>
+                    body { font-family: Arial, sans-serif; background: #f5f6fa; margin: 0; padding: 0; }
+                    .container { max-width: 1100px; margin: 40px auto; background: #fff; padding: 24px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+                    h1 { margin-top: 0; font-size: 24px; }
+                    .nav { margin-bottom: 16px; display: flex; gap: 12px; align-items: center; }
+                    .nav a { color: #2563eb; text-decoration: none; font-weight: 600; }
+                    .nav form { margin: 0; }
+                    table { border-collapse: collapse; width: 100%; }
+                    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #e5e7eb; }
+                    th { background: #f0f4ff; }
+                    .badge { display: inline-block; padding: 4px 8px; border-radius: 6px; font-size: 12px; }
+                    .success { background: #dcfce7; color: #166534; }
+                    .warning { background: #fef9c3; color: #854d0e; }
+                    .danger { background: #fee2e2; color: #991b1b; }
+                    .muted { color: #6b7280; }
+                    .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 16px 0; }
+                    .card { background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px 14px; }
+                    .card-title { font-size: 12px; text-transform: uppercase; color: #6b7280; letter-spacing: 0.04em; }
+                    .card-value { font-size: 22px; font-weight: 700; margin-top: 6px; }
+                    .text-right { text-align: right; }
+                    .btn { padding: 6px 10px; background: #2563eb; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; }
+                    .btn.secondary { background: #6b7280; }
+                    form.inline { display: inline; }
+                    .error { color: #b91c1c; margin-top: 10px; }
+                    .filter-links a { margin-right: 10px; }
+                    .small { font-size: 12px; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    {% if admin %}
+                        <div class="nav">
+                            <a href="{{ url_for('admin_dashboard') }}">Dashboard</a>
+                            <a href="{{ url_for('admin_users') }}">Users</a>
+                            <a href="{{ url_for('admin_keywords') }}">Keywords</a>
+                            <form method="post" action="{{ url_for('admin_logout') }}">
+                                <button type="submit" class="btn secondary">Logout</button>
+                            </form>
+                            <span class="muted small">ID: {{ admin.chat_id }}</span>
+                        </div>
+                    {% endif %}
+                    {{ content|safe }}
+                </div>
+            </body>
+            </html>
+            """,
+            title=title,
+            content=content,
+            admin=admin_ctx,
+        )
+        return html_doc, status
+
+    def _table_exists(cur, name: str) -> bool:
+        try:
+            cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (name,),
+            )
+            return cur.fetchone() is not None
+        except Exception:
+            return False
+
+    def _safe_count(cur, query: str, params: Tuple = ()) -> int:
+        try:
+            cur.execute(query, params)
+            row = cur.fetchone()
+            return int((row[0] if row else 0) or 0)
+        except Exception:
+            return 0
+
+    def _build_range_clause(column: Optional[str], start: datetime, end: datetime):
+        if not column:
+            return "", []
+        return (
+            " WHERE ((typeof({col})='integer' AND {col} BETWEEN ? AND ?) "
+            "OR datetime({col}) BETWEEN datetime(?) AND datetime(?))".format(col=column),
+            [
+                int(start.timestamp()),
+                int(end.timestamp()),
+                format_sqlite_datetime(start),
+                format_sqlite_datetime(end),
+            ],
+        )
+
+    def _compute_admin_user_counts():
+        counts = {
+            "total": 0,
+            "active": 0,
+            "expired": 0,
+            "pending": 0,
+            "blocked": 0,
+            "demo": 0,
+        }
+        try:
+            conn = get_local_conn()
+            cur = conn.cursor()
+            if _table_exists(cur, "users"):
+                counts["total"] = _safe_count(cur, "SELECT COUNT(*) FROM users")
+                counts["active"] = admin_user_status_count(cur, "active")
+                counts["expired"] = admin_user_status_count(cur, "expired")
+                counts["pending"] = admin_user_status_count(cur, "pending")
+                counts["blocked"] = admin_user_status_count(cur, "blocked")
+                counts["demo"] = admin_user_status_count(cur, "demo")
+        except Exception:
+            logger.exception("Failed to compute admin user counts")
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        return counts
+
+    def _compute_listing_counts():
+        stats = {"total": 0, "today": 0, "last_7": 0, "last_30": 0}
+        try:
+            conn = get_main_conn()
+            cur = conn.cursor()
+            table = None
+            for candidate in ("listings", "listings_approved"):
+                if _table_exists(cur, candidate):
+                    table = candidate
+                    break
+            if not table:
+                return stats
+
+            stats["total"] = _safe_count(cur, f"SELECT COUNT(*) FROM {table}")
+            date_col = detect_table_date_column(cur, table)
+            if date_col:
+                today_start, today_end = get_today_bounds()
+                seven_start = datetime.utcnow() - timedelta(days=6)
+                thirty_start = datetime.utcnow() - timedelta(days=29)
+                today_clause, params_today = _build_range_clause(
+                    date_col, today_start, today_end
+                )
+                stats["today"] = _safe_count(
+                    cur, f"SELECT COUNT(*) FROM {table}{today_clause}", params_today
+                )
+                seven_clause, params_seven = _build_range_clause(
+                    date_col, seven_start, datetime.utcnow()
+                )
+                stats["last_7"] = _safe_count(
+                    cur, f"SELECT COUNT(*) FROM {table}{seven_clause}", params_seven
+                )
+                thirty_clause, params_thirty = _build_range_clause(
+                    date_col, thirty_start, datetime.utcnow()
+                )
+                stats["last_30"] = _safe_count(
+                    cur, f"SELECT COUNT(*) FROM {table}{thirty_clause}", params_thirty
+                )
+        except Exception:
+            logger.exception("Failed to compute listing counts for admin dashboard")
+        finally:
+            try:
+                close_main_conn(conn)
+            except Exception:
+                pass
+        return stats
+
+    def _fetch_admin_users(filter_name: str):
+        conn = get_local_conn()
+        cur = conn.cursor()
+        try:
+            where_clause = ""
+            params: Tuple = ()
+            normalized = (filter_name or "").lower()
+            if normalized in {"active", "expired", "pending", "blocked"}:
+                where_clause, params = admin_user_status_where(normalized)
+            elif normalized == "demo":
+                where_clause, params = demo_user_clause("", ""), ()
+            if where_clause:
+                where_clause = f"WHERE {where_clause}"
+
+            cur.execute(
+                f"""
+                SELECT u.chat_id, u.username, u.full_name, u.approved, u.blocked,
+                       u.demo_end_at, u.demo_expires_at, u.paid_until, u.last_seen,
+                       uw.computed_status, uw.effective_expires_at
+                FROM users u
+                LEFT JOIN users_with_status uw ON uw.chat_id = u.chat_id
+                {where_clause}
+                ORDER BY datetime(COALESCE(u.last_seen, u.first_seen)) DESC
+                """,
+                params,
+            )
+            rows = []
+            for row in cur.fetchall():
+                effective_at = parse_effective_expires_at(row["effective_expires_at"])
+                rows.append(
+                    {
+                        "chat_id": row["chat_id"],
+                        "username": row["username"],
+                        "full_name": row["full_name"],
+                        "approved": row["approved"],
+                        "blocked": row["blocked"],
+                        "demo_end_at": row["demo_end_at"] or row["demo_expires_at"],
+                        "paid_until": row["paid_until"],
+                        "status": row["computed_status"],
+                        "effective_expires_at": effective_at.isoformat()
+                        if effective_at
+                        else None,
+                        "last_seen": row["last_seen"],
+                    }
+                )
+            return rows
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _touch_user_activity(chat_id: int):
+        try:
+            conn = get_local_conn()
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO user_activity (chat_id, last_seen, total_searches)
+                VALUES (?, ?, 0)
+                ON CONFLICT(chat_id) DO UPDATE SET last_seen=excluded.last_seen
+                """,
+                (chat_id, datetime.utcnow().isoformat()),
+            )
+            conn.commit()
+        except Exception:
+            logger.exception("Failed to log admin user activity for %s", chat_id)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def _wrap_api(handler_name, func):
         start = time.time()
@@ -18157,6 +18522,437 @@ def main():
                 lid_int = lid
             ev["is_favorite"] = (lid_int, src) in favs
         return items
+
+    @app.route("/admin/login", methods=["GET", "POST"])
+    def admin_login():
+        def _login_form(error: Optional[str] = None):
+            error_block = (
+                f'<div class="error">{html.escape(error)}</div>' if error else ""
+            )
+            return f"""
+                <h1>Admin Panel</h1>
+                <form method=\"post\" action=\"{url_for('admin_login')}\">
+                    <div>
+                        <label>Username və ya Chat ID</label><br/>
+                        <input type=\"text\" name=\"identifier\" required style=\"width: 280px; padding: 8px;\" />
+                    </div>
+                    <div style=\"margin-top:12px;\">
+                        <label>Şifrə</label><br/>
+                        <input type=\"password\" name=\"password\" required style=\"width: 280px; padding: 8px;\" />
+                    </div>
+                    <div style=\"margin-top:16px;\">
+                        <button type=\"submit\" class=\"btn\">Daxil ol</button>
+                    </div>
+                    {error_block}
+                </form>
+            """
+
+        if request.method == "GET":
+            if _get_session_admin():
+                return redirect(url_for("admin_dashboard"))
+            return _render_admin_template("Admin Login", _login_form())
+
+        identifier = (request.form.get("identifier") or "").strip()
+        password = (request.form.get("password") or "").strip()
+        error = None
+        if not identifier or not password:
+            error = "İstifadəçi adı və şifrə tələb olunur"
+        else:
+            row = _fetch_admin_user(identifier)
+            if not row:
+                error = "İcazə yoxdur və ya hesab bloklanıb"
+            else:
+                pwd_hash = (
+                    _get_admin_password_hash(identifier)
+                    or _get_admin_password_hash(row["chat_id"])
+                    or _get_admin_password_hash(row["username"])
+                )
+                if not pwd_hash or not _verify_password_hash(password, pwd_hash):
+                    error = "Şifrə yanlışdır"
+                else:
+                    session["admin"] = {
+                        "chat_id": row["chat_id"],
+                        "username": row["username"],
+                    }
+                    session.permanent = True
+                    _touch_user_activity(row["chat_id"])
+                    logger.info("Admin login chat_id=%s", row["chat_id"])
+                    return redirect(url_for("admin_dashboard"))
+
+        logger.warning("Admin login failed identifier=%s", identifier)
+        return _render_admin_template("Admin Login", _login_form(error), 401)
+
+    @app.route("/admin/logout", methods=["POST"])
+    def admin_logout():
+        admin_data = _get_session_admin()
+        session.pop("admin", None)
+        if admin_data:
+            logger.info("Admin logout chat_id=%s", admin_data.get("chat_id"))
+        return redirect(url_for("admin_login"))
+
+    @app.route("/admin/dashboard")
+    @_admin_login_required
+    def admin_dashboard():
+        user_counts = _compute_admin_user_counts()
+        listing_counts = _compute_listing_counts()
+        content = f"""
+            <h1>Dashboard</h1>
+            <div class=\"card-grid\">
+                <div class=\"card\"><div class=\"card-title\">İstifadəçilər</div><div class=\"card-value\">{user_counts['total']}</div></div>
+                <div class=\"card\"><div class=\"card-title\">Aktiv</div><div class=\"card-value\">{user_counts['active']}</div></div>
+                <div class=\"card\"><div class=\"card-title\">Demo</div><div class=\"card-value\">{user_counts['demo']}</div></div>
+                <div class=\"card\"><div class=\"card-title\">Vaxtı bitmiş</div><div class=\"card-value\">{user_counts['expired']}</div></div>
+                <div class=\"card\"><div class=\"card-title\">Bloklanmış</div><div class=\"card-value\">{user_counts['blocked']}</div></div>
+                <div class=\"card\"><div class=\"card-title\">Təsdiq gözləyir</div><div class=\"card-value\">{user_counts['pending']}</div></div>
+            </div>
+            <h2>Elanlar</h2>
+            <div class=\"card-grid\">
+                <div class=\"card\"><div class=\"card-title\">Cəmi elanlar</div><div class=\"card-value\">{listing_counts['total']}</div></div>
+                <div class=\"card\"><div class=\"card-title\">Bu gün</div><div class=\"card-value\">{listing_counts['today']}</div></div>
+                <div class=\"card\"><div class=\"card-title\">Son 7 gün</div><div class=\"card-value\">{listing_counts['last_7']}</div></div>
+                <div class=\"card\"><div class=\"card-title\">Son 30 gün</div><div class=\"card-value\">{listing_counts['last_30']}</div></div>
+            </div>
+        """
+        return _render_admin_template("Dashboard", content)
+
+    @app.route("/admin/users")
+    @_admin_login_required
+    def admin_users():
+        filter_name = request.args.get("filter", "all").lower()
+        users = _fetch_admin_users(filter_name if filter_name != "all" else "")
+
+        def _status_badge(row):
+            status_raw = (row.get("status") or "").upper()
+            label = status_raw.title() if status_raw else "Bilinmir"
+            cls = "badge"
+            if status_raw == "ACTIVE":
+                cls += " success"
+            elif status_raw == "PENDING":
+                cls += " warning"
+                label = "Təsdiq gözləyir"
+            elif status_raw == "EXPIRED":
+                cls += " warning"
+                label = "Vaxtı bitib"
+            elif status_raw == "BLOCKED":
+                cls += " danger"
+                label = "Bloklanıb"
+            if row.get("demo_end_at"):
+                label += " · Demo"
+            return f'<span class="{cls}">{label}</span>'
+
+        def _fmt_dt(raw: Optional[str]):
+            dt = parse_dt_safe(raw) or parse_effective_expires_at(raw)
+            return dt.strftime("%Y-%m-%d %H:%M") if dt else "—"
+
+        rows_html = "".join(
+            [
+                """
+                <tr>
+                    <td>{chat_id}</td>
+                    <td>{username}</td>
+                    <td>{full_name}</td>
+                    <td>{status_badge}</td>
+                    <td>{effective}</td>
+                    <td>{paid}</td>
+                    <td>{demo}</td>
+                    <td>{last_seen}</td>
+                </tr>
+                """.format(
+                    chat_id=row.get("chat_id"),
+                    username=html.escape(str(row.get("username") or "—")),
+                    full_name=html.escape(str(row.get("full_name") or "—")),
+                    status_badge=_status_badge(row),
+                    effective=_fmt_dt(row.get("effective_expires_at")),
+                    paid=_fmt_dt(row.get("paid_until")),
+                    demo=_fmt_dt(row.get("demo_end_at")),
+                    last_seen=_fmt_dt(row.get("last_seen")),
+                )
+                for row in users
+            ]
+        )
+
+        content = f"""
+            <h1>İstifadəçilər</h1>
+            <div class=\"filter-links\">
+                <a href=\"{url_for('admin_users')}\">Hamısı</a>
+                <a href=\"{url_for('admin_users', filter='active')}\">Aktiv</a>
+                <a href=\"{url_for('admin_users', filter='demo')}\">Demo</a>
+                <a href=\"{url_for('admin_users', filter='expired')}\">Vaxtı bitmiş</a>
+                <a href=\"{url_for('admin_users', filter='pending')}\">Təsdiq gözləyən</a>
+                <a href=\"{url_for('admin_users', filter='blocked')}\">Bloklanmış</a>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th><th>Username</th><th>Ad</th><th>Status</th><th>Bitmə</th><th>Ödəniş</th><th>Demo</th><th>Last seen</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {rows_html or '<tr><td colspan="8">Məlumat yoxdur</td></tr>'}
+                </tbody>
+            </table>
+        """
+        return _render_admin_template("Users", content)
+
+    @app.route("/admin/users/extend", methods=["POST"])
+    @_admin_login_required
+    def admin_user_extend():
+        payload = request.get_json(silent=True) or {}
+        chat_id = parse_int_value(payload.get("chat_id"))
+        days = parse_int_value(payload.get("days"))
+        ext_type = str(payload.get("type") or "").lower()
+        if chat_id is None or days is None or days <= 0 or ext_type not in {"paid", "demo"}:
+            return jsonify({"error": "chat_id, days və type tələb olunur"}), 400
+
+        conn = get_local_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM users WHERE chat_id=?", (chat_id,))
+        user_row = cur.fetchone()
+        if not user_row:
+            conn.close()
+            return jsonify({"error": "İstifadəçi tapılmadı"}), 404
+
+        now_dt = datetime.utcnow()
+        ensure_subscription_record(chat_id)
+
+        if ext_type == "demo":
+            cur.execute(
+                "SELECT demo_end_at, demo_expires_at FROM users WHERE chat_id=?",
+                (chat_id,),
+            )
+            row = cur.fetchone()
+            current_demo = parse_dt_safe(row[0]) or parse_dt_safe(row[1]) if row else None
+            base_dt = current_demo if current_demo and current_demo > now_dt else now_dt
+            new_exp = base_dt + timedelta(days=days)
+            cur.execute(
+                """
+                INSERT INTO subscriptions (chat_id, plan, expires_at, is_active, is_demo, last_payment_note)
+                VALUES (?, 'admin_demo', ?, 1, 1, 'admin_panel_demo')
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    plan=excluded.plan,
+                    expires_at=excluded.expires_at,
+                    is_active=1,
+                    is_demo=1,
+                    last_payment_note=COALESCE(excluded.last_payment_note, subscriptions.last_payment_note)
+                """,
+                (chat_id, new_exp.isoformat()),
+            )
+            cur.execute(
+                "UPDATE users SET demo_end_at=?, approved=1, blocked=0 WHERE chat_id=?",
+                (new_exp.isoformat(), chat_id),
+            )
+        else:
+            cur.execute("SELECT paid_until FROM users WHERE chat_id=?", (chat_id,))
+            row = cur.fetchone()
+            current_paid = parse_dt_safe(row[0]) if row else None
+            base_dt = current_paid if current_paid and current_paid > now_dt else now_dt
+            new_exp = base_dt + timedelta(days=days)
+            cur.execute(
+                """
+                INSERT INTO subscriptions (chat_id, plan, expires_at, is_active, is_demo, last_payment_note)
+                VALUES (?, 'admin_paid', ?, 1, 0, 'admin_panel_extend')
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    plan=excluded.plan,
+                    expires_at=excluded.expires_at,
+                    is_active=1,
+                    is_demo=0,
+                    last_payment_note=COALESCE(excluded.last_payment_note, subscriptions.last_payment_note)
+                """,
+                (chat_id, new_exp.isoformat()),
+            )
+            cur.execute(
+                "UPDATE users SET paid_until=?, approved=1, blocked=0 WHERE chat_id=?",
+                (new_exp.isoformat(), chat_id),
+            )
+
+        conn.commit()
+        conn.close()
+        _touch_user_activity(chat_id)
+        logger.info(
+            "Admin %s extended user %s by %s days as %s",
+            session.get("admin", {}).get("chat_id"),
+            chat_id,
+            days,
+            ext_type,
+        )
+        return jsonify({"status": "ok", "expires_at": new_exp.isoformat(), "type": ext_type})
+
+    @app.route("/admin/keywords")
+    @_admin_login_required
+    def admin_keywords():
+        conn = get_local_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT ka.id, ka.user_id, ka.keywords, ka.regions, ka.is_active, ka.created_at,
+                   COUNT(kah.id) as hits
+            FROM keyword_alerts ka
+            LEFT JOIN keyword_alert_hits kah ON kah.alert_id = ka.id
+            GROUP BY ka.id, ka.user_id, ka.keywords, ka.regions, ka.is_active, ka.created_at
+            ORDER BY datetime(COALESCE(ka.created_at, '1970-01-01')) DESC
+            """
+        )
+        rows = cur.fetchall()
+        conn.close()
+
+        def _active_badge(is_active: int):
+            return (
+                '<span class="badge success">Aktiv</span>'
+                if is_active
+                else '<span class="badge danger">Passiv</span>'
+            )
+
+        table_rows = "".join(
+            [
+                """
+                <tr>
+                    <td>{id}</td>
+                    <td>{user_id}</td>
+                    <td>{keywords}</td>
+                    <td>{regions}</td>
+                    <td>{status}</td>
+                    <td>{hits}</td>
+                    <td>
+                        <form class=\"inline\" method=\"post\" action=\"{toggle_url}\">
+                            <input type=\"hidden\" name=\"action\" value=\"{toggle_action}\" />
+                            <input type=\"hidden\" name=\"alert_id\" value=\"{id}\" />
+                            <button type=\"submit\" class=\"btn secondary\">{toggle_label}</button>
+                        </form>
+                        <form class=\"inline\" method=\"post\" action=\"{delete_url}\" onsubmit=\"return confirm('Silinsin?');\">
+                            <input type=\"hidden\" name=\"action\" value=\"delete\" />
+                            <input type=\"hidden\" name=\"alert_id\" value=\"{id}\" />
+                            <button type=\"submit\" class=\"btn secondary\">Sil</button>
+                        </form>
+                    </td>
+                </tr>
+                """.format(
+                    id=row["id"],
+                    user_id=row["user_id"],
+                    keywords=html.escape(row["keywords"] or ""),
+                    regions=html.escape(row["regions"] or "—"),
+                    status=_active_badge(row["is_active"]),
+                    hits=row["hits"],
+                    toggle_url=url_for("admin_keywords_remove"),
+                    delete_url=url_for("admin_keywords_remove"),
+                    toggle_action="disable" if row["is_active"] else "enable",
+                    toggle_label="Deaktiv et" if row["is_active"] else "Aktiv et",
+                )
+                for row in rows
+            ]
+        )
+
+        content = f"""
+            <h1>Açar söz izləmə</h1>
+            <form method=\"post\" action=\"{url_for('admin_keywords_add')}\" style=\"margin-bottom:16px;\">
+                <div>
+                    <label>Chat ID</label><br/>
+                    <input type=\"number\" name=\"chat_id\" required style=\"width:200px; padding:6px;\" />
+                </div>
+                <div>
+                    <label>Açar söz</label><br/>
+                    <input type=\"text\" name=\"keyword\" required style=\"width:260px; padding:6px;\" />
+                </div>
+                <div>
+                    <label>Regionlar (vergüllə)</label><br/>
+                    <input type=\"text\" name=\"regions\" style=\"width:260px; padding:6px;\" />
+                </div>
+                <div style=\"margin-top:10px;\">
+                    <label><input type=\"checkbox\" name=\"is_active\" checked /> Aktiv</label>
+                </div>
+                <div style=\"margin-top:12px;\"><button type=\"submit\" class=\"btn\">Əlavə et</button></div>
+            </form>
+            <table>
+                <thead><tr><th>ID</th><th>Chat ID</th><th>Açar sözlər</th><th>Regionlar</th><th>Status</th><th>Hitlər</th><th>Əməliyyat</th></tr></thead>
+                <tbody>{table_rows or '<tr><td colspan="7">Məlumat yoxdur</td></tr>'}</tbody>
+            </table>
+        """
+        return _render_admin_template("Keywords", content)
+
+    @app.route("/admin/keywords/add", methods=["POST"])
+    @_admin_login_required
+    def admin_keywords_add():
+        payload = request.get_json(silent=True)
+        if not payload:
+            payload = request.form
+        chat_id = parse_int_value(payload.get("chat_id")) if payload else None
+        keyword = (payload.get("keyword") or "").strip() if payload else ""
+        regions_raw = (payload.get("regions") or "").strip() if payload else ""
+        is_active = 1 if (payload.get("is_active") not in (None, "", "0", 0, False)) else 0
+        if chat_id is None or not keyword:
+            return jsonify({"error": "chat_id və keyword tələb olunur"}), 400
+
+        conn = get_local_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM users WHERE chat_id=?", (chat_id,))
+        if cur.fetchone() is None:
+            conn.close()
+            return jsonify({"error": "İstifadəçi tapılmadı"}), 404
+        cur.execute(
+            """
+            INSERT INTO keyword_alerts (user_id, keywords, regions, is_active, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                chat_id,
+                keyword,
+                regions_raw,
+                is_active,
+                datetime.utcnow().isoformat(),
+            ),
+        )
+        conn.commit()
+        conn.close()
+        logger.info(
+            "Admin %s added keyword alert for %s", session.get("admin", {}).get("chat_id"), chat_id
+        )
+        if request.is_json:
+            return jsonify({"status": "ok"})
+        return redirect(url_for("admin_keywords"))
+
+    @app.route("/admin/keywords/remove", methods=["POST"])
+    @_admin_login_required
+    def admin_keywords_remove():
+        payload = request.get_json(silent=True)
+        if not payload:
+            payload = request.form
+        alert_id = parse_int_value(payload.get("alert_id")) if payload else None
+        action = str(payload.get("action") or "delete").lower() if payload else "delete"
+        if alert_id is None:
+            return jsonify({"error": "alert_id tələb olunur"}), 400
+
+        conn = get_local_conn()
+        cur = conn.cursor()
+        if action in {"disable", "enable"}:
+            is_active = 0 if action == "disable" else 1
+            cur.execute(
+                "UPDATE keyword_alerts SET is_active=? WHERE id=?",
+                (is_active, alert_id),
+            )
+            conn.commit()
+            conn.close()
+            logger.info(
+                "Admin %s toggled keyword %s -> %s",
+                session.get("admin", {}).get("chat_id"),
+                alert_id,
+                action,
+            )
+            if request.is_json:
+                return jsonify({"status": "ok", "action": action})
+            return redirect(url_for("admin_keywords"))
+
+        cur.execute("DELETE FROM keyword_alert_hits WHERE alert_id=?", (alert_id,))
+        cur.execute(
+            "DELETE FROM keyword_alert_state WHERE key LIKE ?", (f"%{alert_id}%",)
+        )
+        cur.execute("DELETE FROM keyword_alerts WHERE id=?", (alert_id,))
+        conn.commit()
+        conn.close()
+        logger.info(
+            "Admin %s deleted keyword %s", session.get("admin", {}).get("chat_id"), alert_id
+        )
+        if request.is_json:
+            return jsonify({"status": "ok", "action": "delete"})
+        return redirect(url_for("admin_keywords"))
 
     @app.route("/")
     def home():
