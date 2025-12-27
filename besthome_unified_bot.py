@@ -18116,6 +18116,8 @@ def create_flask_app():
     if app is not None:
         return app
 
+    from admin import admin_bp
+
     _initialize_app_state()
     app = Flask(__name__)
     app.secret_key = os.environ.get("ADMIN_PANEL_SECRET_KEY") or os.environ.get(
@@ -18128,16 +18130,8 @@ def create_flask_app():
     if os.environ.get("ENV") == "prod":
         app.config["SESSION_COOKIE_SECURE"] = True
 
-    try:
-        from admin import admin_bp
-
-        if admin_bp.name not in app.blueprints:
-            app.register_blueprint(admin_bp)
-            logger.info("Web admin panel registered at /admin")
-        else:
-            logger.info("Web admin panel blueprint already registered, skipping")
-    except Exception:
-        logger.exception("Failed to register web admin panel")
+    app.register_blueprint(admin_bp)
+    logger.info("Web admin panel registered at /admin")
 
     @app.route("/")
     def home():
