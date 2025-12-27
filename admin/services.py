@@ -87,7 +87,22 @@ def compute_dashboard_counts(db: AdminDatabase) -> Dict[str, int]:
 def fetch_user(db: AdminDatabase, chat_id: int) -> Optional[sqlite3.Row]:
     conn = db.local_conn()
     try:
-        cur = conn.execute("SELECT * FROM users WHERE chat_id=?", (chat_id,))
+        cur = conn.execute(
+            """
+            SELECT
+                chat_id,
+                username,
+                full_name,
+                approved,
+                blocked,
+                paid_until,
+                demo_end_at,
+                demo_expires_at
+            FROM users
+            WHERE chat_id=?
+            """,
+            (chat_id,),
+        )
         return cur.fetchone()
     finally:
         conn.close()
@@ -96,7 +111,14 @@ def fetch_user(db: AdminDatabase, chat_id: int) -> Optional[sqlite3.Row]:
 def fetch_subscription(db: AdminDatabase, chat_id: int) -> Optional[sqlite3.Row]:
     conn = db.local_conn()
     try:
-        cur = conn.execute("SELECT * FROM subscriptions WHERE chat_id=?", (chat_id,))
+        cur = conn.execute(
+            """
+            SELECT chat_id, expires_at, is_active, is_demo, plan, last_payment_note
+            FROM subscriptions
+            WHERE chat_id=?
+            """,
+            (chat_id,),
+        )
         return cur.fetchone()
     finally:
         conn.close()
@@ -181,12 +203,14 @@ def approve_user(db: AdminDatabase, chat_id: int) -> bool:
 def list_keyword_alerts(db: AdminDatabase, user_filter: Optional[int] = None) -> list:
     conn = db.local_conn()
     try:
-        query = "SELECT * FROM keyword_alerts"
+        query = (
+            "SELECT id, user_id, keywords, regions, is_active, created_at FROM keyword_alerts"
+        )
         params: Tuple = ()
         if user_filter is not None:
             query += " WHERE user_id=?"
             params = (user_filter,)
-        query += " ORDER BY created_at DESC"
+        query += " ORDER BY created_at DESC LIMIT 500"
         cur = conn.execute(query, params)
         return cur.fetchall()
     finally:

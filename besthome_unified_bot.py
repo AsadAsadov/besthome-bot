@@ -1334,6 +1334,10 @@ def init_local_db():
         "ALTER TABLE users ADD COLUMN role TEXT",
         "ALTER TABLE users ADD COLUMN blocked_at TEXT",
         "ALTER TABLE users ADD COLUMN status TEXT",
+        "ALTER TABLE users ADD COLUMN first_seen TEXT",
+        "ALTER TABLE users ADD COLUMN last_seen TEXT",
+        "ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN last_version TEXT",
         "ALTER TABLE users ADD COLUMN joined_at TEXT",
         "ALTER TABLE users ADD COLUMN demo_start_at TEXT",
         "ALTER TABLE users ADD COLUMN demo_end_at TEXT",
@@ -1468,6 +1472,12 @@ def init_local_db():
     )
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_referral_logs_referred ON referral_logs(referred_user_id)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_users_admin_pending ON users(approved, blocked, first_seen DESC)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_users_chat_id_lookup ON users(chat_id)"
     )
 
     cur.execute(
@@ -1736,6 +1746,9 @@ def init_local_db():
     )
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_keyword_alerts_user ON keyword_alerts(user_id)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_keyword_alerts_user_created ON keyword_alerts(user_id, created_at DESC)"
     )
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_keyword_alert_hits_user ON keyword_alert_hits(user_id)"
@@ -17844,6 +17857,24 @@ def api_ok_response(payload: dict, status_code: int = 200):
     return jsonify(body), status_code
 
 
+def _wrap_api(name: str, handler):
+    """Execute an API handler with consistent logging and error handling."""
+
+    @wraps(handler)
+    def _inner(*args, **kwargs):
+        started_at = time.time()
+        try:
+            return handler(*args, **kwargs)
+        except Exception:
+            logger.exception("API handler failed name=%s", name)
+            return api_error_response("Server error", 500)
+        finally:
+            duration_ms = int((time.time() - started_at) * 1000)
+            logger.info("API %s completed in %sms", name, duration_ms)
+
+    return _inner()
+
+
 def resolve_user_from_payload(payload: dict):
     uid_raw = (
         payload.get("telegram_user_id")
@@ -18108,8 +18139,11 @@ def main():
     try:
         from admin import admin_bp
 
-        app.register_blueprint(admin_bp)
-        logger.info("Web admin panel registered at /admin")
+        if admin_bp.name not in app.blueprints:
+            app.register_blueprint(admin_bp)
+            logger.info("Web admin panel registered at /admin")
+        else:
+            logger.info("Web admin panel blueprint already registered, skipping")
     except Exception:
         logger.exception("Failed to register web admin panel")
 
@@ -18488,19 +18522,38 @@ def main():
             if admin_id is None or not is_admin(admin_id):
                 return api_error_response("Admin icazəsi yoxdur", 403)
             ensure_user_exists(admin_id)
+            limit = parse_int_value(args.get("limit")) or 200
+            offset = parse_int_value(args.get("offset")) or 0
+            limit = max(1, min(limit, 500))
+            offset = max(0, offset)
+
             conn = get_local_conn()
-            cur = conn.cursor()
-            cur.execute(
-                """
-                SELECT chat_id, full_name, username, first_seen, last_seen, approved, blocked, paid_until
-                FROM users
-                WHERE COALESCE(approved,0)=0 AND COALESCE(blocked,0)=0
-                ORDER BY first_seen DESC
-                """
-            )
-            rows = [dict(r) for r in cur.fetchall()]
-            conn.close()
-            return api_ok_response({"items": rows, "total": len(rows)})
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    SELECT COUNT(1)
+                    FROM users
+                    WHERE COALESCE(approved,0)=0 AND COALESCE(blocked,0)=0
+                    """
+                )
+                count_row = cur.fetchone()
+                total_pending = count_row[0] if count_row else 0
+                cur.execute(
+                    """
+                    SELECT chat_id, full_name, username, first_seen, last_seen, approved, blocked, paid_until
+                    FROM users
+                    WHERE COALESCE(approved,0)=0 AND COALESCE(blocked,0)=0
+                    ORDER BY first_seen DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (limit, offset),
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+            finally:
+                conn.close()
+
+            return api_ok_response({"items": rows, "total": total_pending})
 
         return _wrap_api("admin_pending", _handler)
 
@@ -18518,13 +18571,15 @@ def main():
             ensure_user_exists(admin_id)
             ensure_user_exists(user_id)
             conn = get_local_conn()
-            cur = conn.cursor()
-            cur.execute(
-                "UPDATE users SET approved=1, blocked=0 WHERE chat_id=?",
-                (user_id,),
-            )
-            conn.commit()
-            conn.close()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE users SET approved=1, blocked=0 WHERE chat_id=?",
+                    (user_id,),
+                )
+                conn.commit()
+            finally:
+                conn.close()
             log_api_call("admin_approve", admin_id, {"user_id": user_id})
             return api_ok_response({})
 
@@ -18545,13 +18600,15 @@ def main():
             ensure_user_exists(admin_id)
             ensure_user_exists(user_id)
             conn = get_local_conn()
-            cur = conn.cursor()
-            cur.execute(
-                "UPDATE users SET blocked=1, blocked_at=? WHERE chat_id=?",
-                (datetime.utcnow().isoformat(), user_id),
-            )
-            conn.commit()
-            conn.close()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE users SET blocked=1, blocked_at=? WHERE chat_id=?",
+                    (datetime.utcnow().isoformat(), user_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
             log_api_call("admin_block", admin_id, {"user_id": user_id})
             return api_ok_response({})
 
@@ -18577,32 +18634,38 @@ def main():
             ensure_subscription_record(user_id)
 
             conn = get_local_conn()
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT expires_at FROM subscriptions WHERE chat_id=?",
-                (user_id,),
-            )
-            row = cur.fetchone()
-            current_exp = parse_dt_safe(row[0]) if row and row[0] else None
-            base_dt = current_exp if current_exp and current_exp > datetime.utcnow() else datetime.utcnow()
-            new_exp = base_dt + timedelta(days=days)
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT expires_at FROM subscriptions WHERE chat_id=?",
+                    (user_id,),
+                )
+                row = cur.fetchone()
+                current_exp = parse_dt_safe(row[0]) if row and row[0] else None
+                base_dt = (
+                    current_exp
+                    if current_exp and current_exp > datetime.utcnow()
+                    else datetime.utcnow()
+                )
+                new_exp = base_dt + timedelta(days=days)
 
-            cur.execute(
-                """
-                INSERT INTO subscriptions (chat_id, plan, expires_at, is_active, is_demo, last_payment_note)
-                VALUES (?, 'admin', ?, 1, 0, 'admin_extend')
-                ON CONFLICT(chat_id) DO UPDATE SET
-                    plan='admin', expires_at=excluded.expires_at, is_active=1, is_demo=0,
-                    last_payment_note=COALESCE(excluded.last_payment_note, subscriptions.last_payment_note)
-                """,
-                (user_id, new_exp.isoformat()),
-            )
-            cur.execute(
-                "UPDATE users SET paid_until=?, approved=1, blocked=0 WHERE chat_id=?",
-                (new_exp.isoformat(), user_id),
-            )
-            conn.commit()
-            conn.close()
+                cur.execute(
+                    """
+                    INSERT INTO subscriptions (chat_id, plan, expires_at, is_active, is_demo, last_payment_note)
+                    VALUES (?, 'admin', ?, 1, 0, 'admin_extend')
+                    ON CONFLICT(chat_id) DO UPDATE SET
+                        plan='admin', expires_at=excluded.expires_at, is_active=1, is_demo=0,
+                        last_payment_note=COALESCE(excluded.last_payment_note, subscriptions.last_payment_note)
+                    """,
+                    (user_id, new_exp.isoformat()),
+                )
+                cur.execute(
+                    "UPDATE users SET paid_until=?, approved=1, blocked=0 WHERE chat_id=?",
+                    (new_exp.isoformat(), user_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
 
             log_api_call(
                 "admin_extend",
@@ -18667,7 +18730,7 @@ def main():
         return _wrap_api("admin_db_update", _handler)
 
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, threaded=True)
 
 
 __all__ = ["main"]
