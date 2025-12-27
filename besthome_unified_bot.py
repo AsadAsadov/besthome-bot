@@ -18093,38 +18093,30 @@ def cb_unhandled_callback(c):
         recover_main_menu(c.message.chat.id, c.message)
 
 
-def main():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
 
-    global BOT_TOKEN, BOT_USERNAME
-    BOT_TOKEN = _load_bot_token()
+_app_initialized = False
+app: Optional[Flask] = None
 
+
+def _initialize_app_state():
+    global _app_initialized
+    if _app_initialized:
+        return
     _verify_db_paths()
     init_local_db()
     init_agents_db()
     init_main_db_indices()
     ensure_fts_tables()
     check_favorite_price_drops()
+    _app_initialized = True
 
-    bot.bind(telebot.TeleBot(BOT_TOKEN))
-    BOT_USERNAME = bot.get_me().username
 
-    polling_started = threading.Event()
-    polling_thread = threading.Thread(
-        target=run_bot,
-        args=(polling_started,),
-        daemon=True,
-    )
-    polling_thread.start()
-    polling_started.wait()
+def create_flask_app():
+    global app
+    if app is not None:
+        return app
 
-    threading.Thread(target=saved_search_worker, daemon=True).start()
-    threading.Thread(target=favorite_price_worker, daemon=True).start()
-    threading.Thread(target=subscription_notifier, daemon=True).start()
-
+    _initialize_app_state()
     app = Flask(__name__)
     app.secret_key = os.environ.get("ADMIN_PANEL_SECRET_KEY") or os.environ.get(
         "FLASK_SECRET_KEY"
@@ -18729,8 +18721,41 @@ def main():
 
         return _wrap_api("admin_db_update", _handler)
 
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port, threaded=True)
+
+    return app
 
 
-__all__ = ["main"]
+def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    global BOT_TOKEN, BOT_USERNAME
+    BOT_TOKEN = _load_bot_token()
+
+    _initialize_app_state()
+
+    bot.bind(telebot.TeleBot(BOT_TOKEN))
+    BOT_USERNAME = bot.get_me().username
+
+    polling_started = threading.Event()
+    polling_thread = threading.Thread(
+        target=run_bot,
+        args=(polling_started,),
+        daemon=True,
+    )
+    polling_thread.start()
+    polling_started.wait()
+
+    threading.Thread(target=saved_search_worker, daemon=True).start()
+    threading.Thread(target=favorite_price_worker, daemon=True).start()
+    threading.Thread(target=subscription_notifier, daemon=True).start()
+
+    create_flask_app()
+
+
+app = create_flask_app()
+
+
+__all__ = ["main", "create_flask_app", "app"]

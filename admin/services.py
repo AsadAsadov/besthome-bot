@@ -241,3 +241,28 @@ def delete_keyword(db: AdminDatabase, alert_id: int) -> bool:
         return cur.rowcount > 0
     finally:
         conn.close()
+
+
+def list_users_paginated(
+    db: AdminDatabase, page: int, page_size: int = 50
+) -> Tuple[list, int]:
+    page = max(page, 1)
+    page_size = max(page_size, 1)
+    offset = (page - 1) * page_size
+    conn = db.local_conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT chat_id, username, full_name, approved, blocked,
+                   paid_until, demo_end_at, demo_expires_at
+            FROM users
+            ORDER BY chat_id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (page_size, offset),
+        ).fetchall()
+        total_row = conn.execute("SELECT COUNT(*) as cnt FROM users").fetchone() or {}
+        total = int(total_row.get("cnt") or 0)
+        return rows, total
+    finally:
+        conn.close()

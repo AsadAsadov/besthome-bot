@@ -1,6 +1,8 @@
 import logging
+import math
 import os
 import secrets
+from datetime import datetime, timedelta
 from typing import Optional
 
 from flask import abort, redirect, render_template, request, session, url_for
@@ -18,6 +20,7 @@ from .services import (
     fetch_subscription,
     fetch_user,
     list_keyword_alerts,
+    list_users_paginated,
     toggle_keyword,
 )
 
@@ -26,7 +29,33 @@ logger = logging.getLogger("admin_panel")
 DATA_DIR = os.environ.get("DATA_DIR") or os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..")
 )
-db = AdminDatabase(DATA_DIR)
+
+_admin_db: Optional[AdminDatabase] = None
+_dashboard_cache: dict = {"data": None, "ts": None}
+
+
+def _get_admin_db() -> AdminDatabase:
+    global _admin_db
+    if _admin_db is None:
+        _admin_db = AdminDatabase(DATA_DIR)
+    return _admin_db
+
+
+def _get_dashboard_stats() -> dict:
+    now = datetime.utcnow()
+    if _dashboard_cache.get("data") and _dashboard_cache.get("ts"):
+        if now - _dashboard_cache["ts"] < timedelta(seconds=30):
+            return _dashboard_cache["data"]
+
+    stats = compute_dashboard_counts(_get_admin_db())
+    _dashboard_cache["data"] = stats
+    _dashboard_cache["ts"] = now
+    return stats
+
+
+def _invalidate_dashboard_cache():
+    _dashboard_cache["data"] = None
+    _dashboard_cache["ts"] = None
 
 
 def require_csrf():
@@ -87,7 +116,7 @@ def logout():
 @admin_bp.route("/dashboard")
 @admin_login_required
 def dashboard():
-    stats = compute_dashboard_counts(db)
+    stats = _get_dashboard_stats()
     return render_template("dashboard.html", stats=stats)
 
 
@@ -101,6 +130,17 @@ def users():
     status = None
     effective = None
     chat_id_param = request.args.get("chat_id") or request.form.get("chat_id")
+    page = request.args.get("page") or "1"
+    page_size = request.args.get("page_size") or "50"
+
+    try:
+        page_int = max(int(page), 1)
+    except ValueError:
+        page_int = 1
+    try:
+        page_size_int = max(min(int(page_size), 200), 1)
+    except ValueError:
+        page_size_int = 50
 
     if request.method == "POST":
         require_csrf()
@@ -116,30 +156,34 @@ def users():
                 days = int(request.form.get("days", "0"))
             except ValueError:
                 days = 0
-            new_exp = extend_user(db, chat_id, days)
+            new_exp = extend_user(_get_admin_db(), chat_id, days)
             if new_exp:
                 message = (
                     f"İstifadəçinin müddəti {days} gün uzadıldı. Yeni tarix: {new_exp:%Y-%m-%d %H:%M}"
                 )
                 logger.info("Admin extended user chat_id=%s days=%s", chat_id, days)
+                _invalidate_dashboard_cache()
             else:
                 error = "İstifadəçi tapılmadı və ya müddət uzadıla bilmədi"
         elif action == "block":
-            if block_user(db, chat_id, True):
+            if block_user(_get_admin_db(), chat_id, True):
                 message = "İstifadəçi bloklandı"
                 logger.info("Admin blocked user chat_id=%s", chat_id)
+                _invalidate_dashboard_cache()
             else:
                 error = "Bloklama mümkün olmadı"
         elif action == "unblock":
-            if block_user(db, chat_id, False):
+            if block_user(_get_admin_db(), chat_id, False):
                 message = "İstifadəçi blokdan çıxarıldı"
                 logger.info("Admin unblocked user chat_id=%s", chat_id)
+                _invalidate_dashboard_cache()
             else:
                 error = "Blokdan çıxarma mümkün olmadı"
         elif action == "approve":
-            if approve_user(db, chat_id):
+            if approve_user(_get_admin_db(), chat_id):
                 message = "İstifadəçi təsdiqləndi"
                 logger.info("Admin approved user chat_id=%s", chat_id)
+                _invalidate_dashboard_cache()
             else:
                 error = "Təsdiqləmə mümkün olmadı"
         else:
@@ -149,12 +193,15 @@ def users():
     if chat_id_param:
         try:
             chat_id_int = int(chat_id_param)
-            user_row = fetch_user(db, chat_id_int)
-            sub_row = fetch_subscription(db, chat_id_int)
+            user_row = fetch_user(_get_admin_db(), chat_id_int)
+            sub_row = fetch_subscription(_get_admin_db(), chat_id_int)
             if user_row:
                 status, effective = compute_user_status(user_row, sub_row)
         except ValueError:
             error = "chat_id düzgün deyil"
+
+    users_page, total_users = list_users_paginated(_get_admin_db(), page_int, page_size_int)
+    total_pages = max(1, math.ceil(total_users / page_size_int)) if total_users else 1
 
     return render_template(
         "users.html",
@@ -165,6 +212,10 @@ def users():
         message=message,
         error=error,
         csrf_token=session.get("csrf_token"),
+        users_page=users_page,
+        total_pages=total_pages,
+        current_page=page_int,
+        page_size=page_size_int,
     )
 
 
@@ -174,6 +225,8 @@ def keywords():
     message: Optional[str] = None
     error: Optional[str] = None
     user_filter: Optional[int] = None
+    db = _get_admin_db()
+
     if request.method == "POST":
         require_csrf()
         action = request.form.get("action")
