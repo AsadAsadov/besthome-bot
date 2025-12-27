@@ -3,141 +3,231 @@
 <div class="header">
   <h1>İstifadəçilər</h1>
 </div>
-<form method="get" class="card">
-  <label>chat_id ilə axtar</label>
-  <input type="number" name="chat_id" value="{{ request.args.get('chat_id') or request.form.get('chat_id','') }}" />
-  <button type="submit">Axtar</button>
-</form>
 
-<form method="get" class="card inline">
-  <div>
-    <label>Status filtr</label>
-    <select name="status">
-      <option value="all" {% if status_filter == 'all' %}selected{% endif %}>Hamısı</option>
-      <option value="active" {% if status_filter == 'active' %}selected{% endif %}>Aktiv</option>
-      <option value="expired" {% if status_filter == 'expired' %}selected{% endif %}>Bitmiş</option>
-      <option value="blocked" {% if status_filter == 'blocked' %}selected{% endif %}>Bloklu</option>
-      <option value="pending" {% if status_filter == 'pending' %}selected{% endif %}>Təsdiqlənməyən</option>
-    </select>
-  </div>
-  <div>
-    <label>Səhifə ölçüsü</label>
-    <input type="number" name="page_size" min="1" max="200" value="{{ page_size }}" />
-  </div>
-  <button type="submit">Tətbiq et</button>
-</form>
+<div class="card" id="filter-bar">
+  <form method="get" class="inline" id="filters-form" style="gap:12px; flex-wrap: wrap; align-items: flex-end;">
+    <div class="field">
+      <label>🔍 Axtar (chat_id / username / ad)</label>
+      <input type="text" name="search" placeholder="chat_id, @username və ya ad" value="{{ search_query }}" />
+    </div>
+    <div class="field">
+      <label>📊 Status</label>
+      <select name="status">
+        <option value="all" {% if status_filter == 'all' %}selected{% endif %}>Hamısı</option>
+        <option value="active" {% if status_filter == 'active' %}selected{% endif %}>Aktiv</option>
+        <option value="expired" {% if status_filter == 'expired' %}selected{% endif %}>Bitmiş</option>
+        <option value="demo" {% if status_filter == 'demo' %}selected{% endif %}>Demo</option>
+        <option value="blocked" {% if status_filter == 'blocked' %}selected{% endif %}>Bloklu</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>⏱ Bitmə intervalı</label>
+      <select name="expiry">
+        <option value="" {% if not expiry_filter %}selected{% endif %}>Hamısı</option>
+        <option value="today" {% if expiry_filter == 'today' %}selected{% endif %}>Bu gün bitən</option>
+        <option value="1d" {% if expiry_filter == '1d' %}selected{% endif %}>1 günə bitəcək</option>
+        <option value="3d" {% if expiry_filter == '3d' %}selected{% endif %}>3 günə bitəcək</option>
+        <option value="7d" {% if expiry_filter == '7d' %}selected{% endif %}>7 günə bitəcək</option>
+        <option value="30d" {% if expiry_filter == '30d' %}selected{% endif %}>30 günə bitəcək</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Səhifə ölçüsü</label>
+      <input type="number" name="page_size" min="1" max="200" value="{{ page_size }}" />
+    </div>
+    <button type="submit">Tətbiq et</button>
+  </form>
+</div>
 
-<form method="post" class="card">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-  <input type="hidden" name="action" value="bulk_extend" />
-  <input type="hidden" name="status" value="{{ status_filter }}" />
-  <div class="inline" style="justify-content: space-between; align-items: center;">
-    <h3>Aktiv istifadəçi siyahısı</h3>
-    <div>Toplam: {{ total_users }} | Səhifə {{ current_page }} / {{ total_pages }}</div>
+<div class="card" id="users-card">
+  <div class="inline" style="justify-content: space-between; align-items: center; gap:12px; flex-wrap: wrap;">
+    <div id="users-count">Toplam: {{ total_users }} | Səhifə {{ current_page }} / {{ total_pages }}</div>
+    <div class="inline" style="gap:8px;">
+      {% if current_page > 1 %}
+        <a class="link" href="{{ url_for('admin.users', page=current_page-1, page_size=page_size, status=status_filter, search=search_query, expiry=expiry_filter) }}">◀️ Əvvəlki</a>
+      {% endif %}
+      {% if current_page < total_pages %}
+        <a class="link" href="{{ url_for('admin.users', page=current_page+1, page_size=page_size, status=status_filter, search=search_query, expiry=expiry_filter) }}">▶️ Növbəti</a>
+      {% endif %}
+    </div>
   </div>
-  <div style="overflow-x:auto;">
-    <table>
+  <div style="overflow-x:auto; margin-top: 12px;">
+    <table id="users-table">
       <thead>
         <tr>
-          <th></th>
+          <th style="width:32px;"><input type="checkbox" id="select-all" /></th>
           <th>chat_id</th>
           <th>Ad</th>
+          <th>Username</th>
           <th>Status</th>
-          <th>Bitmə</th>
-          <th>Blok</th>
+          <th>Bitmə tarixi</th>
           <th>Təsdiq</th>
+          <th>Blok</th>
         </tr>
       </thead>
-      <tbody>
+      <tbody id="users-body">
         {% for u in users_page %}
-        <tr>
-          <td><input type="checkbox" name="selected_users" value="{{ u.chat_id }}" /></td>
+        <tr data-chat-id="{{ u.chat_id }}">
+          <td><input type="checkbox" class="user-select" value="{{ u.chat_id }}" /></td>
           <td>{{ u.chat_id }}</td>
-          <td>{{ u.full_name or u.username or '-' }}</td>
-          <td>
-            {% if u.computed_status == 'active' %}Aktiv{% elif u.computed_status == 'expired' %}Bitmiş{% elif u.computed_status == 'blocked' %}Bloklu{% elif u.computed_status == 'pending' %}Təsdiqlənməyib{% else %}-{% endif %}
-          </td>
-          <td>{{ u.effective_until or u.paid_until or u.demo_end_at or u.demo_expires_at or '—' }}</td>
-          <td>{{ 'Bəli' if u.blocked else 'Xeyr' }}</td>
-          <td>{{ 'Bəli' if u.approved else 'Xeyr' }}</td>
+          <td>{{ u.full_name or '-' }}</td>
+          <td>{{ u.username or '-' }}</td>
+          <td>{{ u.computed_status or '-' }}</td>
+          <td>{{ u.effective_until or '—' }}</td>
+          <td>{{ '✅' if u.approved else '✖️' }}</td>
+          <td>{{ '🚫' if u.blocked else '—' }}</td>
         </tr>
         {% endfor %}
         {% if not users_page %}
-        <tr><td colspan="7">İstifadəçi tapılmadı</td></tr>
+        <tr><td colspan="8">İstifadəçi tapılmadı</td></tr>
         {% endif %}
       </tbody>
     </table>
   </div>
-  <div class="inline" style="margin-top: 12px; align-items: center;">
-    <label style="margin:0;">Gün sayını daxil edin:</label>
-    <input type="number" name="days" placeholder="Gün sayı" min="1" required />
-    <button type="submit">Seçilənləri uzat</button>
-  </div>
-  <div class="inline" style="margin-top: 12px;">
-    {% if current_page > 1 %}
-    <a class="link" href="{{ url_for('admin.users', page=current_page-1, page_size=page_size, status=status_filter) }}">◀️ Əvvəlki</a>
-    {% endif %}
-    <a class="link" href="{{ url_for('admin.users', page=current_page+1 if current_page < total_pages else total_pages, page_size=page_size, status=status_filter) }}">▶️ Növbəti</a>
-  </div>
-</form>
+</div>
 
-{% if message %}<div class="message">{{ message }}</div>{% endif %}
-{% if error %}<div class="error">{{ error }}</div>{% endif %}
-
-{% if user %}
-  <div class="card">
-    <div><strong>chat_id:</strong> {{ user.chat_id }}</div>
-    <div><strong>Username:</strong> {{ user.username or '-' }}</div>
-    <div><strong>Ad:</strong> {{ user.full_name or '-' }}</div>
-    <div><strong>Status:</strong> {{ status }}</div>
-    <div><strong>Təsdiq:</strong> {{ 'Bəli' if user.approved else 'Xeyr' }}</div>
-    <div><strong>Bitmə tarixi:</strong> {{ effective if effective else '—' }}</div>
-    <div><strong>Paid until:</strong> {{ user.paid_until or '—' }}</div>
-    <div><strong>Demo:</strong> {{ user.demo_end_at or user.demo_expires_at or '—' }}</div>
-    <div><strong>Bloklu:</strong> {{ 'Bəli' if user.blocked else 'Xeyr' }}</div>
-  </div>
-
-  <div class="card actions">
-    <h3>Müddət uzat</h3>
-    <form method="post">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-      <input type="hidden" name="chat_id" value="{{ user.chat_id }}" />
-      <input type="hidden" name="action" value="extend" />
-      <div class="quick-buttons">
-        {% for days in [1,7,15,30] %}
-          <button type="submit" name="days" value="{{ days }}">+{{ days }} gün</button>
-        {% endfor %}
-      </div>
-      <div class="inline">
-        <input type="number" name="days" placeholder="Gün sayı" min="1" />
-        <button type="submit">Təsdiq</button>
-      </div>
-    </form>
-
-    <h3>İdarəetmə</h3>
-    <div class="quick-buttons">
-      <form method="post">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-        <input type="hidden" name="chat_id" value="{{ user.chat_id }}" />
-        <input type="hidden" name="action" value="approve" />
-        <button type="submit">Təsdiqlə</button>
-      </form>
-      {% if not user.blocked %}
-      <form method="post">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-        <input type="hidden" name="chat_id" value="{{ user.chat_id }}" />
-        <input type="hidden" name="action" value="block" />
-        <button type="submit" class="danger">Blokla</button>
-      </form>
-      {% else %}
-      <form method="post">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-        <input type="hidden" name="chat_id" value="{{ user.chat_id }}" />
-        <input type="hidden" name="action" value="unblock" />
-        <button type="submit">Blokdan çıxar</button>
-      </form>
-      {% endif %}
+<div id="bulk-actions" class="card" style="display:none; position: sticky; bottom: 12px; z-index:10;">
+  <div class="inline" style="justify-content: space-between; gap:12px; flex-wrap: wrap; align-items: center;">
+    <div class="inline" style="gap:8px; flex-wrap: wrap; align-items: center;">
+      <strong>Seçilənlərə uzatma:</strong>
+      {% for d in [1,7,15,30] %}
+        <button type="button" class="extend-btn" data-days="{{ d }}">+{{ d }} gün</button>
+      {% endfor %}
+      <input type="number" id="custom-days" placeholder="Gün" min="1" style="width:90px;" />
+      <button type="button" id="extend-custom">Uzat</button>
+    </div>
+    <div class="inline" style="gap:8px; flex-wrap: wrap; align-items: center;">
+      <button type="button" class="action-btn" data-action="approve">✅ Təsdiqlə</button>
+      <button type="button" class="action-btn" data-action="block">🚫 Blokla</button>
+      <button type="button" class="action-btn" data-action="unblock">♻️ Blokdan çıxar</button>
     </div>
   </div>
-{% endif %}
+</div>
+
+<div id="toast" style="display:none; position: fixed; right: 12px; bottom: 12px; padding: 10px 14px; border-radius: 6px; background:#111; color:#fff; box-shadow: 0 4px 8px rgba(0,0,0,0.15);"></div>
+
+<script>
+  const csrfToken = "{{ csrf_token }}";
+  const selected = new Set();
+  const bulkBar = document.getElementById('bulk-actions');
+  const selectAll = document.getElementById('select-all');
+  const toast = document.getElementById('toast');
+
+  function showToast(message, isError=false) {
+    toast.textContent = message;
+    toast.style.background = isError ? '#b00020' : '#111';
+    toast.style.display = 'block';
+    setTimeout(() => { toast.style.display = 'none'; }, 2500);
+  }
+
+  function syncBulkBar() {
+    bulkBar.style.display = selected.size > 0 ? 'block' : 'none';
+    if (selectAll) {
+      const checkboxes = document.querySelectorAll('.user-select');
+      selectAll.checked = selected.size > 0 && selected.size === checkboxes.length;
+    }
+  }
+
+  function bindRowSelections() {
+    document.querySelectorAll('.user-select').forEach(cb => {
+      cb.addEventListener('change', (e) => {
+        const id = parseInt(e.target.value, 10);
+        if (e.target.checked) {
+          selected.add(id);
+        } else {
+          selected.delete(id);
+        }
+        syncBulkBar();
+      });
+    });
+  }
+
+  function refreshTable() {
+    fetch(window.location.href, { headers: { 'X-Requested-With': 'fetch' }})
+      .then(r => r.text())
+      .then(html => {
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const newBody = doc.querySelector('#users-body');
+        const newCount = doc.querySelector('#users-count');
+        if (newBody) {
+          document.querySelector('#users-body').replaceWith(newBody);
+        }
+        if (newCount) {
+          document.querySelector('#users-count').replaceWith(newCount);
+        }
+        selected.clear();
+        bindRowSelections();
+        syncBulkBar();
+      })
+      .catch(() => showToast('Cədvəl yenilənmədi', true));
+  }
+
+  function performBulk(action, days) {
+    const payload = { action, csrf_token: csrfToken, chat_ids: Array.from(selected) };
+    if (action === 'extend') {
+      payload.days = days;
+    }
+    fetch('{{ url_for('admin.users_bulk_action') }}', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    .then(r => r.json())
+    .then(data => {
+      if (data.ok) {
+        showToast(data.message || 'Uğurlu əməliyyat');
+        refreshTable();
+      } else {
+        showToast(data.message || 'Xəta baş verdi', true);
+      }
+    })
+    .catch(() => showToast('Şəbəkə xətası', true));
+  }
+
+  document.querySelectorAll('.extend-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const days = parseInt(btn.dataset.days, 10);
+      if (selected.size && days > 0) {
+        performBulk('extend', days);
+      }
+    });
+  });
+
+  document.getElementById('extend-custom').addEventListener('click', () => {
+    const days = parseInt(document.getElementById('custom-days').value, 10);
+    if (selected.size && days > 0) {
+      performBulk('extend', days);
+    } else {
+      showToast('Gün daxil edin', true);
+    }
+  });
+
+  document.querySelectorAll('.action-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const action = btn.dataset.action;
+      if (selected.size === 0) {
+        showToast('İstifadəçi seçin', true);
+        return;
+      }
+      performBulk(action);
+    });
+  });
+
+  if (selectAll) {
+    selectAll.addEventListener('change', (e) => {
+      document.querySelectorAll('.user-select').forEach(cb => {
+        cb.checked = e.target.checked;
+        const id = parseInt(cb.value, 10);
+        if (e.target.checked) {
+          selected.add(id);
+        } else {
+          selected.delete(id);
+        }
+      });
+      syncBulkBar();
+    });
+  }
+
+  bindRowSelections();
+</script>
 {% endblock %}
