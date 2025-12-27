@@ -3489,6 +3489,30 @@ def build_today_clause(column: Optional[str]):
     )
 
 
+def build_date_range_clause(column: Optional[str], date_days: Optional[Union[int, str]]):
+    """Return SQL snippet for date filtering using SQLite's datetime semantics."""
+
+    if not column or date_days in (None, "all"):
+        return "", []
+
+    now = datetime.utcnow()
+    if date_days == "today":
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start.replace(hour=23, minute=59, second=59, microsecond=999999)
+    else:
+        try:
+            days_int = int(date_days)
+        except Exception:
+            return "", []
+        start = now - timedelta(days=days_int)
+        end = now
+
+    return (
+        f" AND datetime({column}) BETWEEN datetime(?) AND datetime(?)",
+        [format_sqlite_datetime(start), format_sqlite_datetime(end)],
+    )
+
+
 def attach_local_db(conn) -> bool:
     try:
         conn.execute("ATTACH DATABASE ? AS local_db", (LOCAL_DB,))
@@ -10217,7 +10241,12 @@ def query_structured_results(filters: dict, offset: int = 0, limit: int = None):
         flt, params = build_filters_sql(
             op_code, prop_code, None, min_price=min_p, max_price=max_p, mode="main"
         )
-        cur.execute(base + flt + " ORDER BY date_read DESC, id DESC", params)
+        date_col = detect_table_date_column(cur, "listings")
+        date_sql, date_params = build_date_range_clause(date_col, date_days)
+        cur.execute(
+            base + flt + date_sql + " ORDER BY date_read DESC, id DESC",
+            params + date_params,
+        )
         for r in cur.fetchall():
             d = dict(r)
             d["__source"] = "main"
@@ -10230,7 +10259,12 @@ def query_structured_results(filters: dict, offset: int = 0, limit: int = None):
     flt, params = build_filters_sql(
         op_code, prop_code, None, min_price=min_p, max_price=max_p, mode="local"
     )
-    cur.execute(base + flt + " ORDER BY date_added DESC, id DESC", params)
+    date_col = detect_table_date_column(cur, "listings_approved")
+    date_sql, date_params = build_date_range_clause(date_col, date_days)
+    cur.execute(
+        base + flt + date_sql + " ORDER BY date_added DESC, id DESC",
+        params + date_params,
+    )
     for r in cur.fetchall():
         d = dict(r)
         d["__source"] = "local"
@@ -18223,7 +18257,12 @@ def create_flask_app():
                 flt, params = build_filters_sql(
                     filters.get("op"), filters.get("prop"), None, min_price, max_price, mode="main"
                 )
-                cur.execute(base + flt + " ORDER BY date_read DESC, id DESC", params)
+                date_col = detect_table_date_column(cur, "listings")
+                date_sql, date_params = build_date_range_clause(date_col, date_days)
+                cur.execute(
+                    base + flt + date_sql + " ORDER BY date_read DESC, id DESC",
+                    params + date_params,
+                )
                 for r in cur.fetchall():
                     d = dict(r)
                     d["__source"] = "main"
@@ -18236,7 +18275,12 @@ def create_flask_app():
             flt, params = build_filters_sql(
                 filters.get("op"), filters.get("prop"), None, min_price, max_price, mode="local"
             )
-            cur.execute(base + flt + " ORDER BY date_added DESC, id DESC", params)
+            date_col = detect_table_date_column(cur, "listings_approved")
+            date_sql, date_params = build_date_range_clause(date_col, date_days)
+            cur.execute(
+                base + flt + date_sql + " ORDER BY date_added DESC, id DESC",
+                params + date_params,
+            )
             for r in cur.fetchall():
                 d = dict(r)
                 d["__source"] = "local"

@@ -17,6 +17,7 @@ from .services import (
     compute_user_status,
     delete_keyword,
     extend_user,
+    extend_users_bulk,
     fetch_subscription,
     fetch_user,
     list_keyword_alerts,
@@ -123,13 +124,17 @@ def dashboard():
 @admin_bp.route("/users", methods=["GET", "POST"])
 @admin_login_required
 def users():
-    message: Optional[str] = None
-    error: Optional[str] = None
+    message: Optional[str] = session.pop("admin_message", None)
+    error: Optional[str] = session.pop("admin_error", None)
     user_row = None
     sub_row = None
     status = None
     effective = None
     chat_id_param = request.args.get("chat_id") or request.form.get("chat_id")
+    status_filter = (request.args.get("status") or request.form.get("status") or "all").lower()
+    if status_filter not in {"all", "active", "expired", "blocked", "pending"}:
+        status_filter = "all"
+
     page = request.args.get("page") or "1"
     page_size = request.args.get("page_size") or "50"
 
@@ -145,11 +150,31 @@ def users():
     if request.method == "POST":
         require_csrf()
         action = request.form.get("action")
+
         try:
             chat_id = int(request.form.get("chat_id", "0"))
         except ValueError:
             chat_id = None
-        if not chat_id:
+
+        if action == "bulk_extend":
+            try:
+                days = int(request.form.get("days", "0"))
+            except ValueError:
+                days = 0
+            selected_ids: list[int] = []
+            for raw_id in request.form.getlist("selected_users"):
+                try:
+                    selected_ids.append(int(raw_id))
+                except (TypeError, ValueError):
+                    continue
+            updated = extend_users_bulk(_get_admin_db(), selected_ids, days)
+            if updated:
+                message = f"Seçilmiş {updated} istifadəçinin müddəti {days} gün uzadıldı"
+                logger.info("Admin bulk extended users ids=%s days=%s", selected_ids, days)
+                _invalidate_dashboard_cache()
+            else:
+                error = "Seçilmiş istifadəçilər tapılmadı və ya gün düzgün deyil"
+        elif not chat_id:
             error = "chat_id tələb olunur"
         elif action == "extend":
             try:
@@ -188,7 +213,21 @@ def users():
                 error = "Təsdiqləmə mümkün olmadı"
         else:
             error = "Naməlum əməliyyat"
-        chat_id_param = chat_id
+
+        session["admin_message"] = message
+        session["admin_error"] = error
+
+        # Preserve filters when redirecting back to the same page
+        redirect_params = {
+            "chat_id": chat_id_param or chat_id,
+            "page": page_int,
+            "page_size": page_size_int,
+            "status": status_filter,
+        }
+        try:
+            return redirect(request.referrer or url_for("admin.users", **{k: v for k, v in redirect_params.items() if v}))
+        except Exception:
+            return redirect(url_for("admin.users", **{k: v for k, v in redirect_params.items() if v}))
 
     if chat_id_param:
         try:
@@ -200,7 +239,9 @@ def users():
         except ValueError:
             error = "chat_id düzgün deyil"
 
-    users_page, total_users = list_users_paginated(_get_admin_db(), page_int, page_size_int)
+    users_page, total_users = list_users_paginated(
+        _get_admin_db(), page_int, page_size_int, status_filter
+    )
     total_pages = max(1, math.ceil(total_users / page_size_int)) if total_users else 1
 
     return render_template(
@@ -214,8 +255,10 @@ def users():
         csrf_token=session.get("csrf_token"),
         users_page=users_page,
         total_pages=total_pages,
+        total_users=total_users,
         current_page=page_int,
         page_size=page_size_int,
+        status_filter=status_filter,
     )
 
 

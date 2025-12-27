@@ -11,6 +11,7 @@ class AdminDatabase:
     def __init__(self, data_dir: str):
         self.local_db = os.path.join(data_dir, "local_data.db")
         self.main_db = os.path.join(data_dir, "besthome.db")
+        self._indexes_created = False
 
     def _connect(self, path: str) -> sqlite3.Connection:
         conn = sqlite3.connect(path)
@@ -22,6 +23,26 @@ class AdminDatabase:
 
     def main_conn(self) -> sqlite3.Connection:
         return self._connect(self.main_db)
+
+    def ensure_user_indexes(self):
+        """Ensure lookup-heavy columns are indexed for faster admin queries."""
+        if self._indexes_created:
+            return
+        conn = self.local_conn()
+        try:
+            cur = conn.cursor()
+            # Indexes used by admin filters/status calculations
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_users_approved ON users(approved)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_users_blocked ON users(blocked)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_users_paid_until ON users(paid_until)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_users_demo_end_at ON users(demo_end_at)")
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_users_demo_expires_at ON users(demo_expires_at)"
+            )
+            conn.commit()
+            self._indexes_created = True
+        finally:
+            conn.close()
 
     def table_exists(self, conn: sqlite3.Connection, name: str) -> bool:
         cur = conn.execute(
@@ -178,6 +199,51 @@ def extend_user(db: AdminDatabase, chat_id: int, days: int) -> Optional[datetime
         conn.close()
 
 
+def extend_users_bulk(db: AdminDatabase, chat_ids: List[int], days: int) -> int:
+    """Extend multiple users at once using set-based SQL operations."""
+
+    normalized_ids = [uid for uid in chat_ids if isinstance(uid, int) and uid > 0]
+    if days <= 0 or not normalized_ids:
+        return 0
+
+    placeholders = ",".join(["?"] * len(normalized_ids))
+    extension = f"+{days} days"
+    base_expr = (
+        "MAX(datetime(COALESCE(paid_until, demo_end_at, demo_expires_at, datetime('now'))),"
+        " datetime('now'))"
+    )
+    conn = db.local_conn()
+    try:
+        # Update users table in one pass
+        conn.execute(
+            f"""
+            UPDATE users
+            SET paid_until = datetime({base_expr}, ?), blocked=0
+            WHERE chat_id IN ({placeholders})
+            """,
+            [extension, *normalized_ids],
+        )
+
+        # Keep subscriptions table consistent for the same users
+        conn.execute(
+            f"""
+            INSERT INTO subscriptions (chat_id, expires_at, is_active, is_demo, plan, last_payment_note)
+            SELECT chat_id, datetime({base_expr}, ?), 1, 0, 'admin_panel', 'bulk_extend'
+            FROM users WHERE chat_id IN ({placeholders})
+            ON CONFLICT(chat_id) DO UPDATE SET
+                expires_at=excluded.expires_at,
+                is_active=1,
+                is_demo=0,
+                last_payment_note=excluded.last_payment_note
+            """,
+            [extension, *normalized_ids],
+        )
+        conn.commit()
+        return len(normalized_ids)
+    finally:
+        conn.close()
+
+
 def block_user(db: AdminDatabase, chat_id: int, blocked: bool) -> bool:
     conn = db.local_conn()
     try:
@@ -244,24 +310,73 @@ def delete_keyword(db: AdminDatabase, alert_id: int) -> bool:
 
 
 def list_users_paginated(
-    db: AdminDatabase, page: int, page_size: int = 50
+    db: AdminDatabase, page: int, page_size: int = 50, status: str = "all"
 ) -> Tuple[list, int]:
+    """
+    Fetch paginated users using SQL-side filtering only.
+
+    The query limits the selected columns to those displayed in the admin UI
+    to avoid unnecessary data transfer. Filtering for "active" and "expired"
+    happens in SQLite so we don't iterate over the whole table in Python.
+    """
+
     page = max(page, 1)
     page_size = max(page_size, 1)
     offset = (page - 1) * page_size
+    db.ensure_user_indexes()
+
+    # Build status-aware predicates inside SQL for performance
+    now_expr = "datetime('now')"
+    effective_expr = (
+        "MAX(datetime(paid_until), datetime(demo_end_at), datetime(demo_expires_at))"
+    )
+    status_expr = (
+        "CASE "
+        " WHEN blocked=1 THEN 'blocked'"
+        " WHEN approved=0 THEN 'pending'"
+        " WHEN {eff} IS NULL THEN 'unknown'"
+        " WHEN datetime({eff}) > {now} THEN 'active'"
+        " ELSE 'expired' END"
+    ).format(eff=effective_expr, now=now_expr)
+    status_clause = ""
+    params: List = []
+
+    if status == "active":
+        status_clause = (
+            f" AND blocked=0 AND approved=1 AND {effective_expr} IS NOT NULL "
+            f"AND datetime({effective_expr}) > {now_expr}"
+        )
+    elif status == "expired":
+        status_clause = (
+            f" AND blocked=0 AND approved=1 AND {effective_expr} IS NOT NULL "
+            f"AND datetime({effective_expr}) <= {now_expr}"
+        )
+    elif status == "blocked":
+        status_clause = " AND blocked=1"
+    elif status == "pending":
+        status_clause = " AND approved=0"
+
     conn = db.local_conn()
     try:
-        rows = conn.execute(
-            """
-            SELECT chat_id, username, full_name, approved, blocked,
-                   paid_until, demo_end_at, demo_expires_at
+        base_query = f"""
             FROM users
-            ORDER BY chat_id DESC
+            WHERE 1=1
+            {status_clause}
+        """
+        select_sql = f"""
+            SELECT
+                chat_id, username, full_name, approved, blocked,
+                paid_until, demo_end_at, demo_expires_at,
+                {effective_expr} AS effective_until,
+                {status_expr} AS computed_status
+            {base_query}
+            ORDER BY effective_until DESC, chat_id DESC
             LIMIT ? OFFSET ?
-            """,
-            (page_size, offset),
-        ).fetchall()
-        total_row = conn.execute("SELECT COUNT(*) as cnt FROM users").fetchone() or {}
+        """
+        rows = conn.execute(select_sql, params + [page_size, offset]).fetchall()
+
+        total_sql = f"SELECT COUNT(*) as cnt {base_query}"
+        total_row = conn.execute(total_sql, params).fetchone() or {}
         total = int(total_row.get("cnt") or 0)
         return rows, total
     finally:
