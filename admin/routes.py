@@ -5,24 +5,22 @@ import secrets
 from datetime import datetime, timedelta
 from typing import Optional
 
-from flask import abort, redirect, render_template, request, session, url_for
+from flask import abort, jsonify, redirect, render_template, request, session, url_for
 
 from . import admin_bp
 from .auth import admin_login_required, authenticate, load_admin_credentials
 from .services import (
     AdminDatabase,
-    approve_user,
-    block_user,
+    approve_users,
+    count_users_filtered,
     compute_dashboard_counts,
-    compute_user_status,
     delete_keyword,
-    extend_user,
     extend_users_bulk,
-    fetch_subscription,
-    fetch_user,
-    list_keyword_alerts,
     list_users_paginated,
+    list_keyword_alerts,
+    log_admin_action,
     toggle_keyword,
+    update_block_state,
 )
 
 logger = logging.getLogger("admin_panel")
@@ -121,137 +119,42 @@ def dashboard():
     return render_template("dashboard.html", stats=stats)
 
 
-@admin_bp.route("/users", methods=["GET", "POST"])
+@admin_bp.route("/users", methods=["GET"])
 @admin_login_required
 def users():
-    message: Optional[str] = session.pop("admin_message", None)
-    error: Optional[str] = session.pop("admin_error", None)
-    user_row = None
-    sub_row = None
-    status = None
-    effective = None
-    chat_id_param = request.args.get("chat_id") or request.form.get("chat_id")
-    status_filter = (request.args.get("status") or request.form.get("status") or "all").lower()
-    if status_filter not in {"all", "active", "expired", "blocked", "pending"}:
+    status_filter = (request.args.get("status") or "all").lower()
+    if status_filter not in {"all", "active", "expired", "demo", "blocked"}:
         status_filter = "all"
 
-    page = request.args.get("page") or "1"
-    page_size = request.args.get("page_size") or "50"
+    expiry_filter = request.args.get("expiry") or ""
+    if expiry_filter not in {"today", "1d", "3d", "7d", "30d"}:
+        expiry_filter = ""
+
+    search_query = (request.args.get("search") or "").strip()
 
     try:
-        page_int = max(int(page), 1)
+        page_int = max(int(request.args.get("page", "1")), 1)
     except ValueError:
         page_int = 1
     try:
-        page_size_int = max(min(int(page_size), 200), 1)
+        page_size_int = max(min(int(request.args.get("page_size", "50")), 200), 1)
     except ValueError:
         page_size_int = 50
 
-    if request.method == "POST":
-        require_csrf()
-        action = request.form.get("action")
-
-        try:
-            chat_id = int(request.form.get("chat_id", "0"))
-        except ValueError:
-            chat_id = None
-
-        if action == "bulk_extend":
-            try:
-                days = int(request.form.get("days", "0"))
-            except ValueError:
-                days = 0
-            selected_ids: list[int] = []
-            for raw_id in request.form.getlist("selected_users"):
-                try:
-                    selected_ids.append(int(raw_id))
-                except (TypeError, ValueError):
-                    continue
-            updated = extend_users_bulk(_get_admin_db(), selected_ids, days)
-            if updated:
-                message = f"Seçilmiş {updated} istifadəçinin müddəti {days} gün uzadıldı"
-                logger.info("Admin bulk extended users ids=%s days=%s", selected_ids, days)
-                _invalidate_dashboard_cache()
-            else:
-                error = "Seçilmiş istifadəçilər tapılmadı və ya gün düzgün deyil"
-        elif not chat_id:
-            error = "chat_id tələb olunur"
-        elif action == "extend":
-            try:
-                days = int(request.form.get("days", "0"))
-            except ValueError:
-                days = 0
-            new_exp = extend_user(_get_admin_db(), chat_id, days)
-            if new_exp:
-                message = (
-                    f"İstifadəçinin müddəti {days} gün uzadıldı. Yeni tarix: {new_exp:%Y-%m-%d %H:%M}"
-                )
-                logger.info("Admin extended user chat_id=%s days=%s", chat_id, days)
-                _invalidate_dashboard_cache()
-            else:
-                error = "İstifadəçi tapılmadı və ya müddət uzadıla bilmədi"
-        elif action == "block":
-            if block_user(_get_admin_db(), chat_id, True):
-                message = "İstifadəçi bloklandı"
-                logger.info("Admin blocked user chat_id=%s", chat_id)
-                _invalidate_dashboard_cache()
-            else:
-                error = "Bloklama mümkün olmadı"
-        elif action == "unblock":
-            if block_user(_get_admin_db(), chat_id, False):
-                message = "İstifadəçi blokdan çıxarıldı"
-                logger.info("Admin unblocked user chat_id=%s", chat_id)
-                _invalidate_dashboard_cache()
-            else:
-                error = "Blokdan çıxarma mümkün olmadı"
-        elif action == "approve":
-            if approve_user(_get_admin_db(), chat_id):
-                message = "İstifadəçi təsdiqləndi"
-                logger.info("Admin approved user chat_id=%s", chat_id)
-                _invalidate_dashboard_cache()
-            else:
-                error = "Təsdiqləmə mümkün olmadı"
-        else:
-            error = "Naməlum əməliyyat"
-
-        session["admin_message"] = message
-        session["admin_error"] = error
-
-        # Preserve filters when redirecting back to the same page
-        redirect_params = {
-            "chat_id": chat_id_param or chat_id,
-            "page": page_int,
-            "page_size": page_size_int,
-            "status": status_filter,
-        }
-        try:
-            return redirect(request.referrer or url_for("admin.users", **{k: v for k, v in redirect_params.items() if v}))
-        except Exception:
-            return redirect(url_for("admin.users", **{k: v for k, v in redirect_params.items() if v}))
-
-    if chat_id_param:
-        try:
-            chat_id_int = int(chat_id_param)
-            user_row = fetch_user(_get_admin_db(), chat_id_int)
-            sub_row = fetch_subscription(_get_admin_db(), chat_id_int)
-            if user_row:
-                status, effective = compute_user_status(user_row, sub_row)
-        except ValueError:
-            error = "chat_id düzgün deyil"
-
-    users_page, total_users = list_users_paginated(
-        _get_admin_db(), page_int, page_size_int, status_filter
+    db = _get_admin_db()
+    users_page = list_users_paginated(
+        db,
+        page_int,
+        page_size_int,
+        status_filter,
+        search_query,
+        expiry_filter,
     )
+    total_users = count_users_filtered(db, status_filter, search_query, expiry_filter)
     total_pages = max(1, math.ceil(total_users / page_size_int)) if total_users else 1
 
     return render_template(
         "users.html",
-        user=user_row,
-        subscription=sub_row,
-        status=status,
-        effective=effective,
-        message=message,
-        error=error,
         csrf_token=session.get("csrf_token"),
         users_page=users_page,
         total_pages=total_pages,
@@ -259,7 +162,53 @@ def users():
         current_page=page_int,
         page_size=page_size_int,
         status_filter=status_filter,
+        search_query=search_query,
+        expiry_filter=expiry_filter,
     )
+
+
+@admin_bp.route("/users/bulk", methods=["POST"])
+@admin_login_required
+def users_bulk_action():
+    require_csrf()
+    payload = request.get_json(silent=True) or request.form
+    action = (payload.get("action") or "").lower()
+    try:
+        chat_ids = [int(cid) for cid in payload.get("chat_ids", []) if int(cid) > 0]
+    except Exception:
+        chat_ids = []
+
+    db = _get_admin_db()
+    updated = 0
+    message = ""
+
+    if action == "extend":
+        try:
+            days = int(payload.get("days", 0))
+        except (TypeError, ValueError):
+            days = 0
+        if days > 0:
+            updated = extend_users_bulk(db, chat_ids, days)
+            message = f"{updated} istifadəçi üçün {days} gün əlavə edildi" if updated else "İstifadəçi tapılmadı"
+    elif action == "approve":
+        updated = approve_users(db, chat_ids)
+        message = f"{updated} istifadəçi təsdiqləndi" if updated else "Təsdiqlənəcək istifadəçi tapılmadı"
+    elif action == "block":
+        updated = update_block_state(db, chat_ids, True)
+        message = f"{updated} istifadəçi bloklandı" if updated else "Bloklanacaq istifadəçi tapılmadı"
+    elif action == "unblock":
+        updated = update_block_state(db, chat_ids, False)
+        message = f"{updated} istifadəçi blokdan çıxarıldı" if updated else "Heç kim blokdan çıxarılmadı"
+    else:
+        return jsonify({"ok": False, "message": "Naməlum əməliyyat"}), 400
+
+    if updated:
+        admin_username = session.get("admin_username") or "unknown"
+        log_admin_action(db, admin_username, action, updated)
+        _invalidate_dashboard_cache()
+        logger.info("Admin bulk action action=%s count=%s ids=%s", action, updated, chat_ids)
+
+    return jsonify({"ok": updated > 0, "updated": updated, "message": message})
 
 
 @admin_bp.route("/keywords", methods=["GET", "POST"])

@@ -2,7 +2,7 @@ import logging
 import os
 import sqlite3
 from datetime import datetime, timedelta
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List, Sequence
 
 logger = logging.getLogger("admin_panel")
 
@@ -32,12 +32,19 @@ class AdminDatabase:
         try:
             cur = conn.cursor()
             # Indexes used by admin filters/status calculations
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_users_chat_id ON users(chat_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_users_approved ON users(approved)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_users_blocked ON users(blocked)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_users_paid_until ON users(paid_until)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_users_demo_end_at ON users(demo_end_at)")
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_users_demo_expires_at ON users(demo_expires_at)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_subscriptions_chat_id ON subscriptions(chat_id)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_subscriptions_expires_at ON subscriptions(expires_at)"
             )
             conn.commit()
             self._indexes_created = True
@@ -163,6 +170,31 @@ def compute_user_status(user_row: sqlite3.Row, sub_row: Optional[sqlite3.Row]) -
     return "expired", effective
 
 
+def log_admin_action(db: AdminDatabase, username: str, action: str, count: int) -> None:
+    """Persist admin operations for auditing."""
+
+    conn = db.local_conn()
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS admin_action_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL,
+                action TEXT NOT NULL,
+                affected_count INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO admin_action_log (username, action, affected_count) VALUES (?, ?, ?)",
+            (username, action, count),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def extend_user(db: AdminDatabase, chat_id: int, days: int) -> Optional[datetime]:
     if days <= 0:
         return None
@@ -199,7 +231,7 @@ def extend_user(db: AdminDatabase, chat_id: int, days: int) -> Optional[datetime
         conn.close()
 
 
-def extend_users_bulk(db: AdminDatabase, chat_ids: List[int], days: int) -> int:
+def extend_users_bulk(db: AdminDatabase, chat_ids: Sequence[int], days: int) -> int:
     """Extend multiple users at once using set-based SQL operations."""
 
     normalized_ids = [uid for uid in chat_ids if isinstance(uid, int) and uid > 0]
@@ -209,12 +241,14 @@ def extend_users_bulk(db: AdminDatabase, chat_ids: List[int], days: int) -> int:
     placeholders = ",".join(["?"] * len(normalized_ids))
     extension = f"+{days} days"
     base_expr = (
-        "MAX(datetime(COALESCE(paid_until, demo_end_at, demo_expires_at, datetime('now'))),"
+        "MAX(datetime(users.paid_until), datetime(users.demo_end_at),"
+        " datetime(users.demo_expires_at),"
+        " (SELECT datetime(MAX(expires_at)) FROM subscriptions WHERE chat_id = users.chat_id),"
         " datetime('now'))"
     )
     conn = db.local_conn()
     try:
-        # Update users table in one pass
+        conn.execute("BEGIN")
         conn.execute(
             f"""
             UPDATE users
@@ -228,8 +262,11 @@ def extend_users_bulk(db: AdminDatabase, chat_ids: List[int], days: int) -> int:
         conn.execute(
             f"""
             INSERT INTO subscriptions (chat_id, expires_at, is_active, is_demo, plan, last_payment_note)
-            SELECT chat_id, datetime({base_expr}, ?), 1, 0, 'admin_panel', 'bulk_extend'
-            FROM users WHERE chat_id IN ({placeholders})
+            SELECT users.chat_id, datetime({base_expr}, ?), 1, 0, 'admin_panel', 'bulk_extend'
+            FROM users
+            LEFT JOIN (SELECT chat_id, MAX(expires_at) as expires_at FROM subscriptions GROUP BY chat_id) s
+                ON s.chat_id = users.chat_id
+            WHERE users.chat_id IN ({placeholders})
             ON CONFLICT(chat_id) DO UPDATE SET
                 expires_at=excluded.expires_at,
                 is_active=1,
@@ -310,74 +347,191 @@ def delete_keyword(db: AdminDatabase, alert_id: int) -> bool:
 
 
 def list_users_paginated(
-    db: AdminDatabase, page: int, page_size: int = 50, status: str = "all"
-) -> Tuple[list, int]:
-    """
-    Fetch paginated users using SQL-side filtering only.
-
-    The query limits the selected columns to those displayed in the admin UI
-    to avoid unnecessary data transfer. Filtering for "active" and "expired"
-    happens in SQLite so we don't iterate over the whole table in Python.
-    """
+    db: AdminDatabase,
+    page: int,
+    page_size: int = 50,
+    status: str = "all",
+    search: str = "",
+    expiry_window: Optional[str] = None,
+) -> list:
+    """Fetch paginated users using SQL-side filtering only."""
 
     page = max(page, 1)
     page_size = max(page_size, 1)
     offset = (page - 1) * page_size
     db.ensure_user_indexes()
 
-    # Build status-aware predicates inside SQL for performance
     now_expr = "datetime('now')"
     effective_expr = (
-        "MAX(datetime(paid_until), datetime(demo_end_at), datetime(demo_expires_at))"
+        "MAX(datetime(u.paid_until), datetime(u.demo_end_at), datetime(u.demo_expires_at),"
+        " datetime(s.expires_at))"
     )
     status_expr = (
         "CASE "
-        " WHEN blocked=1 THEN 'blocked'"
-        " WHEN approved=0 THEN 'pending'"
-        " WHEN {eff} IS NULL THEN 'unknown'"
+        " WHEN u.blocked=1 THEN 'blocked'"
+        " WHEN {eff} IS NULL THEN 'expired'"
+        " WHEN datetime(u.demo_end_at) > {now} OR datetime(u.demo_expires_at) > {now} THEN 'demo'"
         " WHEN datetime({eff}) > {now} THEN 'active'"
         " ELSE 'expired' END"
     ).format(eff=effective_expr, now=now_expr)
-    status_clause = ""
+
+    clauses = ["1=1"]
     params: List = []
 
+    if search:
+        search_term = search.strip()
+        if search_term.isdigit():
+            clauses.append("u.chat_id = ?")
+            params.append(int(search_term))
+        else:
+            like = f"%{search_term}%"
+            clauses.append("(LOWER(u.username) LIKE LOWER(?) OR LOWER(u.full_name) LIKE LOWER(?))")
+            params.extend([like, like])
+
     if status == "active":
-        status_clause = (
-            f" AND blocked=0 AND approved=1 AND {effective_expr} IS NOT NULL "
-            f"AND datetime({effective_expr}) > {now_expr}"
-        )
+        clauses.append(f"u.blocked=0 AND datetime({effective_expr}) > {now_expr}")
     elif status == "expired":
-        status_clause = (
-            f" AND blocked=0 AND approved=1 AND {effective_expr} IS NOT NULL "
-            f"AND datetime({effective_expr}) <= {now_expr}"
+        clauses.append(f"u.blocked=0 AND (datetime({effective_expr}) <= {now_expr} OR {effective_expr} IS NULL)")
+    elif status == "demo":
+        clauses.append(
+            f"u.blocked=0 AND (datetime(u.demo_end_at) > {now_expr} OR datetime(u.demo_expires_at) > {now_expr})"
         )
     elif status == "blocked":
-        status_clause = " AND blocked=1"
-    elif status == "pending":
-        status_clause = " AND approved=0"
+        clauses.append("u.blocked=1")
+
+    if expiry_window:
+        # expiry_window values: today,1d,3d,7d,30d
+        ranges = {
+            "today": ("datetime('now', 'start of day')", "datetime('now', 'start of day', '+1 day')"),
+            "1d": (now_expr, "datetime('now', '+1 day')"),
+            "3d": (now_expr, "datetime('now', '+3 day')"),
+            "7d": (now_expr, "datetime('now', '+7 day')"),
+            "30d": (now_expr, "datetime('now', '+30 day')"),
+        }
+        if expiry_window in ranges:
+            start, end = ranges[expiry_window]
+            clauses.append(
+                f"{effective_expr} IS NOT NULL AND datetime({effective_expr}) >= {start} AND datetime({effective_expr}) <= {end}"
+            )
+
+    where_sql = " AND ".join(clauses)
 
     conn = db.local_conn()
     try:
-        base_query = f"""
-            FROM users
-            WHERE 1=1
-            {status_clause}
-        """
         select_sql = f"""
             SELECT
-                chat_id, username, full_name, approved, blocked,
-                paid_until, demo_end_at, demo_expires_at,
+                u.chat_id, u.username, u.full_name, u.approved, u.blocked,
                 {effective_expr} AS effective_until,
                 {status_expr} AS computed_status
-            {base_query}
-            ORDER BY effective_until DESC, chat_id DESC
+            FROM users u
+            LEFT JOIN (SELECT chat_id, MAX(expires_at) as expires_at FROM subscriptions GROUP BY chat_id) s
+                ON s.chat_id = u.chat_id
+            WHERE {where_sql}
+            ORDER BY datetime(effective_until) DESC, u.chat_id DESC
             LIMIT ? OFFSET ?
         """
         rows = conn.execute(select_sql, params + [page_size, offset]).fetchall()
+        return rows
+    finally:
+        conn.close()
 
-        total_sql = f"SELECT COUNT(*) as cnt {base_query}"
-        total_row = conn.execute(total_sql, params).fetchone() or {}
-        total = int(total_row.get("cnt") or 0)
-        return rows, total
+
+def count_users_filtered(
+    db: AdminDatabase,
+    status: str = "all",
+    search: str = "",
+    expiry_window: Optional[str] = None,
+) -> int:
+    db.ensure_user_indexes()
+    now_expr = "datetime('now')"
+    effective_expr = (
+        "MAX(datetime(u.paid_until), datetime(u.demo_end_at), datetime(u.demo_expires_at),"
+        " datetime(s.expires_at))"
+    )
+
+    clauses = ["1=1"]
+    params: List = []
+
+    if search:
+        search_term = search.strip()
+        if search_term.isdigit():
+            clauses.append("u.chat_id = ?")
+            params.append(int(search_term))
+        else:
+            like = f"%{search_term}%"
+            clauses.append("(LOWER(u.username) LIKE LOWER(?) OR LOWER(u.full_name) LIKE LOWER(?))")
+            params.extend([like, like])
+
+    if status == "active":
+        clauses.append(f"u.blocked=0 AND datetime({effective_expr}) > {now_expr}")
+    elif status == "expired":
+        clauses.append(f"u.blocked=0 AND (datetime({effective_expr}) <= {now_expr} OR {effective_expr} IS NULL)")
+    elif status == "demo":
+        clauses.append(
+            f"u.blocked=0 AND (datetime(u.demo_end_at) > {now_expr} OR datetime(u.demo_expires_at) > {now_expr})"
+        )
+    elif status == "blocked":
+        clauses.append("u.blocked=1")
+
+    if expiry_window:
+        ranges = {
+            "today": ("datetime('now', 'start of day')", "datetime('now', 'start of day', '+1 day')"),
+            "1d": (now_expr, "datetime('now', '+1 day')"),
+            "3d": (now_expr, "datetime('now', '+3 day')"),
+            "7d": (now_expr, "datetime('now', '+7 day')"),
+            "30d": (now_expr, "datetime('now', '+30 day')"),
+        }
+        if expiry_window in ranges:
+            start, end = ranges[expiry_window]
+            clauses.append(
+                f"{effective_expr} IS NOT NULL AND datetime({effective_expr}) >= {start} AND datetime({effective_expr}) <= {end}"
+            )
+
+    where_sql = " AND ".join(clauses)
+    conn = db.local_conn()
+    try:
+        count_sql = f"""
+            SELECT COUNT(*) as cnt
+            FROM users u
+            LEFT JOIN (SELECT chat_id, MAX(expires_at) as expires_at FROM subscriptions GROUP BY chat_id) s
+                ON s.chat_id = u.chat_id
+            WHERE {where_sql}
+        """
+        row = conn.execute(count_sql, params).fetchone() or {}
+        return int(row.get("cnt") or 0)
+    finally:
+        conn.close()
+
+
+def update_block_state(db: AdminDatabase, chat_ids: Sequence[int], blocked: bool) -> int:
+    normalized_ids = [uid for uid in chat_ids if isinstance(uid, int) and uid > 0]
+    if not normalized_ids:
+        return 0
+    placeholders = ",".join(["?"] * len(normalized_ids))
+    conn = db.local_conn()
+    try:
+        cur = conn.execute(
+            f"UPDATE users SET blocked=? WHERE chat_id IN ({placeholders})",
+            [1 if blocked else 0, *normalized_ids],
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def approve_users(db: AdminDatabase, chat_ids: Sequence[int]) -> int:
+    normalized_ids = [uid for uid in chat_ids if isinstance(uid, int) and uid > 0]
+    if not normalized_ids:
+        return 0
+    placeholders = ",".join(["?"] * len(normalized_ids))
+    conn = db.local_conn()
+    try:
+        cur = conn.execute(
+            f"UPDATE users SET approved=1 WHERE chat_id IN ({placeholders})",
+            normalized_ids,
+        )
+        conn.commit()
+        return cur.rowcount
     finally:
         conn.close()
