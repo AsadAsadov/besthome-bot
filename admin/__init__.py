@@ -8,4 +8,4 @@ admin_bp = Blueprint(
     static_folder="static",
 )
 
-__all__ = ["admin_bp"]
+from . import routes  # ensure routes are loaded
