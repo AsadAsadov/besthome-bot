@@ -9,6 +9,78 @@
   <button type="submit">Axtar</button>
 </form>
 
+<form method="get" class="card inline">
+  <div>
+    <label>Status filtr</label>
+    <select name="status">
+      <option value="all" {% if status_filter == 'all' %}selected{% endif %}>Hamısı</option>
+      <option value="active" {% if status_filter == 'active' %}selected{% endif %}>Aktiv</option>
+      <option value="expired" {% if status_filter == 'expired' %}selected{% endif %}>Bitmiş</option>
+      <option value="blocked" {% if status_filter == 'blocked' %}selected{% endif %}>Bloklu</option>
+      <option value="pending" {% if status_filter == 'pending' %}selected{% endif %}>Təsdiqlənməyən</option>
+    </select>
+  </div>
+  <div>
+    <label>Səhifə ölçüsü</label>
+    <input type="number" name="page_size" min="1" max="200" value="{{ page_size }}" />
+  </div>
+  <button type="submit">Tətbiq et</button>
+</form>
+
+<form method="post" class="card">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+  <input type="hidden" name="action" value="bulk_extend" />
+  <input type="hidden" name="status" value="{{ status_filter }}" />
+  <div class="inline" style="justify-content: space-between; align-items: center;">
+    <h3>Aktiv istifadəçi siyahısı</h3>
+    <div>Toplam: {{ total_users }} | Səhifə {{ current_page }} / {{ total_pages }}</div>
+  </div>
+  <div style="overflow-x:auto;">
+    <table>
+      <thead>
+        <tr>
+          <th></th>
+          <th>chat_id</th>
+          <th>Ad</th>
+          <th>Status</th>
+          <th>Bitmə</th>
+          <th>Blok</th>
+          <th>Təsdiq</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in users_page %}
+        <tr>
+          <td><input type="checkbox" name="selected_users" value="{{ u.chat_id }}" /></td>
+          <td>{{ u.chat_id }}</td>
+          <td>{{ u.full_name or u.username or '-' }}</td>
+          <td>
+            {% if u.computed_status == 'active' %}Aktiv{% elif u.computed_status == 'expired' %}Bitmiş{% elif u.computed_status == 'blocked' %}Bloklu{% elif u.computed_status == 'pending' %}Təsdiqlənməyib{% else %}-{% endif %}
+          </td>
+          <td>{{ u.effective_until or u.paid_until or u.demo_end_at or u.demo_expires_at or '—' }}</td>
+          <td>{{ 'Bəli' if u.blocked else 'Xeyr' }}</td>
+          <td>{{ 'Bəli' if u.approved else 'Xeyr' }}</td>
+        </tr>
+        {% endfor %}
+        {% if not users_page %}
+        <tr><td colspan="7">İstifadəçi tapılmadı</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+  <div class="inline" style="margin-top: 12px; align-items: center;">
+    <label style="margin:0;">Gün sayını daxil edin:</label>
+    <input type="number" name="days" placeholder="Gün sayı" min="1" required />
+    <button type="submit">Seçilənləri uzat</button>
+  </div>
+  <div class="inline" style="margin-top: 12px;">
+    {% if current_page > 1 %}
+    <a class="link" href="{{ url_for('admin.users', page=current_page-1, page_size=page_size, status=status_filter) }}">◀️ Əvvəlki</a>
+    {% endif %}
+    <a class="link" href="{{ url_for('admin.users', page=current_page+1 if current_page < total_pages else total_pages, page_size=page_size, status=status_filter) }}">▶️ Növbəti</a>
+  </div>
+</form>
+
 {% if message %}<div class="message">{{ message }}</div>{% endif %}
 {% if error %}<div class="error">{{ error }}</div>{% endif %}
 
