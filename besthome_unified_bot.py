@@ -173,6 +173,7 @@ search_state = {}  # Axtarış paging və filter state
 customer_request_state = {}
 agent_request_lookup_state = {}
 admin_customer_request_state = {}
+USER_STATE: Dict[int, str] = {}
 CUSTOMER_REQUEST_COOLDOWN_SECONDS = 300
 
 logger = logging.getLogger("besthome_bot")
@@ -476,7 +477,10 @@ ADMIN_PANEL_NAV_NEXT = TEXTS_AZ["admin_panel_nav_next"]
 ADMIN_PANEL_NAV_PREV = TEXTS_AZ["admin_panel_nav_prev"]
 ADMIN_PANEL_BACK_MAIN = TEXTS_AZ["admin_panel_back_main"]
 admin_panel_page_state = {}
-ADMIN_PANEL_ACTIONS = set(ADMIN_PANEL_PAGE1 + ADMIN_PANEL_PAGE2)
+ADMIN_PANEL_ACTIONS = ADMIN_PANEL_PAGE1 + ADMIN_PANEL_PAGE2
+ADMIN_PANEL_ACTION_SET = set(ADMIN_PANEL_ACTIONS)
+ADMIN_PANEL_ACTION_KEYS = {text: str(idx) for idx, text in enumerate(ADMIN_PANEL_ACTIONS)}
+ADMIN_PANEL_ACTION_LOOKUP = {v: k for k, v in ADMIN_PANEL_ACTION_KEYS.items()}
 
 # Pagination
 PAGE_SIZE = 20
@@ -625,6 +629,18 @@ def callback_guard(handler):
                 recover_main_menu(chat_id, getattr(call, "message", None))
 
     return wrapper
+
+
+def set_user_state(chat_id: int, state: str):
+    USER_STATE[chat_id] = state
+
+
+def clear_user_state(chat_id: int):
+    USER_STATE.pop(chat_id, None)
+
+
+def get_user_state(chat_id: int) -> Optional[str]:
+    return USER_STATE.get(chat_id)
 
 
 def acquire_user_action_lock(user_id: Optional[int]) -> Optional[threading.Lock]:
@@ -3415,6 +3431,7 @@ def inc_limit(chat_id: int, key_type: str, inc: int = 1):
 
 def reset_user_state(chat_id: int):
     user_state.pop(chat_id, None)
+    clear_user_state(chat_id)
 
 
 def reset_search_state(chat_id: int):
@@ -4773,6 +4790,7 @@ def start_cmd(message):
             note="admin_auto",
         )
         conn.close()
+        set_user_state(chat_id, "ADMIN")
         main_menu(chat_id)
         return
 
@@ -4803,6 +4821,7 @@ def start_cmd(message):
         send_payment_menu(chat_id)
         return
 
+    set_user_state(chat_id, "MAIN")
     main_menu(chat_id)
 
 
@@ -7712,6 +7731,7 @@ def return_to_main_menu(chat_id: int):
     search_state.pop(chat_id, None)
     admin_panel_page_state.pop(chat_id, None)
     admin_state.pop(chat_id, None)
+    set_user_state(chat_id, "MAIN")
     if is_admin(chat_id):
         send_main_menu(chat_id)
     else:
@@ -11912,13 +11932,31 @@ def send_agent_card(chat_id, ev):
 
 def build_admin_panel_keyboard(chat_id: int, page: int = 1):
     buttons = ADMIN_PANEL_PAGE1 if page == 1 else ADMIN_PANEL_PAGE2
-    mk = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    mk = types.InlineKeyboardMarkup()
     for i in range(0, len(buttons), 2):
-        mk.row(*buttons[i : i + 2])
+        row_buttons = []
+        for btn_text in buttons[i : i + 2]:
+            row_buttons.append(
+                types.InlineKeyboardButton(
+                    btn_text,
+                    callback_data=f"adm_act:{ADMIN_PANEL_ACTION_KEYS[btn_text]}",
+                )
+            )
+        mk.row(*row_buttons)
+    nav_buttons = []
     if page == 1:
-        mk.row(ADMIN_PANEL_NAV_NEXT, ADMIN_PANEL_BACK_MAIN)
+        nav_buttons.append(
+            types.InlineKeyboardButton(ADMIN_PANEL_NAV_NEXT, callback_data="adm_nav:2")
+        )
     else:
-        mk.row(ADMIN_PANEL_NAV_PREV, ADMIN_PANEL_BACK_MAIN)
+        nav_buttons.append(
+            types.InlineKeyboardButton(ADMIN_PANEL_NAV_PREV, callback_data="adm_nav:1")
+        )
+    if nav_buttons:
+        mk.row(*nav_buttons)
+    mk.add(
+        types.InlineKeyboardButton(ADMIN_PANEL_BACK_MAIN, callback_data="adm_back:main")
+    )
     admin_panel_page_state[chat_id] = page
     return mk
 
@@ -11927,7 +11965,8 @@ def send_admin_panel(
     chat_id: int, page: int = 1, text: str = TEXTS_AZ["admin_panel_title"]
 ):
     mk = build_admin_panel_keyboard(chat_id, page)
-    send_with_reply_keyboard(chat_id, text, mk)
+    set_user_state(chat_id, "ADMIN")
+    bot.send_message(chat_id, text, reply_markup=mk)
 
 
 @bot.message_handler(func=lambda m: m.text == TEXTS_AZ["admin_panel_button"])
@@ -11940,77 +11979,80 @@ def open_admin_panel(message):
     send_admin_panel(message.chat.id, page=1)
 
 
-@bot.message_handler(
-    func=lambda m: is_admin(m.chat.id) and m.text == ADMIN_PANEL_NAV_NEXT
-)
-def admin_panel_next_page(message):
-    send_admin_panel(message.chat.id, page=2)
-
-
-@bot.message_handler(
-    func=lambda m: is_admin(m.chat.id) and m.text == ADMIN_PANEL_NAV_PREV
-)
-def admin_panel_prev_page(message):
-    send_admin_panel(message.chat.id, page=1)
-
-
-@bot.message_handler(
-    func=lambda m: is_admin(m.chat.id) and m.text == ADMIN_PANEL_BACK_MAIN
-)
-def admin_panel_back_to_main(message):
-    return_to_main_menu(message.chat.id)
-
-
-@bot.message_handler(
-    func=lambda m: is_admin(m.chat.id) and m.text in ADMIN_PANEL_ACTIONS
-)
-def handle_admin_panel_action(message):
-    chat_id = message.chat.id
-    txt = message.text
+def _handle_admin_panel_action(chat_id: int, action_text: str):
     if admin_update_state.get(chat_id) == "awaiting_db_link":
         return
 
-    if txt == TEXTS_AZ["admin_panel_pending_listings"]:
+    if action_text == TEXTS_AZ["admin_panel_pending_listings"]:
         show_pending_listings(chat_id)
-    elif txt == TEXTS_AZ["admin_panel_stats"]:
+    elif action_text == TEXTS_AZ["admin_panel_stats"]:
         admin_stats_period[chat_id] = "day"
         show_admin_stats(chat_id)
-    elif txt == TEXTS_AZ["admin_panel_customer_requests"]:
+    elif action_text == TEXTS_AZ["admin_panel_customer_requests"]:
         show_customer_requests_overview(chat_id, "day")
-    elif txt == FINANCIAL_REPORTS_BUTTON:
+    elif action_text == FINANCIAL_REPORTS_BUTTON:
         send_financial_reports_menu(chat_id)
-    elif txt == TEXTS_AZ["admin_panel_agents_notify"]:
+    elif action_text == TEXTS_AZ["admin_panel_agents_notify"]:
         msg = bot.send_message(chat_id, "✍️ Vasitəçilərə göndəriləcək mətni yaz:")
         bot.register_next_step_handler(msg, admin_agents_broadcast)
-    elif txt == TEXTS_AZ["admin_panel_agent_activity"]:
+    elif action_text == TEXTS_AZ["admin_panel_agent_activity"]:
         show_agent_activity_overview(chat_id)
-    elif txt == TEXTS_AZ["admin_panel_user_search"]:
+    elif action_text == TEXTS_AZ["admin_panel_user_search"]:
         msg = bot.send_message(chat_id, "🔍 İstifadəçi chat_id daxil et:")
         bot.register_next_step_handler(msg, admin_search_by_id_step)
-    elif txt == TEXTS_AZ["admin_panel_promos"]:
+    elif action_text == TEXTS_AZ["admin_panel_promos"]:
         show_admin_promo_menu(chat_id)
-    elif txt == TEXTS_AZ["admin_panel_reset_limits"]:
+    elif action_text == TEXTS_AZ["admin_panel_reset_limits"]:
         conn = get_local_conn()
         cur = conn.cursor()
         cur.execute("DELETE FROM search_limits")
         conn.commit()
         conn.close()
         bot.send_message(chat_id, "♻️ Bütün istifadəçi limitləri sıfırlandı.")
-    elif txt == TEXTS_AZ["admin_panel_users"]:
+    elif action_text == TEXTS_AZ["admin_panel_users"]:
         show_users_menu(chat_id)
-    elif txt == TEXTS_AZ["admin_panel_send_update"]:
+    elif action_text == TEXTS_AZ["admin_panel_send_update"]:
         broadcast_bot_update(chat_id)
-    elif txt == TEXTS_AZ["admin_panel_topviews"]:
+    elif action_text == TEXTS_AZ["admin_panel_topviews"]:
         reset_search_state(chat_id)
         send_paginated_results(chat_id, "topviews", params={"days": 7}, page=1)
-    elif txt == TEXTS_AZ["admin_panel_db_update"]:
+    elif action_text == TEXTS_AZ["admin_panel_db_update"]:
         start_admin_update_db(chat_id)
-    elif txt == TEXTS_AZ["admin_panel_direct_message"]:
+    elif action_text == TEXTS_AZ["admin_panel_direct_message"]:
         start_direct_user_message_flow(chat_id)
-    elif txt == TEXTS_AZ["admin_panel_customer_requests_access"]:
+    elif action_text == TEXTS_AZ["admin_panel_customer_requests_access"]:
         show_customer_requests_access_admin(chat_id)
-    elif txt == TEXTS_AZ["admin_panel_archived_requests"]:
+    elif action_text == TEXTS_AZ["admin_panel_archived_requests"]:
         show_archived_requests(chat_id, page=1)
+
+
+@bot.callback_query_handler(
+    func=lambda c: c.data.startswith("adm_act:")
+    or c.data.startswith("adm_nav:")
+    or c.data.startswith("adm_back:")
+)
+@callback_guard
+def cb_admin_panel(c):
+    if not is_admin(c.from_user.id):
+        return
+    chat_id = c.message.chat.id
+    if c.data.startswith("adm_nav:"):
+        try:
+            page = int(c.data.split(":", 1)[1])
+        except Exception:
+            page = 1
+        send_admin_panel(chat_id, page=page)
+        return
+
+    if c.data == "adm_back:main":
+        return_to_main_menu(chat_id)
+        return
+
+    if c.data.startswith("adm_act:"):
+        action_key = c.data.split(":", 1)[1]
+        action_text = ADMIN_PANEL_ACTION_LOOKUP.get(action_key)
+        if action_text:
+            _handle_admin_panel_action(chat_id, action_text)
 
 
 def admin_customer_requests_access_step(message):
@@ -13293,26 +13335,40 @@ def send_financial_reports_menu(chat_id: int):
     if not is_admin(chat_id):
         return
 
-    mk = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    mk.row("📜 Ödəniş tarixçəsi", "🤝 Referral statistikası")
-    mk.row("📈 Aylıq gəlir hesabatı")
-    mk.row(FINANCIAL_REPORTS_BACK)
-    send_with_reply_keyboard(chat_id, "💰 Maliyyə hesabatları:", mk)
+    mk = types.InlineKeyboardMarkup()
+    mk.row(
+        types.InlineKeyboardButton(
+            "📜 Ödəniş tarixçəsi", callback_data="finrep:history"
+        ),
+        types.InlineKeyboardButton(
+            "🤝 Referral statistikası", callback_data="finrep:referral"
+        ),
+    )
+    mk.row(
+        types.InlineKeyboardButton(
+            "📈 Aylıq gəlir hesabatı", callback_data="finrep:monthly"
+        )
+    )
+    mk.add(types.InlineKeyboardButton(FINANCIAL_REPORTS_BACK, callback_data="finrep:back"))
+    bot.send_message(chat_id, "💰 Maliyyə hesabatları:", reply_markup=mk)
 
 
-@bot.message_handler(
-    func=lambda m: is_admin(m.chat.id) and m.text in FINANCIAL_REPORTS_MENU
-)
-def handle_financial_reports_menu(message):
-    if message.text == "📜 Ödəniş tarixçəsi":
-        show_payment_history_list(message.chat.id, page=1)
-    elif message.text == "🤝 Referral statistikası":
-        show_referral_stats(message.chat.id)
-    elif message.text == "📈 Aylıq gəlir hesabatı":
-        show_revenue_report(message.chat.id)
-    elif message.text == FINANCIAL_REPORTS_BACK:
-        page = admin_panel_page_state.get(message.chat.id, 1)
-        send_admin_panel(message.chat.id, page=page)
+@bot.callback_query_handler(func=lambda c: c.data.startswith("finrep:"))
+@callback_guard
+def handle_financial_reports_menu(c):
+    if not is_admin(c.from_user.id):
+        return
+    action = c.data.split(":", 1)[1]
+    chat_id = c.message.chat.id
+    if action == "history":
+        show_payment_history_list(chat_id, page=1)
+    elif action == "referral":
+        show_referral_stats(chat_id)
+    elif action == "monthly":
+        show_revenue_report(chat_id)
+    elif action == "back":
+        page = admin_panel_page_state.get(chat_id, 1)
+        send_admin_panel(chat_id, page=page)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_period:"))
@@ -15280,6 +15336,7 @@ def get_admin_state(chat_id: int) -> Optional[str]:
 
 def show_users_menu(chat_id):
     set_admin_state(chat_id, "admin_users_menu")
+    set_user_state(chat_id, "ADMIN_USERS")
     mk = types.InlineKeyboardMarkup()
     mk.add(
         types.InlineKeyboardButton(
@@ -16274,6 +16331,7 @@ def broadcast_bot_update(admin_chat_id):
 def handle_bot_refresh(message):
     chat_id = message.chat.id
     user_state.pop(chat_id, None)
+    clear_user_state(chat_id)
     search_state.pop(chat_id, None)
     customer_request_state.pop(chat_id, None)
     customer_request_rule_state.pop(chat_id, None)
