@@ -94,7 +94,21 @@ class _BotProxy:
     def __getattr__(self, name):
         if self._bot is None:
             raise RuntimeError("Bot is not initialized. Call main() first.")
-        return getattr(self._bot, name)
+        attr = getattr(self._bot, name)
+
+        if name.startswith("send_") or name.startswith("edit_message") or name in (
+            "answer_callback_query",
+            "delete_message",
+        ):
+            def wrapped(*args, **kwargs):
+                try:
+                    return attr(*args, **kwargs)
+                except Exception as e:
+                    logger.warning(f"Telegram send error ignored: {e}")
+
+            return wrapped
+
+        return attr
 
 
 ADMIN_ID = 1311851277
@@ -18776,8 +18790,17 @@ __all__ = ["main", "create_flask_app", "app"]
 
 
 def run_bot():
-    print("🤖 Telegram bot polling başladı")
-    bot.infinity_polling(timeout=60, long_polling_timeout=60)
+    logger.info("🤖 Telegram bot polling started (safe mode)")
+    while True:
+        try:
+            bot.infinity_polling(
+                timeout=60,
+                long_polling_timeout=60,
+                skip_pending=True,
+            )
+        except Exception as e:
+            logger.error(f"Polling crashed, restarting in 5s: {e}")
+            time.sleep(5)
 
 
 if __name__ == "__main__":
