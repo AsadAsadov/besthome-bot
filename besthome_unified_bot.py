@@ -18095,21 +18095,6 @@ def subscription_notifier():
         time.sleep(3600)
 
 
-def run_bot(polling_started: Optional[threading.Event] = None):
-    if polling_started is not None:
-        polling_started.set()
-    while True:
-        try:
-            bot.infinity_polling(
-                timeout=20,
-                long_polling_timeout=20,
-                skip_pending=True,
-            )
-        except Exception as e:
-            logger.exception("Polling error: %s", e)
-            time.sleep(5)
-
-
 def main_menu(chat_id):
     send_main_menu(chat_id, "📋 Əsas menyudan seçim et:")
 
@@ -18777,15 +18762,6 @@ def main():
     bot.bind(telebot.TeleBot(BOT_TOKEN))
     BOT_USERNAME = bot.get_me().username
 
-    polling_started = threading.Event()
-    polling_thread = threading.Thread(
-        target=run_bot,
-        args=(polling_started,),
-        daemon=True,
-    )
-    polling_thread.start()
-    polling_started.wait()
-
     threading.Thread(target=saved_search_worker, daemon=True).start()
     threading.Thread(target=favorite_price_worker, daemon=True).start()
     threading.Thread(target=subscription_notifier, daemon=True).start()
@@ -18797,3 +18773,13 @@ app = create_flask_app()
 
 
 __all__ = ["main", "create_flask_app", "app"]
+
+
+def run_bot():
+    print("🤖 Telegram bot polling başladı")
+    bot.infinity_polling(timeout=60, long_polling_timeout=60)
+
+
+if __name__ == "__main__":
+    main()
+    run_bot()
