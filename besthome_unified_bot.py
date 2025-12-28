@@ -272,6 +272,7 @@ keyword_notification_state: Dict[int, Dict[str, Any]] = {}
 admin_selected_users: Dict[int, set] = defaultdict(set)
 admin_user_rows_cache: Dict[int, List[sqlite3.Row]] = defaultdict(list)
 admin_bulk_action_state: Dict[int, Dict[str, Any]] = {}
+admin_pending_action: Dict[int, Dict[str, Any]] = {}
 user_callback_locks: Dict[int, threading.Lock] = defaultdict(threading.Lock)
 admin_user_last_list: Dict[int, str] = {}
 admin_navigation_state: Dict[int, Dict[str, Any]] = {}
@@ -557,6 +558,15 @@ def get_agents_conn():
     conn = sqlite3.connect(AGENTS_DB, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set:
+    try:
+        cur = conn.cursor()
+        cur.execute(f"PRAGMA table_info({table_name})")
+        return {row[1] for row in cur.fetchall() if len(row) > 1}
+    except Exception:
+        return set()
 
 
 def normalize_text(text: str) -> str:
@@ -1401,8 +1411,17 @@ def init_local_db():
     )
 
     cur.execute("DROP VIEW IF EXISTS users_with_status")
+    user_columns = _table_columns(conn, "users")
+    demo_end_expr = (
+        "COALESCE(strftime('%s', u.demo_end_at), 0)" if "demo_end_at" in user_columns else "0"
+    )
+    promo_expr = (
+        "COALESCE(strftime('%s', u.promo_expires_at), 0)"
+        if "promo_expires_at" in user_columns
+        else "0"
+    )
     cur.execute(
-        """
+        f"""
         CREATE VIEW users_with_status AS
         SELECT
             u.chat_id,
@@ -1414,10 +1433,10 @@ def init_local_db():
             -- effective_expires_at ALWAYS as unix timestamp
             MAX(
                 COALESCE(strftime('%s', s.expires_at), 0),
-                COALESCE(strftime('%s', u.demo_end_at), 0),
+                {demo_end_expr},
                 CASE
                     WHEN u.promo_active = 1
-                    THEN COALESCE(strftime('%s', u.promo_expires_at), 0)
+                    THEN {promo_expr}
                     ELSE 0
                 END
             ) AS effective_expires_at,
@@ -1428,10 +1447,10 @@ def init_local_db():
                 WHEN
                     MAX(
                         COALESCE(strftime('%s', s.expires_at), 0),
-                        COALESCE(strftime('%s', u.demo_end_at), 0),
+                        {demo_end_expr},
                         CASE
                             WHEN u.promo_active = 1
-                            THEN COALESCE(strftime('%s', u.promo_expires_at), 0)
+                            THEN {promo_expr}
                             ELSE 0
                         END
                     ) > strftime('%s','now')
@@ -2206,8 +2225,7 @@ def admin_user_status_where(status: str) -> tuple:
         "demo": "DEMO",
     }
     if normalized == "demo":
-        clause = demo_user_clause(prefix_status="", prefix_user="")
-        return clause, ()
+        return "computed_status = 'DEMO'", ()
     computed = status_map.get(normalized, "ACTIVE")
     return "computed_status = ?", (computed,)
 
@@ -10428,15 +10446,19 @@ def is_fts_ready(conn, table_name: str) -> bool:
 
 
 def build_smart_fts_queries(search_text: str) -> Tuple[Optional[str], Optional[str]]:
-    normalized = normalize_text((search_text or "").strip())
+    return build_fts_queries(search_text)
+
+
+def build_fts_queries(q: str) -> Tuple[Optional[str], Optional[str]]:
+    normalized = normalize_text((q or "").strip())
     if not normalized:
         return None, None
     tokens = [t for t in normalized.split() if t]
     if not tokens:
         return None, None
-    phrase_query = f'"{" ".join(tokens)}"'
-    token_query = " AND ".join([f"{t}*" for t in tokens])
-    return phrase_query, token_query
+    phrase = f'"{normalized}"'
+    and_query = " AND ".join([f"{t}*" for t in tokens])
+    return phrase, and_query
 
 
 def execute_ranked_fts(
@@ -10447,6 +10469,7 @@ def execute_ranked_fts(
     params: List[Any],
     phrase_query: Optional[str],
     token_query: Optional[str],
+    or_query: Optional[str] = None,
     order_suffix: str = "",
     limit_rows: int = 5000,
 ) -> List[sqlite3.Row]:
@@ -10454,11 +10477,16 @@ def execute_ranked_fts(
     seen: set = set()
     queries = []
     if phrase_query:
-        queries.append((0, phrase_query))
+        queries.append((0, "phrase", phrase_query))
     if token_query:
-        queries.append((1, token_query))
+        queries.append((1, "and", token_query))
+    if or_query:
+        queries.append((2, "or", or_query))
 
-    for priority, match_q in queries:
+    for priority, mode, match_q in queries:
+        if results:
+            break
+        q_started = time.perf_counter()
         base_sql = (
             f"SELECT l.*, ? AS priority_tag, COALESCE(bm25(f), 0) AS rank_score "
             f"FROM {table} l "
@@ -10490,6 +10518,13 @@ def execute_ranked_fts(
             if rid is not None:
                 seen.add(rid)
             results.append(row)
+        logger.info(
+            "FTS search time_ms=%.2f mode=%s q=%s rows=%s",
+            (time.perf_counter() - q_started) * 1000,
+            mode,
+            match_q,
+            len(results),
+        )
     return results
 
 
@@ -10504,7 +10539,8 @@ def query_keyword_results(
     tokens = normalize_text(search_text).split()
     if not tokens:
         return [], 0
-    phrase_query, token_query = build_smart_fts_queries(search_text)
+    phrase_query, token_query = build_fts_queries(search_text)
+    or_query = " OR ".join([f"{t}*" for t in tokens]) if tokens else None
 
     op_main = detect_db_operation_value(selected_op, "main")
     op_local = detect_db_operation_value(selected_op, "local")
@@ -10581,6 +10617,7 @@ def query_keyword_results(
                     params,
                     phrase_query,
                     token_query,
+                    or_query,
                     order_suffix,
                 )
             except Exception:
@@ -10783,7 +10820,10 @@ def query_smart_results(criteria: dict, offset: int = 0, limit: int = None):
     results = []
 
     # MAIN
-    fts_phrase, fts_token = build_smart_fts_queries(" ".join(keywords))
+    joined_keywords = " ".join(keywords)
+    fts_phrase, fts_token = build_fts_queries(joined_keywords)
+    normalized_tokens = [t for t in normalize_text(joined_keywords).split() if t]
+    or_query = " OR ".join([f"{t}*" for t in normalized_tokens]) if normalized_tokens else None
 
     if os.path.exists(MAIN_DB):
         conn = get_main_conn()
@@ -10798,6 +10838,7 @@ def query_smart_results(criteria: dict, offset: int = 0, limit: int = None):
                 base_params,
                 fts_phrase,
                 fts_token,
+                or_query,
                 ", l.date_read DESC",
             )
         elif keywords:
@@ -10839,6 +10880,7 @@ def query_smart_results(criteria: dict, offset: int = 0, limit: int = None):
             base_params,
             fts_phrase,
             fts_token,
+            or_query,
             ", l.date_added DESC",
         )
     elif keywords:
@@ -14063,7 +14105,20 @@ def get_demo_profile_url(user_id: int, _username: Optional[str]) -> str:
 
 
 def resolve_demo_expiry(row: sqlite3.Row) -> Optional[datetime]:
-    expiry_raw = row["demo_end_at"] or row["demo_expires_at"]
+    expiry_raw = None
+    if isinstance(row, sqlite3.Row):
+        row_keys = set(row.keys())
+        if "demo_end_at" in row_keys:
+            expiry_raw = row["demo_end_at"]
+        if not expiry_raw and "demo_expires_at" in row_keys:
+            expiry_raw = row["demo_expires_at"]
+        if expiry_raw is None and "effective_expires_at" in row_keys:
+            expiry_raw = row["effective_expires_at"]
+    else:
+        try:
+            expiry_raw = row["demo_end_at"] or row["demo_expires_at"]
+        except Exception:
+            expiry_raw = None
     return parse_dt_safe(expiry_raw)
 
 
@@ -14089,22 +14144,28 @@ def deactivate_expired_demo(
 def build_demo_users_view(page: int = 1) -> Tuple[str, types.InlineKeyboardMarkup, int]:
     conn = get_local_conn()
     cur = conn.cursor()
+    user_columns = _table_columns(conn, "users")
     base_query = admin_user_status_subquery()
-    clause = demo_user_clause(prefix_status="", prefix_user="")
-    cur.execute(
-        f"""
-        SELECT chat_id,
-               full_name,
-               username,
-               demo_end_at,
-               demo_expires_at,
-               effective_expires_at,
-               computed_status,
-               paid_until
-        FROM {base_query}
-        WHERE {clause}
-        """
+    select_fields = [
+        "chat_id",
+        "full_name",
+        "username",
+        "effective_expires_at",
+        "computed_status",
+        "paid_until",
+    ]
+    if "demo_end_at" in user_columns:
+        select_fields.append("demo_end_at")
+    else:
+        select_fields.append("NULL AS demo_end_at")
+    if "demo_expires_at" in user_columns:
+        select_fields.append("demo_expires_at")
+    else:
+        select_fields.append("NULL AS demo_expires_at")
+    query = (
+        f"SELECT {', '.join(select_fields)} FROM {base_query} WHERE computed_status = 'DEMO'"
     )
+    cur.execute(query)
     rows = cur.fetchall()
     conn.close()
 
@@ -15825,6 +15886,7 @@ def show_all_users(
     chat_id, status="active", page: int = 1, message=None, force_new: bool = False
 ):
     conn = None
+    started_at = time.perf_counter()
     try:
         logger.info("show_all_users start status=%s page=%s", status, page)
         state = get_admin_users_state(chat_id)
@@ -15847,7 +15909,7 @@ def show_all_users(
         }
         set_admin_state(chat_id, state_map.get(list_status))
 
-        if list_status in ("active", "expired"):
+        if list_status in ("active", "expired", "demo"):
             logger.info(
                 "ADMIN USERLIST OPEN status=%s chat_id=%s", list_status, chat_id
             )
@@ -16030,21 +16092,21 @@ def show_all_users(
                 )
                 mk.add(
                     types.InlineKeyboardButton(
-                        label, callback_data=f"adm_sel:{list_status}:{uid_int}:{page}"
+                        label, callback_data=f"adm_sel:{list_status}:{page}:{uid_int}"
                     )
                 )
             mk.row(
                 types.InlineKeyboardButton(
-                    "✅ Hamısını seç", callback_data=f"adm_sel_all:{list_status}:{page}"
+                    "✅ Hamısını seç", callback_data=f"adm_all:{list_status}:{page}"
                 ),
                 types.InlineKeyboardButton(
-                    "❌ Hamısını sil", callback_data=f"adm_sel_clear:{list_status}:{page}"
+                    "❌ Hamısını sil", callback_data=f"adm_none:{list_status}:{page}"
                 ),
             )
             mk.add(
                 types.InlineKeyboardButton(
                     "⏱ Seçilənlərə əməliyyat",
-                    callback_data=f"adm_bulk_menu:{list_status}:{page}",
+                    callback_data=f"adm_ops:{list_status}:{page}",
                 )
             )
 
@@ -16079,6 +16141,9 @@ def show_all_users(
                 conn.close()
         except Exception:
             pass
+        logger.info(
+            "ADMIN USERLIST CLOSE status=%s page=%s duration=%.3f", list_status, page, time.perf_counter() - started_at
+        )
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("userlist|"))
@@ -16126,6 +16191,7 @@ def cb_userlist(c):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_u:"))
 @callback_guard
 def cb_admin_user_pagination(c):
+    safe_answer_callback_query(c.id)
     if not is_admin(c.message.chat.id):
         return
     try:
@@ -16142,6 +16208,7 @@ def cb_admin_user_pagination(c):
 @callback_guard
 def cb_admin_pending_actions(c):
     chat_id = c.message.chat.id if c.message else None
+    safe_answer_callback_query(c.id)
     if not is_admin(chat_id):
         return
     try:
@@ -16177,16 +16244,16 @@ def cb_admin_pending_actions(c):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_sel:"))
 @callback_guard
-def cb_admin_toggle_selection(c):
+def cb_admin_toggle_select(c):
     chat_id = c.message.chat.id if c.message else None
+    safe_answer_callback_query(c.id)
     if not is_admin(chat_id):
         return
     try:
-        _, list_status, uid_raw, page_raw = c.data.split(":")
+        _, list_status, page_raw, uid_raw = c.data.split(":")
         uid = int(uid_raw)
         page = int(page_raw)
     except Exception:
-        safe_answer_callback_query(c.id)
         return
     selected = get_selected_users(chat_id)
     if uid in selected:
@@ -16196,43 +16263,40 @@ def cb_admin_toggle_selection(c):
     admin_selected_users[chat_id] = selected
     update_admin_users_state(chat_id, filter_value=list_status, page=page)
     show_all_users(chat_id, list_status, page=page, message=c.message, force_new=False)
-    safe_answer_callback_query(c.id)
 
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_sel_all:"))
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_all:"))
 @callback_guard
 def cb_admin_select_all(c):
     chat_id = c.message.chat.id if c.message else None
+    safe_answer_callback_query(c.id)
     if not is_admin(chat_id):
         return
     try:
         _, list_status, page_raw = c.data.split(":")
         page = int(page_raw)
     except Exception:
-        safe_answer_callback_query(c.id)
         return
     select_page_users(chat_id, admin_user_rows_cache.get(chat_id, []))
     update_admin_users_state(chat_id, filter_value=list_status, page=page)
     show_all_users(chat_id, list_status, page=page, message=c.message, force_new=False)
-    safe_answer_callback_query(c.id, "✅ Səhifədəki hamısı seçildi")
 
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_sel_clear:"))
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_none:"))
 @callback_guard
-def cb_admin_clear_selection(c):
+def cb_admin_select_none(c):
     chat_id = c.message.chat.id if c.message else None
+    safe_answer_callback_query(c.id)
     if not is_admin(chat_id):
         return
     try:
         _, list_status, page_raw = c.data.split(":")
         page = int(page_raw)
     except Exception:
-        safe_answer_callback_query(c.id)
         return
     clear_selected_users(chat_id)
     update_admin_users_state(chat_id, filter_value=list_status, page=page)
     show_all_users(chat_id, list_status, page=page, message=c.message, force_new=False)
-    safe_answer_callback_query(c.id, "✅ Seçimlər təmizləndi")
 
 
 def _send_bulk_action_menu(chat_id: int, list_status: str, page: int):
@@ -16259,24 +16323,23 @@ def _send_bulk_action_menu(chat_id: int, list_status: str, page: int):
     bot.send_message(chat_id, "Seçilən istifadəçilər üçün müddət seçin:", reply_markup=mk)
 
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_bulk_menu:"))
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_ops:"))
 @callback_guard
-def cb_admin_bulk_menu(c):
+def cb_admin_ops_menu(c):
     chat_id = c.message.chat.id if c.message else None
+    safe_answer_callback_query(c.id)
     if not is_admin(chat_id):
         return
     try:
         _, list_status, page_raw = c.data.split(":")
         page = int(page_raw)
     except Exception:
-        safe_answer_callback_query(c.id)
         return
     selected = admin_selected_users.get(chat_id, set())
     if not selected:
         safe_answer_callback_query(c.id, "⚠️ Əvvəlcə istifadəçiləri seçin", show_alert=True)
         return
     _send_bulk_action_menu(chat_id, list_status, page)
-    safe_answer_callback_query(c.id)
 
 
 def _perform_bulk_extend(chat_id: int, days: int, list_status: str, page: int):
@@ -16284,6 +16347,13 @@ def _perform_bulk_extend(chat_id: int, days: int, list_status: str, page: int):
     if not selected_ids:
         bot.send_message(chat_id, "⚠️ Əvvəlcə istifadəçiləri seçin")
         return
+    op_started = time.perf_counter()
+    logger.info(
+        "ADMIN BULK EXTEND start chat_id=%s count=%s days=%s",
+        chat_id,
+        len(selected_ids),
+        days,
+    )
     updated = bulk_extend_user_time(selected_ids, days, note="bulk_extend")
     clear_selected_users(chat_id)
     bot.send_message(
@@ -16291,12 +16361,19 @@ def _perform_bulk_extend(chat_id: int, days: int, list_status: str, page: int):
     )
     update_admin_users_state(chat_id, filter_value=list_status, page=page)
     show_all_users(chat_id, status=list_status, page=page, message=None, force_new=False)
+    logger.info(
+        "ADMIN BULK EXTEND done chat_id=%s updated=%s duration=%.3f",
+        chat_id,
+        updated,
+        time.perf_counter() - op_started,
+    )
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_bulk_do:"))
 @callback_guard
 def cb_admin_bulk_apply(c):
     chat_id = c.message.chat.id if c.message else None
+    safe_answer_callback_query(c.id)
     if not is_admin(chat_id):
         return
     try:
@@ -16304,10 +16381,8 @@ def cb_admin_bulk_apply(c):
         days = int(days_raw)
         page = int(page_raw)
     except Exception:
-        safe_answer_callback_query(c.id)
         return
     _perform_bulk_extend(chat_id, days, list_status, page)
-    safe_answer_callback_query(c.id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_bulk_custom:"))
@@ -16322,6 +16397,8 @@ def cb_admin_bulk_custom(c):
     except Exception:
         safe_answer_callback_query(c.id)
         return
+    state_data = {"type": "bulk_days", "list_status": list_status, "page": page}
+    admin_pending_action[chat_id] = state_data
     admin_bulk_action_state[chat_id] = {"list_status": list_status, "page": page}
     set_user_state(chat_id, "ADMIN_BULK_EXTEND")
     bot.send_message(chat_id, "Neçə gün əlavə etmək istəyirsiniz?")
@@ -16332,13 +16409,13 @@ def cb_admin_bulk_custom(c):
 @callback_guard
 def cb_admin_bulk_cancel(c):
     chat_id = c.message.chat.id if c.message else None
+    safe_answer_callback_query(c.id)
     if not is_admin(chat_id):
         return
     try:
         _, list_status, page_raw = c.data.split(":")
         page = int(page_raw)
     except Exception:
-        safe_answer_callback_query(c.id)
         return
     safe_answer_callback_query(c.id, "❌ Ləğv edildi")
     show_all_users(chat_id, status=list_status, page=page, message=c.message, force_new=False)
@@ -16357,7 +16434,7 @@ def admin_bulk_custom_input(message):
     if days <= 0:
         bot.send_message(chat_id, "⚠️ Gün sayı müsbət olmalıdır.")
         return
-    st = admin_bulk_action_state.get(chat_id) or {}
+    st = admin_pending_action.pop(chat_id, None) or admin_bulk_action_state.get(chat_id) or {}
     list_status = st.get("list_status", "expired")
     page = int(st.get("page", 1))
     admin_bulk_action_state.pop(chat_id, None)
