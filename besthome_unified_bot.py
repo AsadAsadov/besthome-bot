@@ -5618,8 +5618,9 @@ def build_listing_text_blob(ev: dict) -> str:
         ev.get("description") or ev.get("summary") or ev.get("Umumi_melumat") or ""
     )
     address = ev.get("address") or ev.get("Unvan") or ""
+    project_name = ev.get("project_name") or ""
     notes = ev.get("notes") or ""
-    parts = [title, description, address, notes]
+    parts = [title, description, address, project_name, notes]
     return normalize_text(" ".join([str(p) for p in parts if p]))
 
 
@@ -10435,6 +10436,40 @@ def query_keyword_results(
         cutoff = datetime.utcnow() - timedelta(days=date_days)
         return f" AND {date_col} >= ?", [cutoff.isoformat()]
 
+    def resolve_keyword_columns(cur: sqlite3.Cursor, table: str) -> List[str]:
+        cur.execute("PRAGMA table_info(" + table + ")")
+        cols = {row[1].lower(): row[1] for row in cur.fetchall()}
+        candidates = ["title", "description", "address", "project_name"]
+        return [cols[name] for name in candidates if name in cols]
+
+    def build_normalized_like_clause(columns: List[str]) -> Tuple[str, List[str]]:
+        if not columns or not tokens:
+            return "", []
+        replacements = {
+            "ə": "e",
+            "ş": "s",
+            "ı": "i",
+            "ö": "o",
+            "ü": "u",
+            "ç": "c",
+            "ğ": "g",
+        }
+
+        def normalize_column_expr(col: str) -> str:
+            expr = f"LOWER(COALESCE({col}, ''))"
+            for src, dst in replacements.items():
+                expr = f"REPLACE({expr}, '{src}', '{dst}')"
+            return expr
+
+        clauses = []
+        params: List[str] = []
+        for token in tokens:
+            like = f"%{token}%"
+            per_field = [f"{normalize_column_expr(col)} LIKE ?" for col in columns]
+            clauses.append("(" + " OR ".join(per_field) + ")")
+            params.extend([like] * len(columns))
+        return " AND ".join(clauses), params
+
     def load_results_from_table(
         conn_factory, table: str, operation_value: Optional[str], source: str
     ):
@@ -10446,6 +10481,11 @@ def query_keyword_results(
         if operation_value:
             sql += " AND operation = ?"
             params.append(operation_value)
+        columns = resolve_keyword_columns(cur, table)
+        kw_sql, kw_params = build_normalized_like_clause(columns)
+        if kw_sql:
+            sql += " AND " + kw_sql
+            params.extend(kw_params)
         date_sql, date_params = apply_date_clause_sql(table, date_col)
         sql += date_sql
         order_col = date_col or "date_read"
