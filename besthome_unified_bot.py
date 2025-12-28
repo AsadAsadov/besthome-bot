@@ -269,6 +269,7 @@ keyword_hits_context = {}
 keyword_notification_state: Dict[int, Dict[str, Any]] = {}
 user_callback_locks: Dict[int, threading.Lock] = defaultdict(threading.Lock)
 admin_user_last_list: Dict[int, str] = {}
+admin_navigation_state: Dict[int, Dict[str, Any]] = {}
 BLOCKED_MESSAGE_TEXT = "Hesabınız müvəqqəti olaraq dayandırıldı."
 STATUS_PENDING = "pending"
 STATUS_ACTIVE_PAID = "active_paid"
@@ -15272,6 +15273,35 @@ def _unverified_filter_from_schema(schema: dict) -> Tuple[str, Tuple]:
     return "1=0", ()
 
 
+def get_admin_users_state(chat_id: int) -> Dict[str, Any]:
+    state = admin_navigation_state.get(chat_id) or {}
+    if state.get("section") != "users":
+        state = {"section": "users", "filter": "active", "page": 1}
+    state.setdefault("filter", "active")
+    state.setdefault("page", 1)
+    admin_navigation_state[chat_id] = state
+    return state
+
+
+def update_admin_users_state(
+    chat_id: int, *, section: str = "users", filter_value: Optional[str] = None, page: int = None
+) -> Dict[str, Any]:
+    state = get_admin_users_state(chat_id)
+    state["section"] = section
+    if filter_value:
+        state["filter"] = filter_value
+    if page is not None:
+        try:
+            state["page"] = max(1, int(page))
+        except Exception:
+            state["page"] = max(1, state.get("page", 1))
+
+    admin_navigation_state[chat_id] = state
+    if state.get("filter"):
+        admin_user_last_list[chat_id] = state["filter"]
+    return state
+
+
 def show_unverified_users(
     chat_id: int, page: int = 1, message=None, force_new: bool = False
 ):
@@ -15484,14 +15514,17 @@ def show_all_users(
     conn = None
     try:
         logger.info("show_all_users start status=%s page=%s", status, page)
-        page = max(1, int(page or 1))
-        list_status = str(status or "active").lower()
+        state = get_admin_users_state(chat_id)
+        page = max(1, int(page or state.get("page", 1) or 1))
+        list_status = str(status or state.get("filter") or "active").lower()
         if list_status == "unverified":
             list_status = "pending"
 
         allowed = {"active", "expired", "pending", "blocked", "demo"}
         if list_status not in allowed:
-            list_status = "active"
+            list_status = state.get("filter", "active") if state else "active"
+
+        update_admin_users_state(chat_id, filter_value=list_status, page=page)
 
         if list_status in ("active", "expired"):
             logger.info(
@@ -15503,7 +15536,6 @@ def show_all_users(
 
         base_query = admin_user_status_subquery()
         where_clause, params = admin_user_status_where(list_status)
-        admin_user_last_list[chat_id] = list_status
 
         if list_status in ("active", "expired", "demo"):
             order_clause = "ORDER BY CAST(effective_expires_at AS INTEGER) DESC"
@@ -15548,7 +15580,10 @@ def show_all_users(
             offset,
         )
         cur.execute(
-            f"SELECT * FROM {base_query} WHERE {where_clause} {order_clause} LIMIT ? OFFSET ?",
+            (
+                "SELECT chat_id, full_name, username, effective_expires_at, computed_status "
+                f"FROM {base_query} WHERE {where_clause} {order_clause} LIMIT ? OFFSET ?"
+            ),
             (*params, PAGE_SIZE_USERS, offset),
         )
         rows = cur.fetchall()
@@ -15657,11 +15692,18 @@ def show_all_users(
             len(rows),
         )
         try:
-            bot.send_message(chat_id, text, reply_markup=mk)
+            if message and not force_new:
+                bot.edit_message_text(
+                    text,
+                    chat_id,
+                    message.message_id,
+                    reply_markup=mk,
+                )
+            else:
+                bot.send_message(chat_id, text, reply_markup=mk)
         except Exception:
             logger.error("Admin send failed", exc_info=True)
             safe_admin_step(chat_id, text, reply_markup=mk)
-        send_main_menu(chat_id)
     except Exception:
         logger.exception("show_all_users fatal error")
         safe_send(chat_id, TEXTS_AZ["admin_userlist_open_error"])
@@ -15695,14 +15737,12 @@ def cb_userlist(c):
         return
 
     logger.info("ADMIN USERLIST CLICK status=%s chat_id=%s", status, c.message.chat.id)
-
-    run_callback_background(
-        c,
-        lambda: show_all_users(
-            c.message.chat.id, status=status, page=1, message=None, force_new=True
-        ),
-        waiting_text="⏳ Zəhmət olmasa gözləyin...",
-        send_menu_on_finish=False,
+    state = get_admin_users_state(c.message.chat.id)
+    current_filter = state.get("filter", "active")
+    target_page = state.get("page", 1) if current_filter == status else 1
+    update_admin_users_state(c.message.chat.id, filter_value=status, page=target_page)
+    show_all_users(
+        c.message.chat.id, status=status, page=target_page, message=None, force_new=True
     )
 
 
@@ -15717,14 +15757,8 @@ def cb_admin_user_pagination(c):
     except Exception:
         list_type = "active"
         page = 1
-    run_callback_background(
-        c,
-        lambda: show_all_users(
-            c.message.chat.id, list_type, page=page, message=c.message
-        ),
-        waiting_text="⏳ Zəhmət olmasa gözləyin...",
-        send_menu_on_finish=False,
-    )
+    update_admin_users_state(c.message.chat.id, filter_value=list_type, page=page)
+    show_all_users(c.message.chat.id, list_type, page=page, message=c.message)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_upd:"))
@@ -15739,8 +15773,6 @@ def cb_admin_pending_actions(c):
         page = int(page_raw)
     except Exception:
         safe_answer_callback_query(c.id, "Xəta")
-        if chat_id:
-            send_main_menu(chat_id, "Əsas menyu bərpa edildi")
         return
 
     conn = get_local_conn()
@@ -15760,14 +15792,17 @@ def cb_admin_pending_actions(c):
     finally:
         conn.close()
 
+    update_admin_users_state(chat_id, filter_value=list_status, page=page)
     show_all_users(chat_id, status=list_status, page=page, message=c.message, force_new=True)
-    send_main_menu(chat_id)
 
 
 def get_admin_user_page(chat_id: int, list_type: str) -> int:
     if list_type == "unverified":
         list_type = "pending"
     try:
+        state = get_admin_users_state(chat_id)
+        if state.get("section") == "users" and state.get("filter") == list_type:
+            return max(1, int(state.get("page", 1)))
         return max(1, int(admin_user_page_state.get((chat_id, list_type), 1)))
     except Exception:
         return 1
@@ -15977,7 +16012,6 @@ def handle_admin_delete(c):
 
 def show_pending_users(chat_id):
     show_all_users(chat_id, status="pending", page=1, force_new=True)
-    send_main_menu(chat_id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_approve|"))
@@ -16168,6 +16202,7 @@ def handle_bot_refresh(message):
     admin_message_state.pop(chat_id, None)
     admin_panel_page_state.pop(chat_id, None)
     admin_user_page_state.pop(chat_id, None)
+    admin_navigation_state.pop(chat_id, None)
     ui_state.pop(chat_id, None)
     session_interactions.pop(chat_id, None)
     search_reminder_shown.discard(chat_id)
