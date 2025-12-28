@@ -260,6 +260,7 @@ admin_user_extend_state = {}
 admin_user_action_state = {}
 admin_message_state = {}
 admin_update_state = {}
+admin_state: Dict[int, str] = {}
 ui_state = defaultdict(list)
 customer_request_rule_state = {}
 keyword_alert_state = {}
@@ -1494,6 +1495,10 @@ def init_local_db():
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_users_chat_id_lookup ON users(chat_id)"
     )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_users_paid_until ON users(paid_until)")
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_users_demo_end ON users(demo_end_at, demo_expires_at)"
+    )
 
     cur.execute(
         """
@@ -2137,7 +2142,7 @@ def admin_effective_expires_expr() -> str:
 def admin_user_status_subquery() -> str:
     return (
         "(SELECT uw.chat_id, uw.full_name, uw.username, uw.effective_expires_at, "
-        "uw.computed_status, u.demo_end_at, u.demo_expires_at, u.paid_until "
+        "uw.computed_status, u.paid_until "
         "FROM users_with_status uw "
         "LEFT JOIN users u ON u.chat_id = uw.chat_id)"
     )
@@ -7705,6 +7710,7 @@ def handle_customer_request_rule_keyword(message):
 def return_to_main_menu(chat_id: int):
     search_state.pop(chat_id, None)
     admin_panel_page_state.pop(chat_id, None)
+    admin_state.pop(chat_id, None)
     if is_admin(chat_id):
         send_main_menu(chat_id)
     else:
@@ -14016,6 +14022,7 @@ def send_demo_users_report(chat_id: int, page: int = 1, message=None):
     if not is_admin(chat_id):
         return
 
+    set_admin_state(chat_id, "admin_users_demo")
     text, mk, _ = build_demo_users_view(page=page)
     if message:
         try:
@@ -14038,7 +14045,6 @@ def send_demo_users_report(chat_id: int, page: int = 1, message=None):
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
-    send_main_menu(chat_id)
 
 
 def extend_demo_for_user(user_id: int, days: int) -> Optional[datetime]:
@@ -15221,7 +15227,19 @@ def cb_admin_user_panel_actions(c):
         )
 
 
+def set_admin_state(chat_id: int, state: Optional[str]):
+    if state:
+        admin_state[chat_id] = state
+    else:
+        admin_state.pop(chat_id, None)
+
+
+def get_admin_state(chat_id: int) -> Optional[str]:
+    return admin_state.get(chat_id)
+
+
 def show_users_menu(chat_id):
+    set_admin_state(chat_id, "admin_users_menu")
     mk = types.InlineKeyboardMarkup()
     mk.add(
         types.InlineKeyboardButton(
@@ -15525,6 +15543,14 @@ def show_all_users(
             list_status = state.get("filter", "active") if state else "active"
 
         update_admin_users_state(chat_id, filter_value=list_status, page=page)
+        state_map = {
+            "active": "admin_users_active",
+            "demo": "admin_users_demo",
+            "expired": "admin_users_expired",
+            "blocked": "admin_users_blocked",
+            "pending": "admin_users_pending",
+        }
+        set_admin_state(chat_id, state_map.get(list_status))
 
         if list_status in ("active", "expired"):
             logger.info(
@@ -15741,8 +15767,19 @@ def cb_userlist(c):
     current_filter = state.get("filter", "active")
     target_page = state.get("page", 1) if current_filter == status else 1
     update_admin_users_state(c.message.chat.id, filter_value=status, page=target_page)
+    loading_message = None
+    try:
+        loading_message = bot.send_message(
+            c.message.chat.id, "⏳ Zəhmət olmasa gözləyin..."
+        )
+    except Exception:
+        loading_message = None
     show_all_users(
-        c.message.chat.id, status=status, page=target_page, message=None, force_new=True
+        c.message.chat.id,
+        status=status,
+        page=target_page,
+        message=loading_message,
+        force_new=False,
     )
 
 
@@ -15793,7 +15830,9 @@ def cb_admin_pending_actions(c):
         conn.close()
 
     update_admin_users_state(chat_id, filter_value=list_status, page=page)
-    show_all_users(chat_id, status=list_status, page=page, message=c.message, force_new=True)
+    show_all_users(
+        chat_id, status=list_status, page=page, message=c.message, force_new=False
+    )
 
 
 def get_admin_user_page(chat_id: int, list_type: str) -> int:
@@ -16010,8 +16049,15 @@ def handle_admin_delete(c):
 # =============== İSTİFADƏÇİ TƏSDİQİ (ADMIN) ===============
 
 
-def show_pending_users(chat_id):
-    show_all_users(chat_id, status="pending", page=1, force_new=True)
+def show_pending_users(chat_id, message=None):
+    set_admin_state(chat_id, "admin_users_pending")
+    show_all_users(
+        chat_id,
+        status="pending",
+        page=1,
+        message=message,
+        force_new=message is None,
+    )
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_approve|"))
@@ -16041,7 +16087,7 @@ def cb_user_approve_action(c):
     except Exception:
         pass
 
-    show_pending_users(c.message.chat.id)
+    show_pending_users(c.message.chat.id, message=c.message)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_demo|"))
@@ -16064,7 +16110,7 @@ def cb_user_demo_action(c):
         except Exception:
             pass
     safe_answer_callback_query(c.id, TEXTS_AZ["admin_user_demo_given"])
-    show_pending_users(c.message.chat.id)
+    show_pending_users(c.message.chat.id, message=c.message)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_free|"))
@@ -16080,7 +16126,7 @@ def cb_user_free_action(c):
         bot.send_message(uid, "? Limitsiz giri? aktiv edildi.")
     except Exception:
         pass
-    show_pending_users(c.message.chat.id)
+    show_pending_users(c.message.chat.id, message=c.message)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_reject|"))
@@ -16092,7 +16138,7 @@ def cb_user_reject_action(c):
     uid = int(parts[1])
     reject_user(uid)
     safe_answer_callback_query(c.id, "? R?dd edildi")
-    show_pending_users(c.message.chat.id)
+    show_pending_users(c.message.chat.id, message=c.message)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_block|"))
@@ -16106,7 +16152,7 @@ def cb_user_block_action(c):
     safe_answer_callback_query(
         c.id, "? Blokland?" if blocked else "?? D?yi?iklik olmad?"
     )
-    show_pending_users(c.message.chat.id)
+    show_pending_users(c.message.chat.id, message=c.message)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("uappr|"))
@@ -16131,7 +16177,7 @@ def cb_user_approve(c):
     except Exception:
         pass
 
-    show_pending_users(c.message.chat.id)
+    show_pending_users(c.message.chat.id, message=c.message)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ublock|"))
@@ -16144,7 +16190,7 @@ def cb_user_block_pending(c):
     block_user(uid)
 
     bot.answer_callback_query(c.id, "⛔ İstifadəçi bloklandı.")
-    show_pending_users(c.message.chat.id)
+    show_pending_users(c.message.chat.id, message=c.message)
 
 
 # =============== BOT YENİLƏMƏ BİLDİRİŞİ ===============
@@ -16203,6 +16249,7 @@ def handle_bot_refresh(message):
     admin_panel_page_state.pop(chat_id, None)
     admin_user_page_state.pop(chat_id, None)
     admin_navigation_state.pop(chat_id, None)
+    admin_state.pop(chat_id, None)
     ui_state.pop(chat_id, None)
     session_interactions.pop(chat_id, None)
     search_reminder_shown.discard(chat_id)
