@@ -2142,7 +2142,7 @@ def admin_effective_expires_expr() -> str:
 def admin_user_status_subquery() -> str:
     return (
         "(SELECT uw.chat_id, uw.full_name, uw.username, uw.effective_expires_at, "
-        "uw.computed_status, u.paid_until "
+        "uw.computed_status, u.paid_until, u.demo_end_at, u.demo_expires_at "
         "FROM users_with_status uw "
         "LEFT JOIN users u ON u.chat_id = uw.chat_id)"
     )
