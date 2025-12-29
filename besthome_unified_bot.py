@@ -7780,16 +7780,89 @@ def prompt_today_property(chat_id: int):
     bot.send_message(chat_id, "🏠 Əmlak tipini seç:", reply_markup=mk)
 
 
+def get_today_rayon_counts(filters: dict) -> Dict[str, int]:
+    if not os.path.exists(MAIN_DB):
+        return {}
+
+    op_code = filters.get("op")
+    op_norm = None
+    if op_code == "sat":
+        op_norm = "sale"
+    elif op_code == "kir":
+        op_norm = "rent"
+    elif op_code:
+        op_norm = normalize_operation_value(op_code)
+
+    operation_value = detect_db_operation_value(op_norm, "main") if op_norm else None
+
+    prop_code = filters.get("prop")
+    prop_filter = PROP_TYPES.get(prop_code) if prop_code and prop_code != "all" else None
+
+    since_dt = datetime.utcnow() - timedelta(hours=24)
+    params = [int(since_dt.timestamp()), format_sqlite_datetime(since_dt)]
+    where_parts = [
+        "WHERE ((typeof(created_at)='integer' AND created_at >= ?)",
+        "OR datetime(created_at) >= datetime(?))",
+        "AND COALESCE(TRIM(rayon), '') != ''",
+    ]
+
+    if operation_value:
+        where_parts.append("AND operation = ?")
+        params.append(operation_value)
+
+    if prop_filter:
+        where_parts.append("AND LOWER(prop_type) = LOWER(?)")
+        params.append(prop_filter)
+
+    sql = " ".join(
+        ["SELECT rayon, COUNT(*) as cnt", "FROM listings", *where_parts, "GROUP BY rayon"]
+    )
+
+    counts: Dict[str, int] = {}
+    name_by_norm: Dict[str, str] = {}
+    conn = None
+    try:
+        conn = get_main_conn()
+        cur = conn.cursor()
+        cur.execute(sql, params)
+        for row in cur.fetchall() or []:
+            rayon = (row[0] or "").strip()
+            cnt = int(row[1]) if row[1] is not None else 0
+            norm = normalize_today_rayon(rayon)
+            if not norm:
+                continue
+            key = name_by_norm.get(norm)
+            if not key:
+                name_by_norm[norm] = rayon or norm
+                key = name_by_norm[norm]
+            counts[key] = counts.get(key, 0) + cnt
+    except Exception:
+        logger.exception("Failed to fetch today rayon counts")
+    finally:
+        if conn:
+            close_main_conn(conn)
+
+    return counts
+
+
 def prompt_today_rayon(chat_id: int):
     rayons = REGION_OPTIONS.get("all", {}).get("rayons", [])
     if not rayons:
         send_today_results(chat_id, today_flow_state.get(chat_id, {}))
         return
+    rayon_counts = get_today_rayon_counts(today_flow_state.get(chat_id, {}))
+    normalized_counts = {
+        normalize_today_rayon(name): cnt for name, cnt in rayon_counts.items()
+    }
     mk = types.InlineKeyboardMarkup()
     mk.add(types.InlineKeyboardButton("Hamısı", callback_data="td|rn|all"))
     row = []
     for idx, rn in enumerate(rayons):
-        row.append(types.InlineKeyboardButton(rn, callback_data=f"td|rn|{idx}"))
+        count = normalized_counts.get(normalize_today_rayon(rn), 0)
+        if count == 0:
+            continue
+        label = f"{rn} ({count})"
+        row.append(types.InlineKeyboardButton(label, callback_data=f"td|rn|{idx}"))
         if len(row) == 2:
             mk.row(*row)
             row = []
