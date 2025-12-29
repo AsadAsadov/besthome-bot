@@ -6737,6 +6737,14 @@ STATS_PROPERTY_BUCKETS = {
     "torpaq": ["torpaq", "land", "plot"],
 }
 
+PROP_TYPE_EMOJI_MAP = {
+    "Mənzil": "🏠",
+    "Bağ evi": "🏡",
+    "Fərdi yaşayış evi": "🏘️",
+    "Qeyri yaşayış sahəsi": "🏢",
+    "Torpaq": "🌱",
+}
+
 
 def build_user_stats_keyboard(selected: str) -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup()
@@ -6763,18 +6771,30 @@ def format_stats_text(
         f"• Ümumi elanlar: {base_stats.get('total', 0)}",
         f"• 🔑 Satılır: {base_stats.get('sale_count', 0)}",
         f"• 🛏 Kirayə: {base_stats.get('rent_count', 0)}",
-        f"• 🏢 Mənzil: {base_stats.get('apartment_count', 0)}",
-        f"• 🏡 Həyət evi: {base_stats.get('house_count', 0)}",
-        f"• 🌱 Torpaq: {base_stats.get('land_count', 0)}",
-        "",
-        f"{label} göstəriciləri:",
-        f"• 🆕 Yeni elanlar: {period_stats.get('total', 0)}",
-        f"• 🔑 Satılır: {period_stats.get('sale_count', 0)}",
-        f"• 🛏 Kirayə: {period_stats.get('rent_count', 0)}",
-        f"• 🏢 Mənzil: {period_stats.get('apartment_count', 0)}",
-        f"• 🏡 Həyət evi: {period_stats.get('house_count', 0)}",
-        f"• 🌱 Torpaq: {period_stats.get('land_count', 0)}",
     ]
+    base_prop_types = base_stats.get("prop_type_counts", {}) or {}
+    period_prop_types = period_stats.get("prop_type_counts", {}) or {}
+
+    if base_prop_types:
+        for prop_type, count in base_prop_types.items():
+            emoji = PROP_TYPE_EMOJI_MAP.get(prop_type, "🏠")
+            lines.append(f"• {emoji} {prop_type}: {count}")
+
+    lines.extend(
+        [
+            "",
+            f"{label} göstəriciləri:",
+            f"• 🆕 Yeni elanlar: {period_stats.get('total', 0)}",
+            f"• 🔑 Satılır: {period_stats.get('sale_count', 0)}",
+            f"• 🛏 Kirayə: {period_stats.get('rent_count', 0)}",
+        ]
+    )
+
+    if period_prop_types:
+        for prop_type, count in period_prop_types.items():
+            emoji = PROP_TYPE_EMOJI_MAP.get(prop_type, "🏠")
+            lines.append(f"• {emoji} {prop_type}: {count}")
+
     if period_stats.get("note"):
         lines.append(f"({period_stats['note']})")
 
@@ -10685,9 +10705,7 @@ def compute_user_statistics(period: str) -> dict:
         "total": 0,
         "sale_count": 0,
         "rent_count": 0,
-        "apartment_count": 0,
-        "house_count": 0,
-        "land_count": 0,
+        "prop_type_counts": {},
         "meta": {
             "table": "listings",
             "ts_col": "created_at",
@@ -10741,46 +10759,22 @@ def compute_user_statistics(period: str) -> dict:
             key_base,
         )
 
-        op_expr = f"LOWER(TRIM(COALESCE(l.\"{op_col}\", '')))" if op_col else None
-        type_expr = f"LOWER(TRIM(COALESCE(l.\"{type_col}\", '')))" if type_col else None
+        op_expr = f"l.\"{op_col}\"" if op_col else None
+        type_expr = f"l.\"{type_col}\"" if type_col else None
 
         select_parts = ["COUNT(*) AS total"]
         params: List[Any] = []
 
         if op_expr:
-            sale_vals = STATS_OPERATION_BUCKETS["satilir"]
-            rent_vals = STATS_OPERATION_BUCKETS["kiraye"]
             select_parts.append(
-                f"SUM(CASE WHEN {op_expr} IN ({','.join(['?']*len(sale_vals))}) THEN 1 ELSE 0 END) AS sale_count"
+                f"SUM(CASE WHEN {op_expr} = ? THEN 1 ELSE 0 END) AS sale_count"
             )
-            params += sale_vals
             select_parts.append(
-                f"SUM(CASE WHEN {op_expr} IN ({','.join(['?']*len(rent_vals))}) THEN 1 ELSE 0 END) AS rent_count"
+                f"SUM(CASE WHEN {op_expr} = ? THEN 1 ELSE 0 END) AS rent_count"
             )
-            params += rent_vals
+            params.extend(["Satılır", "Kirayə verilir"])
         else:
             select_parts.extend(["0 AS sale_count", "0 AS rent_count"])
-
-        if type_expr:
-            apt_vals = STATS_PROPERTY_BUCKETS["menzil"]
-            house_vals = STATS_PROPERTY_BUCKETS["heyet_evi"]
-            land_vals = STATS_PROPERTY_BUCKETS["torpaq"]
-            select_parts.append(
-                f"SUM(CASE WHEN {type_expr} IN ({','.join(['?']*len(apt_vals))}) THEN 1 ELSE 0 END) AS apartment_count"
-            )
-            params += apt_vals
-            select_parts.append(
-                f"SUM(CASE WHEN {type_expr} IN ({','.join(['?']*len(house_vals))}) THEN 1 ELSE 0 END) AS house_count"
-            )
-            params += house_vals
-            select_parts.append(
-                f"SUM(CASE WHEN {type_expr} IN ({','.join(['?']*len(land_vals))}) THEN 1 ELSE 0 END) AS land_count"
-            )
-            params += land_vals
-        else:
-            select_parts.extend(
-                ["0 AS apartment_count", "0 AS house_count", "0 AS land_count"]
-            )
 
         where_clauses: List[str] = []
         where_params: List[Any] = []
@@ -10804,11 +10798,22 @@ def compute_user_statistics(period: str) -> dict:
                 "total": _row_value_safe(row, "total", 0) or 0,
                 "sale_count": _row_value_safe(row, "sale_count", 0) or 0,
                 "rent_count": _row_value_safe(row, "rent_count", 0) or 0,
-                "apartment_count": _row_value_safe(row, "apartment_count", 0) or 0,
-                "house_count": _row_value_safe(row, "house_count", 0) or 0,
-                "land_count": _row_value_safe(row, "land_count", 0) or 0,
             }
         )
+
+        if type_expr:
+            prop_query = (
+                f"SELECT {type_expr} AS prop_type, COUNT(*) AS cnt FROM listings l{where_sql} "
+                "GROUP BY prop_type ORDER BY prop_type"
+            )
+            cur.execute(prop_query, where_params)
+            prop_counts = {}
+            for r in cur.fetchall() or []:
+                key = r["prop_type"] if isinstance(r, dict) else r[0]
+                if key in (None, ""):
+                    continue
+                prop_counts[str(key)] = r["cnt"] if isinstance(r, dict) else r[1]
+            stats["prop_type_counts"] = prop_counts
     except Exception:
         logger.exception("Failed to compute user statistics")
         return {}
@@ -10820,6 +10825,7 @@ def compute_user_statistics(period: str) -> dict:
                 pass
 
     statistics_cache[cache_key] = {"ts": now_ts, "data": stats}
+    logger.debug("USER STATS source=listings prop_type=dynamic operation=exact_string")
     _log_user_stats_consistency()
     return stats
 
