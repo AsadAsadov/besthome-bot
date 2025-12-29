@@ -250,6 +250,11 @@ ADMIN_PANEL_PASSWORD_HASHES, ADMIN_PANEL_SHARED_PASSWORD_HASH = (
 user_state = {}  # Yeni elan proses state
 search_state = {}  # Açar sözlə axtarış paging state
 today_flow_state = {}
+UI_CONTEXT_MAIN = "main_menu"
+UI_CONTEXT_TODAY = "browsing_today_listings"
+UI_CONTEXT_SEARCH = "browsing_search_results"
+UI_CONTEXT_ADMIN = "browsing_admin_users"
+ui_context_state: Dict[int, str] = defaultdict(lambda: UI_CONTEXT_MAIN)
 search_reminder_shown = set()  # Session-level reminder flag
 session_interactions = {}
 db_update_state_lock = threading.Lock()
@@ -603,6 +608,14 @@ def normalize_text(text: str) -> str:
         text = text.replace(k, v)
     text = " ".join(text.split())
     return text
+
+
+def set_ui_context(chat_id: int, context: str):
+    ui_context_state[chat_id] = context
+
+
+def get_ui_context(chat_id: int) -> str:
+    return ui_context_state.get(chat_id, UI_CONTEXT_MAIN)
 
 
 def safe_send(chat_id: int, text: str, **kwargs):
@@ -4506,7 +4519,7 @@ def recover_main_menu(
         except Exception:
             logger.debug("Menu recovery edit failed chat_id=%s", chat_id)
     try:
-        send_main_menu(chat_id, text)
+        send_main_menu(chat_id, text, force=True)
     except Exception:
         logger.exception("Failed to send main menu chat_id=%s", chat_id)
 
@@ -4575,7 +4588,15 @@ def send_main_menu(
     *,
     parse_mode: Optional[str] = None,
     disable_preview: Optional[bool] = None,
+    force: bool = False,
 ):
+    current_ctx = get_ui_context(chat_id)
+    if not force and current_ctx != UI_CONTEXT_MAIN:
+        logger.debug(
+            "Skipping main menu for chat_id=%s context=%s", chat_id, current_ctx
+        )
+        return
+    set_ui_context(chat_id, UI_CONTEXT_MAIN)
     kb = build_main_menu(is_admin(chat_id), has_customer_requests_access(chat_id))
     send_with_reply_keyboard(
         chat_id,
@@ -4913,6 +4934,7 @@ def start_cmd(message):
         return
 
     set_user_state(chat_id, "MAIN")
+    set_ui_context(chat_id, UI_CONTEXT_MAIN)
     main_menu(chat_id)
 
 
@@ -5927,7 +5949,6 @@ def send_keyword_notification_summaries(scan_state: Dict[int, Dict[str, Any]]):
         summary_text = f"🔔 Açar sözlər üzrə {total} uyğun elan tapıldı"
         try:
             bot.send_message(user_id, summary_text, reply_markup=mk)
-            send_main_menu(user_id)
             logger.info(
                 "keyword notification summary sent chat_id=%s total=%s", user_id, total
             )
@@ -6343,7 +6364,8 @@ def complaint_category_handler(message):
     choice = message.text
     if choice == COMPLAINT_BACK:
         complaint_flow_state.pop(chat_id, None)
-        send_main_menu(chat_id)
+        set_ui_context(chat_id, UI_CONTEXT_MAIN)
+        send_main_menu(chat_id, force=True)
         return
     if choice not in COMPLAINT_CATEGORIES:
         bot.send_message(
@@ -6381,7 +6403,8 @@ def complaint_message_handler(message):
         notify_admin_complaint(message, category, text)
     except Exception:
         pass
-    send_main_menu(chat_id, "✅ Mesajınız qəbul edildi.\nTəşəkkür edirik! 🙏")
+    set_ui_context(chat_id, UI_CONTEXT_MAIN)
+    send_main_menu(chat_id, "✅ Mesajınız qəbul edildi.\nTəşəkkür edirik! 🙏", force=True)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("complaint_reply:"))
@@ -6645,7 +6668,8 @@ def cb_demo_activate(c):
     bot.send_message(ADMIN_ID, admin_text)
     reset_user_state(chat_id)
     reset_search_state(chat_id)
-    send_main_menu(chat_id)
+    set_ui_context(chat_id, UI_CONTEXT_MAIN)
+    send_main_menu(chat_id, force=True)
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -6758,7 +6782,8 @@ def handle_common_nav(message):
     if txt in CANCEL_CMDS:
         reset_user_state(chat_id)
         bot.send_message(chat_id, "❌ Əməliyyat ləğv edildi.")
-        send_main_menu(chat_id)
+        set_ui_context(chat_id, UI_CONTEXT_MAIN)
+        send_main_menu(chat_id, force=True)
         return True
     return False
 
@@ -7419,7 +7444,8 @@ def show_blacklist(message):
 def status_back_to_main(message):
     if not ensure_allowed(message):
         return
-    send_main_menu(message.chat.id)
+    set_ui_context(message.chat.id, UI_CONTEXT_MAIN)
+    send_main_menu(message.chat.id, force=True)
 
 
 @bot.message_handler(func=lambda m: m.text == "🔥 Ən çox baxılan elanlar")
@@ -7522,7 +7548,6 @@ def send_today_results(chat_id: int, filters: dict, message=None):
     if not total:
         if not replace_loading_message(loading_ref, "Bu gün üçün uyğun elan yoxdur."):
             bot.send_message(chat_id, "Bu gün üçün uyğun elan yoxdur.")
-        send_main_menu(chat_id)
         return
 
     log_search_event(
@@ -7543,6 +7568,7 @@ def send_today_results(chat_id: int, filters: dict, message=None):
 def start_today_flow(chat_id: int):
     reset_search_state(chat_id)
     today_flow_state[chat_id] = {"op": "all", "prop": "all", "rayon": "all"}
+    set_ui_context(chat_id, UI_CONTEXT_TODAY)
     send_today_stats_message(chat_id, today_flow_state[chat_id])
     prompt_today_operation(chat_id)
 
@@ -7826,8 +7852,9 @@ def return_to_main_menu(chat_id: int):
     admin_panel_page_state.pop(chat_id, None)
     admin_state.pop(chat_id, None)
     set_user_state(chat_id, "MAIN")
+    set_ui_context(chat_id, UI_CONTEXT_MAIN)
     if is_admin(chat_id):
-        send_main_menu(chat_id)
+        send_main_menu(chat_id, force=True)
     else:
         main_menu(chat_id)
 
@@ -9177,10 +9204,8 @@ def cb_keyword_notification_view(c):
     items = ctx.get("items") or []
     if not items:
         bot.send_message(chat_id, "⚠️ Baxmaq üçün yeni elan yoxdur.")
-        send_main_menu(chat_id)
         return
     send_paginated_results(chat_id, mode="keyword_notif", params={}, page=1)
-    send_main_menu(chat_id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "notif_menu")
@@ -9546,7 +9571,8 @@ def finalize_notification_rule(chat_id: int):
     rule_id = save_notification_rule(chat_id, data)
     bot.send_message(chat_id, f"✅ Bildiriş qaydası yaradıldı (ID: {rule_id}).")
     send_criteria_list(chat_id)
-    send_main_menu(chat_id)
+    set_ui_context(chat_id, UI_CONTEXT_MAIN)
+    send_main_menu(chat_id, force=True)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_stopcrit:"))
@@ -10077,7 +10103,7 @@ def matches_today_rayon(ev: dict, filters: dict) -> bool:
     if not rayon or rayon in {"all", "hamısı"}:
         return True
     candidates = extract_today_rayon_candidates(ev)
-    return any(candidate == rayon for candidate in candidates)
+    return any(candidate == rayon or rayon in candidate for candidate in candidates)
 
 
 def matches_rooms(ev: dict, room_code: str) -> bool:
@@ -10444,10 +10470,19 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
         flt, params = build_filters_sql(op_code, prop_code, None, mode="main")
         date_col = detect_table_date_column(cur, "listings")
         date_sql, date_params = build_today_clause(date_col)
+        rayon_sql, rayon_params = build_rayon_filter_sql(
+            cur, "listings", filters.get("rayon"), ""
+        )
         order_col = date_col or "date_read"
+        where_sql = flt + date_sql + rayon_sql
+        logger.debug(
+            "today query main where=%s params=%s",
+            where_sql,
+            params + date_params + rayon_params,
+        )
         cur.execute(
-            base + flt + date_sql + f" ORDER BY {order_col} DESC, id DESC",
-            params + date_params,
+            base + where_sql + f" ORDER BY {order_col} DESC, id DESC",
+            params + date_params + rayon_params,
         )
         for r in cur.fetchall():
             d = dict(r)
@@ -10461,10 +10496,19 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
     flt, params = build_filters_sql(op_code, prop_code, None, mode="local")
     date_col = detect_table_date_column(cur, "listings_approved")
     date_sql, date_params = build_today_clause(date_col)
+    rayon_sql, rayon_params = build_rayon_filter_sql(
+        cur, "listings_approved", filters.get("rayon"), ""
+    )
     order_col = date_col or "date_added"
+    where_sql = flt + date_sql + rayon_sql
+    logger.debug(
+        "today query local where=%s params=%s",
+        where_sql,
+        params + date_params + rayon_params,
+    )
     cur.execute(
-        base + flt + date_sql + f" ORDER BY {order_col} DESC, id DESC",
-        params + date_params,
+        base + where_sql + f" ORDER BY {order_col} DESC, id DESC",
+        params + date_params + rayon_params,
     )
     for r in cur.fetchall():
         d = dict(r)
@@ -11164,6 +11208,19 @@ def send_paginated_results(
     loading_ref=None,
     show_summary: bool = True,
 ):
+    if mode == "today":
+        set_ui_context(chat_id, UI_CONTEXT_TODAY)
+    elif mode in {
+        "filter",
+        "keyword",
+        "smart",
+        "phone",
+        "favorites",
+        "statuslist",
+        "topviews",
+        "keyword_notif",
+    }:
+        set_ui_context(chat_id, UI_CONTEXT_SEARCH)
     if mode == "topviews" and not is_admin(chat_id):
         if not replace_loading_message(
             loading_ref, "❌ Bu bölmə yalnız admin üçündür."
@@ -11180,7 +11237,6 @@ def send_paginated_results(
     if total == 0:
         if not replace_loading_message(loading_ref, "Siyahı boşdur."):
             bot.send_message(chat_id, "Siyahı boşdur.")
-        send_main_menu(chat_id)
         return
 
     summary_map = {
@@ -11254,7 +11310,6 @@ def send_paginated_results(
 
     nav = build_pagination_keyboard(page, total_pages)
     bot.send_message(chat_id, f"📄 Səhifə {page}/{total_pages}", reply_markup=nav)
-    send_main_menu(chat_id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("pg:"))
@@ -11269,7 +11324,8 @@ def cb_pagination(c):
             bot.answer_callback_query(c.id, "Səhifə tapılmadı.")
         except Exception:
             pass
-        send_main_menu(chat_id, "Əsas menyu bərpa edildi")
+        set_ui_context(chat_id, UI_CONTEXT_MAIN)
+        send_main_menu(chat_id, "Əsas menyu bərpa edildi", force=True)
         return
 
     action = c.data.split(":", 1)[1]
@@ -11720,7 +11776,6 @@ def perform_structured_search(chat_id, offset=0, edit_msg=None):
     st = search_state.get(chat_id)
     if not st or st.get("mode") != "structured":
         bot.send_message(chat_id, "Sessiya tapılmadı. Yenidən başlayın.")
-        send_main_menu(chat_id)
         return
 
     filters = st.get("filters", {})
@@ -11777,13 +11832,11 @@ def keyword_search_handler(message):
     chat_id = message.chat.id
     if not check_limit(chat_id, "keyword", 30):
         bot.send_message(chat_id, "Günlük açar sözlə axtarış limitiniz bitib.")
-        send_main_menu(chat_id)
         return
 
     text = normalize_text(message.text or "")
     if not text:
         bot.send_message(chat_id, "Boş sorğu göndərdiniz.")
-        send_main_menu(chat_id)
         return
 
     st = search_state.get(chat_id, {})
@@ -11814,7 +11867,6 @@ def keyword_search_handler(message):
             loading_ref, "❌ Uyğun elan tapılmadı. Yenidən axtarış edin."
         ):
             bot.send_message(chat_id, "❌ Uyğun elan tapılmadı. Yenidən axtarış edin.")
-        send_main_menu(chat_id)
         return
 
     inc_limit(chat_id, "keyword", 1)
@@ -15974,6 +16026,7 @@ def select_page_users(chat_id: int, rows: List[sqlite3.Row]):
 def show_all_users(
     chat_id, status="active", page: int = 1, message=None, force_new: bool = False
 ):
+    set_ui_context(chat_id, UI_CONTEXT_ADMIN)
     conn = None
     started_at = time.perf_counter()
     try:
@@ -18910,7 +18963,8 @@ def subscription_notifier():
 
 
 def main_menu(chat_id):
-    send_main_menu(chat_id, "📋 Əsas menyudan seçim et:")
+    set_ui_context(chat_id, UI_CONTEXT_MAIN)
+    send_main_menu(chat_id, "📋 Əsas menyudan seçim et:", force=True)
 
 
 @bot.callback_query_handler(func=lambda c: True)
