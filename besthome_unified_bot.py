@@ -3600,6 +3600,110 @@ def detect_table_date_column(cur, table: str) -> Optional[str]:
     return None
 
 
+def _detect_ts_kind(cur, table: str, col: str) -> Optional[str]:
+    try:
+        cur.execute(
+            f"SELECT {col} FROM {table} "
+            f"WHERE {col} IS NOT NULL AND {col} != '' ORDER BY ROWID DESC LIMIT 1"
+        )
+        row = cur.fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+
+    value = row[0]
+    if isinstance(value, (int, float)):
+        if len(str(int(value))) >= 10:
+            return "unix"
+        return None
+    value_str = str(value or "").strip()
+    if value_str.isdigit() and len(value_str) >= 10:
+        return "unix"
+    if len(value_str) >= 10:
+        return "iso"
+    return None
+
+
+def _select_first_existing_table(cur, candidates: Tuple[str, ...]) -> Optional[str]:
+    for name in candidates:
+        try:
+            cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+                (name,),
+            )
+            if cur.fetchone():
+                return name
+        except Exception:
+            continue
+    return None
+
+
+def detect_stats_source(cur) -> Dict[str, Any]:
+    table = _select_first_existing_table(cur, ("listings_approved", "listings"))
+    if not table:
+        try:
+            cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND lower(name) LIKE '%listing%' ORDER BY name"
+            )
+            rows = cur.fetchall() or []
+            for row in rows:
+                candidate = row[0]
+                cols = get_table_columns(cur, candidate)
+                if cols and (
+                    any(c in cols for c in STATS_TS_CANDIDATES)
+                    or any(c in cols for c in STATS_OPERATION_COLUMNS)
+                    or any(c in cols for c in STATS_PROPERTY_COLUMNS)
+                ):
+                    table = candidate
+                    break
+            if not table and rows:
+                table = rows[0][0]
+        except Exception:
+            table = None
+
+    cols = get_table_columns(cur, table) if table else {}
+
+    ts_col = None
+    ts_kind = None
+    for candidate in STATS_TS_CANDIDATES:
+        if candidate in cols:
+            ts_col = cols[candidate]
+            ts_kind = _detect_ts_kind(cur, table, ts_col)
+            if ts_kind:
+                break
+    if ts_col and not ts_kind:
+        ts_kind = "iso"
+    op_col = None
+    for candidate in STATS_OPERATION_COLUMNS:
+        if candidate in cols:
+            op_col = cols[candidate]
+            break
+    type_col = None
+    for candidate in STATS_PROPERTY_COLUMNS:
+        if candidate in cols:
+            type_col = cols[candidate]
+            break
+
+    meta = {
+        "table": table,
+        "ts_col": ts_col,
+        "ts_kind": ts_kind or "none",
+        "op_col": op_col,
+        "type_col": type_col,
+    }
+    logger.info(
+        "STATS source_table=%s ts_col=%s ts_kind=%s op_col=%s type_col=%s",
+        table,
+        ts_col,
+        ts_kind or "none",
+        op_col,
+        type_col,
+    )
+    return meta
+
+
 def ensure_created_at_column(
     conn, table: str, fallback_cols: Optional[Tuple[str, ...]] = None
 ):
@@ -6544,6 +6648,31 @@ STATS_FILTER_LABELS = {
     "all": "🧾 Ümumi",
 }
 
+STATS_TS_CANDIDATES = (
+    "created_at",
+    "inserted_at",
+    "added_at",
+    "published_at",
+    "date_added",
+    "ts",
+    "created_ts",
+)
+
+STATS_OPERATION_COLUMNS = ("operation", "deal_type", "listing_type")
+STATS_PROPERTY_COLUMNS = ("prop_type", "property_type", "category", "type")
+STATS_RECENT_LIMIT = 500
+
+STATS_OPERATION_BUCKETS = {
+    "satilir": ["satilir", "satılır", "sale", "satish", "for sale", "sell"],
+    "kiraye": ["kiraye", "kirayə", "rent", "icarə", "for rent"],
+}
+
+STATS_PROPERTY_BUCKETS = {
+    "menzil": ["menzil", "mənzil", "apartment", "kvartira"],
+    "heyet_evi": ["heyet evi", "həyət evi", "house", "villa"],
+    "torpaq": ["torpaq", "land", "plot"],
+}
+
 
 def build_user_stats_keyboard(selected: str) -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup()
@@ -6558,7 +6687,9 @@ def build_user_stats_keyboard(selected: str) -> types.InlineKeyboardMarkup:
     return mk
 
 
-def format_stats_text(base_stats: dict, period_stats: dict, period_key: str) -> str:
+def format_stats_text(
+    base_stats: dict, period_stats: dict, period_key: str, is_admin: bool = False
+) -> str:
     label = STATS_FILTER_LABELS.get(period_key, "🧾 Ümumi")
     lines = [
         "📊 <b>BestHome Statistikası</b>",
@@ -6580,6 +6711,23 @@ def format_stats_text(base_stats: dict, period_stats: dict, period_key: str) -> 
         f"• 🏡 Həyət evi: {period_stats.get('house_count', 0)}",
         f"• 🌱 Torpaq: {period_stats.get('land_count', 0)}",
     ]
+    if period_stats.get("note"):
+        lines.append(f"({period_stats['note']})")
+
+    if is_admin:
+        meta = period_stats.get("meta") or base_stats.get("meta") or {}
+        lines.append(
+            ""
+        )
+        lines.append(
+            "(dbg: table={} ts={} {} op={} type={})".format(
+                meta.get("table") or "-",
+                meta.get("ts_col") or "-",
+                meta.get("ts_kind") or "none",
+                meta.get("op_col") or "-",
+                meta.get("type_col") or "-",
+            )
+        )
     return "\n".join(lines)
 
 
@@ -6588,7 +6736,8 @@ def send_user_statistics(chat_id: int, period_key: str, message_id: Optional[int
     user_stats_filter[chat_id] = selected
     base_stats = fetch_global_statistics("all")
     period_stats = fetch_global_statistics(selected)
-    text = format_stats_text(base_stats, period_stats, selected)
+    is_admin = chat_id in set(int(x) for x in ADMIN_IDS)
+    text = format_stats_text(base_stats, period_stats, selected, is_admin=is_admin)
     keyboard = build_user_stats_keyboard(selected)
 
     if message_id:
@@ -10319,20 +10468,140 @@ def is_listing_active(ev: dict, status_map: dict) -> bool:
     return status not in {"sold", "rented", "blacklisted"}
 
 
-def _build_like_clause(column: str, keywords: List[str]) -> tuple:
-    if not keywords:
-        return "0", []
-    conds = []
-    params = []
-    for kw in keywords:
-        conds.append(f"LOWER(COALESCE({column}, '')) LIKE ?")
-        params.append(f"%{kw.lower()}%")
-    return "(" + " OR ".join(conds) + ")", params
+def compute_stats(
+    conn: sqlite3.Connection,
+    source_table: Optional[str],
+    ts_col: Optional[str],
+    ts_kind: str,
+    op_col: Optional[str],
+    type_col: Optional[str],
+    window: str,
+) -> Dict[str, Any]:
+    cur = conn.cursor()
+    stats: Dict[str, Any] = {
+        "total": 0,
+        "sale_count": 0,
+        "rent_count": 0,
+        "apartment_count": 0,
+        "house_count": 0,
+        "land_count": 0,
+        "meta": {
+            "table": source_table,
+            "ts_col": ts_col,
+            "ts_kind": ts_kind or "none",
+            "op_col": op_col,
+            "type_col": type_col,
+        },
+    }
+
+    if not source_table:
+        stats["note"] = "Tarix məlumatı yoxdur, son 0 elan"
+        return stats
+
+    if ts_col and ts_kind in {"unix", "iso"}:
+        try:
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{source_table}_{ts_col} ON {source_table}({ts_col})"
+            )
+        except Exception:
+            pass
+
+    op_expr = f"LOWER(TRIM(COALESCE(l.\"{op_col}\", '')))" if op_col else None
+    type_expr = f"LOWER(TRIM(COALESCE(l.\"{type_col}\", '')))" if type_col else None
+
+    select_parts = ["COUNT(*) AS total"]
+    params: List[Any] = []
+
+    if op_expr:
+        sale_vals = STATS_OPERATION_BUCKETS["satilir"]
+        rent_vals = STATS_OPERATION_BUCKETS["kiraye"]
+        select_parts.append(
+            f"SUM(CASE WHEN {op_expr} IN ({','.join(['?']*len(sale_vals))}) THEN 1 ELSE 0 END) AS sale_count"
+        )
+        params += sale_vals
+        select_parts.append(
+            f"SUM(CASE WHEN {op_expr} IN ({','.join(['?']*len(rent_vals))}) THEN 1 ELSE 0 END) AS rent_count"
+        )
+        params += rent_vals
+    else:
+        select_parts.extend(["0 AS sale_count", "0 AS rent_count"])
+
+    if type_expr:
+        apt_vals = STATS_PROPERTY_BUCKETS["menzil"]
+        house_vals = STATS_PROPERTY_BUCKETS["heyet_evi"]
+        land_vals = STATS_PROPERTY_BUCKETS["torpaq"]
+        select_parts.append(
+            f"SUM(CASE WHEN {type_expr} IN ({','.join(['?']*len(apt_vals))}) THEN 1 ELSE 0 END) AS apartment_count"
+        )
+        params += apt_vals
+        select_parts.append(
+            f"SUM(CASE WHEN {type_expr} IN ({','.join(['?']*len(house_vals))}) THEN 1 ELSE 0 END) AS house_count"
+        )
+        params += house_vals
+        select_parts.append(
+            f"SUM(CASE WHEN {type_expr} IN ({','.join(['?']*len(land_vals))}) THEN 1 ELSE 0 END) AS land_count"
+        )
+        params += land_vals
+    else:
+        select_parts.extend(
+            ["0 AS apartment_count", "0 AS house_count", "0 AS land_count"]
+        )
+
+    where_clauses = []
+    where_params: List[Any] = []
+    window_days = {"24h": 1, "7d": 7, "30d": 30}.get(window)
+    use_recent = False
+    if window != "all" and window_days:
+        if ts_col and ts_kind == "unix":
+            seconds = window_days * 24 * 3600
+            where_clauses.append(
+                f"COALESCE(l.\"{ts_col}\", 0) >= (strftime('%s','now') - ?)"
+            )
+            where_params.append(seconds)
+        elif ts_col and ts_kind == "iso":
+            where_clauses.append(
+                f"datetime(l.\"{ts_col}\") >= datetime('now', ?)"
+            )
+            where_params.append(f"-{window_days} days")
+        else:
+            use_recent = True
+            stats["note"] = f"Tarix məlumatı yoxdur, son {STATS_RECENT_LIMIT} elan"
+
+    cols = get_table_columns(cur, source_table)
+    order_col = None
+    for candidate in ("id", "listing_id"):
+        if candidate in cols:
+            order_col = cols[candidate]
+            break
+    if not order_col:
+        order_col = "ROWID"
+
+    from_clause = f"{source_table} l"
+    if use_recent:
+        from_clause = (
+            f"(SELECT * FROM {source_table} ORDER BY {order_col} DESC LIMIT {STATS_RECENT_LIMIT}) l"
+        )
+
+    where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    query = f"SELECT {', '.join(select_parts)} FROM {from_clause}{where_sql}"
+
+    cur.execute(query, params + where_params)
+    row = cur.fetchone() or {}
+    stats.update(
+        {
+            "total": _row_value_safe(row, "total", 0) or 0,
+            "sale_count": _row_value_safe(row, "sale_count", 0) or 0,
+            "rent_count": _row_value_safe(row, "rent_count", 0) or 0,
+            "apartment_count": _row_value_safe(row, "apartment_count", 0) or 0,
+            "house_count": _row_value_safe(row, "house_count", 0) or 0,
+            "land_count": _row_value_safe(row, "land_count", 0) or 0,
+        }
+    )
+    return stats
 
 
 def fetch_global_statistics(period: str = "all") -> dict:
-    period_days = {"24h": 1, "7d": 7, "30d": 30, "all": None}
-    key = period if period in period_days else "all"
+    key = period if period in {"24h", "7d", "30d", "all"} else "all"
 
     now_ts = time.time()
     cached = statistics_cache.get(key)
@@ -10342,83 +10611,17 @@ def fetch_global_statistics(period: str = "all") -> dict:
 
     started = time.time()
     conn = get_local_conn()
-    stats: Dict[str, Any] = {
-        "total": 0,
-        "sale_count": 0,
-        "rent_count": 0,
-        "apartment_count": 0,
-        "house_count": 0,
-        "land_count": 0,
-    }
     try:
         cur = conn.cursor()
-
-        sale_clause, sale_params = _build_like_clause(
-            "l.operation", OP_CODES.get("sat", [])
-        )
-        rent_clause, rent_params = _build_like_clause(
-            "l.operation", OP_CODES.get("kir", [])
-        )
-        apt_clause, apt_params = _build_like_clause(
-            "l.prop_type", [PROP_TYPES.get("m", "")]
-        )
-        house_clause, house_params = _build_like_clause(
-            "l.prop_type", [PROP_TYPES.get("f", "")]
-        )
-        land_clause, land_params = _build_like_clause(
-            "l.prop_type", [PROP_TYPES.get("t", "")]
-        )
-
-        active_filter = (
-            "COALESCE(ls.status, 'active') NOT IN ('sold','rented','blacklisted')"
-        )
-
-        date_col = detect_table_date_column(cur, "listings_approved")
-        date_filter = ""
-        date_params: List[Any] = []
-        days = period_days.get(key)
-        if days is not None:
-            if not date_col:
-                logger.debug("Date column missing for stats period=%s", key)
-                statistics_cache[key] = {"ts": now_ts, "data": stats}
-                return stats
-            cutoff = datetime.utcnow() - timedelta(days=days)
-            date_filter = f" AND {date_col} >= ?"
-            date_params.append(cutoff.isoformat())
-
-        query = f"""
-            SELECT
-                COUNT(*) AS total,
-                SUM(CASE WHEN {sale_clause} THEN 1 ELSE 0 END) AS sale_count,
-                SUM(CASE WHEN {rent_clause} THEN 1 ELSE 0 END) AS rent_count,
-                SUM(CASE WHEN {apt_clause} THEN 1 ELSE 0 END) AS apartment_count,
-                SUM(CASE WHEN {house_clause} THEN 1 ELSE 0 END) AS house_count,
-                SUM(CASE WHEN {land_clause} THEN 1 ELSE 0 END) AS land_count
-            FROM listings_approved l
-            LEFT JOIN listing_status ls ON ls.source = 'local' AND ls.listing_id = l.id
-            WHERE {active_filter}{date_filter}
-        """
-
-        params = (
-            sale_params
-            + rent_params
-            + apt_params
-            + house_params
-            + land_params
-            + date_params
-        )
-        cur.execute(query, params)
-        row = cur.fetchone() or {}
-
-        stats.update(
-            {
-                "total": _row_value_safe(row, "total", 0) or 0,
-                "sale_count": _row_value_safe(row, "sale_count", 0) or 0,
-                "rent_count": _row_value_safe(row, "rent_count", 0) or 0,
-                "apartment_count": _row_value_safe(row, "apartment_count", 0) or 0,
-                "house_count": _row_value_safe(row, "house_count", 0) or 0,
-                "land_count": _row_value_safe(row, "land_count", 0) or 0,
-            }
+        meta = detect_stats_source(cur)
+        stats = compute_stats(
+            conn,
+            meta.get("table"),
+            meta.get("ts_col"),
+            meta.get("ts_kind", "none"),
+            meta.get("op_col"),
+            meta.get("type_col"),
+            key,
         )
     finally:
         try:
