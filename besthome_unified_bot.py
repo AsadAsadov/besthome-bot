@@ -1434,8 +1434,12 @@ def init_local_db():
             date_joined TEXT,
             approved INTEGER DEFAULT 0,
             blocked INTEGER DEFAULT 0,
+            is_blocked INTEGER DEFAULT 0,
             blocked_at TEXT,
+            last_error TEXT,
             status TEXT,
+            is_active INTEGER DEFAULT 1,
+            deleted_at TEXT,
             joined_at TEXT,
             demo_start_at TEXT,
             demo_end_at TEXT,
@@ -1469,6 +1473,10 @@ def init_local_db():
         "ALTER TABLE users ADD COLUMN last_status_change_at TEXT",
         "ALTER TABLE users ADD COLUMN is_first_start INTEGER DEFAULT 0",
         "ALTER TABLE users ADD COLUMN customer_requests_enabled INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN is_blocked INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN last_error TEXT",
+        "ALTER TABLE users ADD COLUMN is_active INTEGER DEFAULT 1",
+        "ALTER TABLE users ADD COLUMN deleted_at TEXT",
     ]:
         try:
             cur.execute(alter_stmt)
@@ -2354,8 +2362,9 @@ def get_user_record(chat_id: int) -> Optional[dict]:
         """
         SELECT u.chat_id, u.full_name, u.username, u.status, u.joined_at, u.demo_start_at,
                u.demo_end_at, u.paid_until, u.last_status_change_at, u.approved, u.blocked,
-               u.promo_active, u.promo_expires_at, u.referred_by, u.referral_bonus_used,
-               u.referral_milestone_used, u.demo_used, u.demo_expires_at, u.blocked_at,
+               u.is_blocked, u.promo_active, u.promo_expires_at, u.referred_by,
+               u.referral_bonus_used, u.referral_milestone_used, u.demo_used,
+               u.demo_expires_at, u.blocked_at, u.last_error, u.is_active, u.deleted_at,
                uw.computed_status, uw.effective_expires_at
         FROM users u
         LEFT JOIN users_with_status uw ON uw.chat_id = u.chat_id
@@ -15890,16 +15899,23 @@ def admin_show_user_panel(
         target_id
     )
     effective_raw = record.get("effective_expires_at")
-    blocked_state = "Bəli" if record.get("blocked") else "Xeyr"
+    blocked_flag = bool(record.get("blocked") or record.get("is_blocked"))
+    blocked_state = "Bəli" if blocked_flag else "Xeyr"
+    is_active = record.get("is_active")
+    status_text = "Bloklanıb" if blocked_flag else ("Deaktiv" if is_active == 0 else "Aktiv")
+    last_error = record.get("last_error")
 
     info_txt = (
         f"🆔 İstifadəçi: {target_id}\n"
         f"📦 Status: {computed_status or '-'}\n"
         f"📅 Bitmə tarixi: {format_effective_expiry_for_ui(effective_raw)}\n"
         f"⏳ Qalan gün: {format_remaining_days_for_ui(computed_status, effective_raw)}\n"
+        f"🔖 Hesab statusu: {status_text}\n"
         f"⛔ Bloklu: {blocked_state}\n"
         f"🆔 Ödəniş kodu: {subscription_payment_code(target_id)}"
     )
+    if last_error:
+        info_txt += f"\n⚠️ Son xəta: {last_error}"
 
     mk = types.InlineKeyboardMarkup()
     mk.add(
@@ -15962,6 +15978,12 @@ def admin_show_user_panel(
                 callback_data=f"admusr|block|{target_id}",
             )
         )
+
+    mk.add(
+        types.InlineKeyboardButton(
+            "🗑 İstifadəçini sil", callback_data=f"admusr|delete|{target_id}"
+        )
+    )
 
     if message:
         try:
@@ -16411,6 +16433,12 @@ def cb_admin_user_panel_actions(c):
         safe_answer_callback_query(
             c.id, "✅ Blokdan çıxarıldı." if unblocked else "⚠️ Blokda deyil."
         )
+    elif action == "delete":
+        deactivated = deactivate_user(uid)
+        safe_answer_callback_query(
+            c.id,
+            "✅ İstifadəçi deaktiv edildi" if deactivated else "⚠️ Deaktiv etmək alınmadı",
+        )
     else:
         safe_answer_callback_query(c.id)
         return
@@ -16705,6 +16733,76 @@ def resolve_admin_user_status(record: Optional[dict]) -> str:
     )
 
 
+def mark_user_delivery_failure(user_id: int, error_text: str):
+    error_text = (error_text or "").strip()
+    logger.warning("Failed to deliver message user_id=%s error=%s", user_id, error_text)
+
+    def _is_block_error(msg: str) -> bool:
+        msg = msg.lower()
+        return "bot was blocked by the user" in msg or "chat not found" in msg
+
+    if not _is_block_error(error_text):
+        return
+    conn = None
+    try:
+        conn = get_local_conn()
+        cur = conn.cursor()
+        schema = detect_users_schema()
+        columns = schema.get("columns", set())
+        updates = []
+        params: List[Any] = []
+        now_ts = datetime.utcnow().isoformat(sep=" ", timespec="seconds")
+        if "blocked" in columns:
+            updates.append("blocked=1")
+        if "is_blocked" in columns:
+            updates.append("is_blocked=1")
+        if "blocked_at" in columns:
+            updates.append("blocked_at=?")
+            params.append(now_ts)
+        if "last_error" in columns:
+            updates.append("last_error=?")
+            params.append(error_text)
+        if not updates:
+            return
+        params.append(user_id)
+        cur.execute(f"UPDATE users SET {', '.join(updates)} WHERE chat_id=?", params)
+        conn.commit()
+    except Exception:
+        logger.exception("Failed to mark user delivery failure user_id=%s", user_id)
+    finally:
+        if conn:
+            conn.close()
+
+
+def deactivate_user(user_id: int) -> bool:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT chat_id FROM users WHERE chat_id=?", (user_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return False
+    schema = detect_users_schema()
+    columns = schema.get("columns", set())
+    updates = []
+    params: List[Any] = []
+    if "is_active" in columns:
+        updates.append("is_active=0")
+    if "deleted_at" in columns:
+        updates.append("deleted_at=?")
+        params.append(datetime.utcnow().isoformat(sep=" ", timespec="seconds"))
+    if "last_error" in columns:
+        updates.append("last_error=NULL")
+    if not updates:
+        conn.close()
+        return False
+    params.append(user_id)
+    cur.execute(f"UPDATE users SET {', '.join(updates)} WHERE chat_id=?", params)
+    conn.commit()
+    conn.close()
+    return True
+
+
 def block_user(chat_id: int) -> bool:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -16724,9 +16822,13 @@ def block_user(chat_id: int) -> bool:
     columns = schema.get("columns", set())
     updates = ["blocked=1"]
     params = []
+    if "is_blocked" in columns:
+        updates.append("is_blocked=1")
     if "blocked_at" in columns:
         updates.append("blocked_at=?")
         params.append(blocked_at)
+    if "last_error" in columns:
+        updates.append("last_error=NULL")
     params.append(chat_id)
     cur.execute(f"UPDATE users SET {', '.join(updates)} WHERE chat_id=?", params)
     conn.commit()
@@ -16755,8 +16857,12 @@ def unblock_user(chat_id: int) -> bool:
     columns = schema.get("columns", set())
     updates = ["blocked=0"]
     params = []
+    if "is_blocked" in columns:
+        updates.append("is_blocked=0")
     if "blocked_at" in columns:
         updates.append("blocked_at=NULL")
+    if "last_error" in columns:
+        updates.append("last_error=NULL")
     params.append(chat_id)
     cur.execute(f"UPDATE users SET {', '.join(updates)} WHERE chat_id=?", params)
     conn.commit()
@@ -17799,7 +17905,8 @@ def broadcast_bot_update(admin_chat_id):
                 f"🚀 Bot yeniləndi ({CURRENT_VERSION}). Davam etmək üçün /start yazın.",
             )
             sent += 1
-        except:
+        except Exception as exc:
+            mark_user_delivery_failure(uid, str(exc))
             continue
 
     bot.send_message(
@@ -19341,10 +19448,20 @@ def admin_agents_broadcast(message):
             cur.execute("SELECT COUNT(*) FROM users")
             total_users = cur.fetchone()[0] or 0
 
-            cur.execute("SELECT COUNT(*) FROM users WHERE blocked=1")
+            cur.execute(
+                "SELECT COUNT(*) FROM users WHERE blocked=1 OR COALESCE(is_blocked, 0)=1"
+            )
             blocked_users = cur.fetchone()[0] or 0
 
-            cur.execute("SELECT chat_id FROM users WHERE blocked=0")
+            cur.execute(
+                """
+                SELECT chat_id
+                FROM users
+                WHERE COALESCE(blocked, 0)=0
+                  AND COALESCE(is_blocked, 0)=0
+                  AND COALESCE(is_active, 1)=1
+                """
+            )
             targets = [r[0] for r in cur.fetchall() if r[0]]
 
             try:
@@ -19397,7 +19514,8 @@ def admin_agents_broadcast(message):
             try:
                 bot.send_message(uid, f"📢 Admin bildirişi:\n{payload}")
                 success += 1
-            except Exception:
+            except Exception as exc:
+                mark_user_delivery_failure(uid, str(exc))
                 failed += 1
 
         summary = (
