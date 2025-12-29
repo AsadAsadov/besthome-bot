@@ -3692,7 +3692,7 @@ def _select_first_existing_table(cur, candidates: Tuple[str, ...]) -> Optional[s
     return None
 
 
-def detect_stats_source(cur, stat_context: str = STAT_CONTEXT_USER) -> Dict[str, Any]:
+def detect_stats_source(cur, stat_context: str) -> Dict[str, Any]:
     table = None
     if stat_context == STAT_CONTEXT_USER:
         table = detect_user_listings_table(cur.connection)
@@ -10690,10 +10690,10 @@ def compute_user_statistics(period: str) -> dict:
         "land_count": 0,
         "meta": {
             "table": "listings",
-            "ts_col": None,
-            "ts_kind": "none",
-            "op_col": None,
-            "type_col": None,
+            "ts_col": "created_at",
+            "ts_kind": "iso",
+            "op_col": "operation",
+            "type_col": "prop_type",
         },
     }
 
@@ -10719,24 +10719,9 @@ def compute_user_statistics(period: str) -> dict:
             col_rows = []
 
         col_names = {str(r[1]).lower(): r[1] for r in col_rows if len(r) > 1}
-        col_types = {str(r[1]).lower(): str(r[2]).lower() for r in col_rows if len(r) > 2}
 
-        ts_col = None
-        for candidate in ("created_at", "inserted_at", "added_at"):
-            if candidate in col_names:
-                ts_col = col_names[candidate]
-                break
-
-        ts_kind = None
-        if ts_col:
-            declared = col_types.get(ts_col.lower(), "")
-            if declared and "int" in declared:
-                ts_kind = "unix"
-            elif declared:
-                ts_kind = "iso"
-            else:
-                ts_kind = _detect_ts_kind(cur, "listings", ts_col) or "iso"
-        else:
+        ts_col = col_names.get("created_at")
+        if not ts_col:
             logger.warning("User stats timestamp column missing in listings table")
 
         op_col = col_names.get("operation")
@@ -10745,13 +10730,14 @@ def compute_user_statistics(period: str) -> dict:
         stats["meta"] = {
             "table": "listings",
             "ts_col": ts_col,
-            "ts_kind": ts_kind or "none",
+            "ts_kind": "iso" if ts_col else "none",
             "op_col": op_col,
             "type_col": type_col,
         }
 
         logger.info(
-            "USER_STATS source_db=besthome.db table=listings period=%s",
+            "USER_STATS source_db=%s source_table=listings period=%s",
+            MAIN_DB,
             key_base,
         )
 
@@ -10801,17 +10787,10 @@ def compute_user_statistics(period: str) -> dict:
         window_days = {"24h": 1, "7d": 7, "30d": 30}.get(key_base)
 
         if key_base != "all" and window_days and ts_col:
-            if ts_kind == "unix":
-                seconds = window_days * 24 * 3600
-                where_clauses.append(
-                    f"COALESCE(l.\"{ts_col}\", 0) >= (strftime('%s','now') - ?)"
-                )
-                where_params.append(seconds)
-            else:
-                where_clauses.append(
-                    f"datetime(l.\"{ts_col}\") >= datetime('now', ?)"
-                )
-                where_params.append(f"-{window_days} days")
+            where_clauses.append(
+                f"datetime(l.\"{ts_col}\") >= datetime('now', ?)"
+            )
+            where_params.append(f"-{window_days} days")
         elif key_base != "all" and not ts_col:
             stats["note"] = "Tarix məlumatı yoxdur, zaman filtri tətbiq edilmədi"
 
@@ -10891,7 +10870,10 @@ def fetch_global_statistics(period: str = "all", stat_context: str = STAT_CONTEX
             source_db = LOCAL_DB
 
         cur = conn.cursor()
-        meta = detect_stats_source(cur, stat_context=stat_context)
+        if stat_context == STAT_CONTEXT_USER:
+            meta = detect_stats_source(cur, "user")
+        else:
+            meta = detect_stats_source(cur, "admin")
         if stat_context == STAT_CONTEXT_USER:
             logger.info(
                 "USER_STATS source_db=%s table=%s", source_db, meta.get("table")
