@@ -188,6 +188,7 @@ agent_request_lookup_state = {}
 admin_customer_request_state = {}
 USER_STATE: Dict[int, str] = {}
 CUSTOMER_REQUEST_COOLDOWN_SECONDS = 300
+user_stats_filter: Dict[int, str] = {}
 
 logger = logging.getLogger("besthome_bot")
 
@@ -1376,6 +1377,9 @@ def init_local_db():
 
     ensure_created_at_column(conn, "listings_new", ("date_added",))
     ensure_created_at_column(conn, "listings_approved", ("date_added",))
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_listings_approved_created_at ON listings_approved(created_at)"
+    )
 
     # Vasitəçi aktivliyi (axtarış, baxış, WhatsApp, favorit)
     cur.execute(
@@ -1659,7 +1663,22 @@ def init_local_db():
             last_viewed_at TEXT,
             PRIMARY KEY (source, listing_id)
         )
-    """
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_view_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            listing_id INTEGER,
+            source TEXT,
+            created_at TEXT DEFAULT (CURRENT_TIMESTAMP)
+        )
+        """
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_user_view_logs_user_date ON user_view_logs(chat_id, created_at DESC)"
     )
 
     cur.execute(
@@ -4398,6 +4417,17 @@ def record_listing_view(
             """,
             (source, listing_id, datetime.utcnow().isoformat()),
         )
+        if chat_id:
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO user_view_logs (chat_id, listing_id, source, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (chat_id, listing_id, source, datetime.utcnow().isoformat()),
+                )
+            except Exception:
+                logger.debug("User view log skipped chat_id=%s listing_id=%s", chat_id, listing_id)
         conn.commit()
     except Exception as e:
         print("⚠️ View track error:", e)
@@ -4488,7 +4518,7 @@ MENU_VISIBILITY_HINT_TEXT = "ℹ️ Əsas menyu görünmür?\n" "➡️ /start y
 MENU_VISIBILITY_HINT_COOLDOWN_SECONDS = 300
 menu_visibility_hint_last_sent = {}
 STATISTICS_CACHE_TTL_SECONDS = 60
-statistics_cache = {"ts": 0.0, "data": None}
+statistics_cache: Dict[str, Dict[str, Any]] = {}
 
 
 def send_refresh_button(chat_id: int):
@@ -4550,8 +4580,6 @@ def build_main_menu(
     kb = types.ReplyKeyboardMarkup(
         resize_keyboard=True, one_time_keyboard=False, is_persistent=True
     )
-    unique_buttons: List[str] = []
-
     if WEB_APP_URL:
         kb.row(
             types.KeyboardButton(
@@ -4559,30 +4587,28 @@ def build_main_menu(
             )
         )
 
-    def add_button(text: str):
-        if text not in unique_buttons:
-            unique_buttons.append(text)
+    rows: List[List[str]] = [
+        ["🔎 Axtarış sistemi", "🆕 Bu gün daxil olan elanlar"],
+        ["📂 Elan statusları", "📋 Elanlarım"],
+        ["👤 Hesabım", "📊 Statistika"],
+        ["💳 Ödəniş", "ℹ️ Haqqında"],
+    ]
 
-    add_button("🔎 Axtarış sistemi")
-    add_button("🆕 Bu gün daxil olan elanlar")
-    add_button("📂 Elan statusları")
-    add_button("📋 Elanlarım")
-    add_button("👤 Hesabım")
-    add_button("📊 Statistika")
-    add_button("💳 Ödəniş")
-    add_button("ℹ️ Haqqında")
-    add_button("📩 Şikayət və təkliflər")
-
+    complaint_row = ["📩 Şikayət və təkliflər"]
     if has_customer_access or is_admin_user:
-        add_button("📌 Müştəri istəkləri")
-    if not is_admin_user:
-        add_button("🤝 Dostunu dəvət et")
-    if is_admin_user:
-        add_button(TEXTS_AZ["admin_panel_button"])
+        complaint_row.append("📌 Müştəri istəkləri")
+    rows.append(complaint_row)
 
-    for i in range(0, len(unique_buttons), 2):
-        kb.row(*unique_buttons[i : i + 2])
-    kb.row(MENU_REFRESH_BUTTON)
+    if not is_admin_user:
+        rows.append(["🤝 Dostunu dəvət et"])
+
+    for row in rows:
+        kb.row(*row)
+
+    if is_admin_user:
+        kb.row(TEXTS_AZ["admin_panel_button"], MENU_REFRESH_BUTTON)
+    else:
+        kb.row(MENU_REFRESH_BUTTON)
     return kb
 
 
@@ -6505,29 +6531,108 @@ def show_account_status(message):
         return
     chat_id = message.chat.id
     text = build_account_status_text(chat_id)
-    bot.send_message(chat_id, text)
+    bot.send_message(chat_id, text, parse_mode="HTML")
 
 
 # =============== 📊 Statistika ===============
+
+
+STATS_FILTER_LABELS = {
+    "24h": "🕒 24 saat",
+    "7d": "📆 7 gün",
+    "30d": "📅 30 gün",
+    "all": "🧾 Ümumi",
+}
+
+
+def build_user_stats_keyboard(selected: str) -> types.InlineKeyboardMarkup:
+    mk = types.InlineKeyboardMarkup()
+    buttons = []
+    for key in ("24h", "7d", "30d", "all"):
+        label = STATS_FILTER_LABELS.get(key, key)
+        prefix = "✅ " if key == selected else ""
+        buttons.append(
+            types.InlineKeyboardButton(f"{prefix}{label}", callback_data=f"stats:{key}")
+        )
+    mk.row(*buttons)
+    return mk
+
+
+def format_stats_text(base_stats: dict, period_stats: dict, period_key: str) -> str:
+    label = STATS_FILTER_LABELS.get(period_key, "🧾 Ümumi")
+    lines = [
+        "📊 <b>BestHome Statistikası</b>",
+        "─────────────",
+        "",
+        "📦 Ümumi göstəricilər:",
+        f"• Ümumi elanlar: {base_stats.get('total', 0)}",
+        f"• 🔑 Satılır: {base_stats.get('sale_count', 0)}",
+        f"• 🛏 Kirayə: {base_stats.get('rent_count', 0)}",
+        f"• 🏢 Mənzil: {base_stats.get('apartment_count', 0)}",
+        f"• 🏡 Həyət evi: {base_stats.get('house_count', 0)}",
+        f"• 🌱 Torpaq: {base_stats.get('land_count', 0)}",
+        "",
+        f"{label} göstəriciləri:",
+        f"• 🆕 Yeni elanlar: {period_stats.get('total', 0)}",
+        f"• 🔑 Satılır: {period_stats.get('sale_count', 0)}",
+        f"• 🛏 Kirayə: {period_stats.get('rent_count', 0)}",
+        f"• 🏢 Mənzil: {period_stats.get('apartment_count', 0)}",
+        f"• 🏡 Həyət evi: {period_stats.get('house_count', 0)}",
+        f"• 🌱 Torpaq: {period_stats.get('land_count', 0)}",
+    ]
+    return "\n".join(lines)
+
+
+def send_user_statistics(chat_id: int, period_key: str, message_id: Optional[int] = None):
+    selected = period_key if period_key in STATS_FILTER_LABELS else "24h"
+    user_stats_filter[chat_id] = selected
+    base_stats = fetch_global_statistics("all")
+    period_stats = fetch_global_statistics(selected)
+    text = format_stats_text(base_stats, period_stats, selected)
+    keyboard = build_user_stats_keyboard(selected)
+
+    if message_id:
+        bot.edit_message_text(
+            text,
+            chat_id,
+            message_id,
+            reply_markup=keyboard,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    else:
+        bot.send_message(
+            chat_id,
+            text,
+            reply_markup=keyboard,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
 
 
 @bot.message_handler(func=lambda m: m.text == "📊 Statistika")
 def show_global_statistics(message):
     if not ensure_allowed(message):
         return
-    stats = fetch_global_statistics()
-    text = (
-        "📊 BestHome Statistikası\n\n"
-        f"🏠 Ümumi elanlar: {stats.get('total', 0)}\n"
-        f"🔑 Satılır: {stats.get('sale_count', 0)}\n"
-        f"🛏 Kirayə: {stats.get('rent_count', 0)}\n\n"
-        f"🏢 Mənzil: {stats.get('apartment_count', 0)}\n"
-        f"🏡 Həyət evi: {stats.get('house_count', 0)}\n"
-        f"🌱 Torpaq: {stats.get('land_count', 0)}\n\n"
-        "📆 Son 30 gün:\n\n"
-        f"➕ Yeni elanlar: {stats.get('new_30d', 0)}"
-    )
-    bot.send_message(message.chat.id, text)
+    chat_id = message.chat.id
+    default_period = user_stats_filter.get(chat_id, "24h")
+    send_user_statistics(chat_id, default_period)
+
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("stats:"))
+@callback_guard
+def handle_user_stats_callback(c):
+    period = c.data.split(":", 1)[1] if c.data else "all"
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id if c.message else c.from_user.id
+    user_stats_filter[chat_id] = period
+    try:
+        bot.answer_callback_query(c.id, STATS_FILTER_LABELS.get(period, "🧾 Ümumi"))
+    except Exception:
+        pass
+    if c.message:
+        send_user_statistics(chat_id, period, message_id=c.message.message_id)
 
 
 # =============== ℹ️ Haqqında ===============
@@ -10225,15 +10330,26 @@ def _build_like_clause(column: str, keywords: List[str]) -> tuple:
     return "(" + " OR ".join(conds) + ")", params
 
 
-def fetch_global_statistics() -> dict:
+def fetch_global_statistics(period: str = "all") -> dict:
+    period_days = {"24h": 1, "7d": 7, "30d": 30, "all": None}
+    key = period if period in period_days else "all"
+
     now_ts = time.time()
-    cached = statistics_cache.get("data")
-    cache_ts = statistics_cache.get("ts", 0)
+    cached = statistics_cache.get(key)
+    cache_ts = cached.get("ts", 0) if cached else 0
     if cached and now_ts - cache_ts < STATISTICS_CACHE_TTL_SECONDS:
-        return cached
+        return cached.get("data", {})
 
     started = time.time()
     conn = get_local_conn()
+    stats: Dict[str, Any] = {
+        "total": 0,
+        "sale_count": 0,
+        "rent_count": 0,
+        "apartment_count": 0,
+        "house_count": 0,
+        "land_count": 0,
+    }
     try:
         cur = conn.cursor()
 
@@ -10257,6 +10373,19 @@ def fetch_global_statistics() -> dict:
             "COALESCE(ls.status, 'active') NOT IN ('sold','rented','blacklisted')"
         )
 
+        date_col = detect_table_date_column(cur, "listings_approved")
+        date_filter = ""
+        date_params: List[Any] = []
+        days = period_days.get(key)
+        if days is not None:
+            if not date_col:
+                logger.debug("Date column missing for stats period=%s", key)
+                statistics_cache[key] = {"ts": now_ts, "data": stats}
+                return stats
+            cutoff = datetime.utcnow() - timedelta(days=days)
+            date_filter = f" AND {date_col} >= ?"
+            date_params.append(cutoff.isoformat())
+
         query = f"""
             SELECT
                 COUNT(*) AS total,
@@ -10267,51 +10396,40 @@ def fetch_global_statistics() -> dict:
                 SUM(CASE WHEN {land_clause} THEN 1 ELSE 0 END) AS land_count
             FROM listings_approved l
             LEFT JOIN listing_status ls ON ls.source = 'local' AND ls.listing_id = l.id
-            WHERE {active_filter}
+            WHERE {active_filter}{date_filter}
         """
 
-        params = sale_params + rent_params + apt_params + house_params + land_params
+        params = (
+            sale_params
+            + rent_params
+            + apt_params
+            + house_params
+            + land_params
+            + date_params
+        )
         cur.execute(query, params)
         row = cur.fetchone() or {}
 
-        date_col = detect_table_date_column(cur, "listings_approved")
-        new_30d = 0
-        if date_col:
-            cutoff = datetime.utcnow() - timedelta(days=30)
-            try:
-                cur.execute(
-                    f"""
-                    SELECT COUNT(*)
-                    FROM listings_approved l
-                    LEFT JOIN listing_status ls ON ls.source = 'local' AND ls.listing_id = l.id
-                    WHERE {active_filter} AND {date_col} >= ?
-                    """,
-                    (cutoff.isoformat(),),
-                )
-                new_30d = cur.fetchone()[0] or 0
-            except Exception:
-                logger.exception("Failed to compute 30d stats using column=%s", date_col)
+        stats.update(
+            {
+                "total": _row_value_safe(row, "total", 0) or 0,
+                "sale_count": _row_value_safe(row, "sale_count", 0) or 0,
+                "rent_count": _row_value_safe(row, "rent_count", 0) or 0,
+                "apartment_count": _row_value_safe(row, "apartment_count", 0) or 0,
+                "house_count": _row_value_safe(row, "house_count", 0) or 0,
+                "land_count": _row_value_safe(row, "land_count", 0) or 0,
+            }
+        )
     finally:
         try:
             conn.close()
         except Exception:
             pass
 
-    stats = {
-        "total": _row_value_safe(row, "total", 0) or 0,
-        "sale_count": _row_value_safe(row, "sale_count", 0) or 0,
-        "rent_count": _row_value_safe(row, "rent_count", 0) or 0,
-        "apartment_count": _row_value_safe(row, "apartment_count", 0) or 0,
-        "house_count": _row_value_safe(row, "house_count", 0) or 0,
-        "land_count": _row_value_safe(row, "land_count", 0) or 0,
-        "new_30d": new_30d,
-    }
-
     elapsed_ms = (time.time() - started) * 1000
-    logger.info("Global statistics computed in %.1f ms", elapsed_ms)
+    logger.info("Global statistics (%s) computed in %.1f ms", key, elapsed_ms)
 
-    statistics_cache["data"] = stats
-    statistics_cache["ts"] = now_ts
+    statistics_cache[key] = {"ts": now_ts, "data": stats}
     return stats
 
 
@@ -16052,6 +16170,30 @@ def format_long_date(dt: datetime) -> str:
     return f"{dt.day} {months[dt.month - 1]} {dt.year}"
 
 
+def get_user_view_count(chat_id: int, days: int) -> int:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    try:
+        cur.execute(
+            """
+            SELECT COUNT(*) FROM user_view_logs
+            WHERE chat_id=? AND created_at >= ?
+            """,
+            (chat_id, cutoff.isoformat()),
+        )
+        row = cur.fetchone()
+        return (row[0] if row else 0) or 0
+    except Exception:
+        logger.debug("User view log query failed chat_id=%s", chat_id)
+        return 0
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def build_account_status_text(chat_id: int) -> str:
     sub = get_subscription(chat_id) or {}
     record = get_user_record(chat_id) or {}
@@ -16065,9 +16207,10 @@ def build_account_status_text(chat_id: int) -> str:
         demo_end is not None and demo_end > now and not sub.get("plan")
     )
 
-    status_text = "Bitib"
+    status_text = "Bitmiş"
     if expiry and expiry > now:
         status_text = "Demo" if is_demo_account else "Aktiv"
+    status_emoji = {"Aktiv": "🟢", "Demo": "🟡"}.get(status_text, "🔴")
 
     remaining_days = 0
     if expiry and expiry > now:
@@ -16075,14 +16218,25 @@ def build_account_status_text(chat_id: int) -> str:
 
     exp_text = format_long_date(expiry) if expiry else "—"
     account_type = "Demo" if is_demo_account else "Ödənişli"
+    views_7d = get_user_view_count(chat_id, 7)
+    views_30d = get_user_view_count(chat_id, 30)
 
-    return (
-        "👤 Hesab Məlumatları\n\n"
-        f"📌 Status: {status_text}\n"
-        f"⏳ Qalan gün: {remaining_days} gün\n"
-        f"📅 Bitmə tarixi: {exp_text}\n"
-        f"💳 Tip: {account_type}"
-    )
+    lines = [
+        "👤 <b>Hesabım</b>",
+        "─────────────",
+        "",
+        f"🆔 ID: {chat_id}",
+        f"{status_emoji} Status: {status_text}",
+        f"⏳ Qalan gün: {remaining_days} gün",
+        f"📅 Bitmə tarixi: {exp_text}",
+        f"💳 Paket tipi: {account_type}",
+        "",
+        "📊 Aktivlik:",
+        f"• Son 7 gün baxılan elanlar: {views_7d}",
+        f"• Son 30 gün baxılan elanlar: {views_30d}",
+    ]
+
+    return "\n".join(lines)
 
 
 def resolve_admin_user_status(record: Optional[dict]) -> str:
