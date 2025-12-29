@@ -7785,10 +7785,10 @@ def get_today_rayon_counts(listings: List[dict]) -> Dict[str, int]:
     rayon_counts: Counter[str] = Counter()
 
     for item in listings or []:
-        candidates = extract_today_rayon_candidates(item)
-        if not candidates:
-            continue
-        rayon_counts[candidates[0]] += 1
+        raw_rayon = item.get("rayon")
+        key = normalize_rayon(raw_rayon)
+        if key:
+            rayon_counts[key] += 1
 
     return dict(rayon_counts)
 
@@ -7801,13 +7801,22 @@ def prompt_today_rayon(chat_id: int):
     cached_results = today_results_cache.get(chat_id, {})
     listings = cached_results.get("items") or []
     normalized_counts = get_today_rayon_counts(listings)
+    buttons = []
+    for rayon_name in rayons:
+        norm = normalize_rayon(rayon_name)
+        count = normalized_counts.get(norm, 0)
+
+        text = f"{rayon_name} ({count})"
+        buttons.append((text, rayon_name, count))
+
+    buttons.sort(key=lambda x: x[2], reverse=True)
     mk = types.InlineKeyboardMarkup()
     mk.add(types.InlineKeyboardButton("Hamısı", callback_data="td|rn|all"))
     row = []
-    for idx, rn in enumerate(rayons):
-        count = normalized_counts.get(normalize_today_rayon(rn), 0)
-        label = f"{rn} ({count})"
-        row.append(types.InlineKeyboardButton(label, callback_data=f"td|rn|{idx}"))
+    for text, rayon_name, count in buttons:
+        row.append(
+            types.InlineKeyboardButton(text, callback_data=f"td|rn|{rayon_name}")
+        )
         if len(row) == 2:
             mk.row(*row)
             row = []
@@ -7910,11 +7919,7 @@ def handle_today_callbacks(c):
         if value == "all":
             st["rayon"] = "all"
         else:
-            try:
-                idx = int(value)
-                st["rayon"] = (rayons[idx] or "").strip()
-            except Exception:
-                st["rayon"] = "all"
+            st["rayon"] = value if value in rayons else "all"
         send_today_stats_message(chat_id, st)
         send_today_results(
             chat_id, st, message=(c.message.chat.id, c.message.message_id)
@@ -10381,8 +10386,34 @@ def normalize_rayon_name(value: Optional[str]) -> str:
     return str(value or "").strip().lower()
 
 
+def normalize_rayon(value: str) -> str:
+    if not value:
+        return ""
+
+    v = value.lower().strip()
+
+    # remove common suffixes
+    v = re.sub(r"(rayonu|r\.|rayon)", "", v)
+
+    # normalize az chars
+    v = (
+        v.replace("ə", "e")
+        .replace("ş", "s")
+        .replace("ğ", "g")
+        .replace("ü", "u")
+        .replace("ö", "o")
+        .replace("ç", "c")
+        .replace("ı", "i")
+    )
+
+    # remove extra spaces
+    v = re.sub(r"\s+", " ", v).strip()
+
+    return v
+
+
 def normalize_today_rayon(value: Optional[str]) -> str:
-    return normalize_text(value or "")
+    return normalize_rayon(value or "")
 
 
 def extract_today_rayon_candidates(ev: dict) -> List[str]:
