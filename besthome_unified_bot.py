@@ -7795,6 +7795,36 @@ def get_today_rayon_counts(listings: List[dict]) -> Dict[str, int]:
     return dict(region_counter)
 
 
+def build_today_rayon_keyboard(
+    filtered_listings: List[dict], rayons: List[str]
+) -> types.InlineKeyboardMarkup:
+    normalized_counts = get_today_rayon_counts(filtered_listings)
+    buttons = []
+    for rayon_name in rayons:
+        normalized = normalize_region(rayon_name)
+        count = normalized_counts.get(normalized, 0)
+        if count <= 0:
+            continue
+
+        text = f"{rayon_name} ({count})"
+        buttons.append((text, rayon_name, count))
+
+    buttons.sort(key=lambda x: x[2], reverse=True)
+    mk = types.InlineKeyboardMarkup()
+    mk.add(types.InlineKeyboardButton("Hamısı", callback_data="td|rn|all"))
+    row = []
+    for text, rayon_name, count in buttons:
+        row.append(
+            types.InlineKeyboardButton(text, callback_data=f"td|rn|{rayon_name}")
+        )
+        if len(row) == 2:
+            mk.row(*row)
+            row = []
+    if row:
+        mk.row(*row)
+    return mk
+
+
 def prompt_today_rayon(chat_id: int):
     rayons = REGION_OPTIONS.get("all", {}).get("rayons", [])
     if not rayons:
@@ -7818,27 +7848,8 @@ def prompt_today_rayon(chat_id: int):
             "items": filtered_listings,
         }
 
-    normalized_counts = get_today_rayon_counts(filtered_listings or [])
-    buttons = []
-    for rayon_name in rayons:
-        count = normalized_counts.get(normalize_region(rayon_name), 0)
-
-        text = f"{rayon_name} ({count})"
-        buttons.append((text, rayon_name, count))
-
-    buttons.sort(key=lambda x: x[2], reverse=True)
-    mk = types.InlineKeyboardMarkup()
-    mk.add(types.InlineKeyboardButton("Hamısı", callback_data="td|rn|all"))
-    row = []
-    for text, rayon_name, count in buttons:
-        row.append(
-            types.InlineKeyboardButton(text, callback_data=f"td|rn|{rayon_name}")
-        )
-        if len(row) == 2:
-            mk.row(*row)
-            row = []
-    if row:
-        mk.row(*row)
+    filtered_listings = filtered_listings or []
+    mk = build_today_rayon_keyboard(filtered_listings, rayons)
     bot.send_message(chat_id, "📍 Rayon seçin:", reply_markup=mk)
 
 
