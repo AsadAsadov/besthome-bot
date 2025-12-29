@@ -133,16 +133,14 @@ WEB_APP_URL = (
     or os.environ.get("PUBLIC_BASE_URL")
 )
 
-if ENV == "dev":
-    DATA_DIR = BASE_DIR
-else:  # prod (Render)
-    DATA_DIR = "/data"
+BASE_DATA_DIR = os.getenv("DATA_DIR", "/data")
+os.environ.setdefault("DATA_DIR", BASE_DATA_DIR)
+os.makedirs(BASE_DATA_DIR, exist_ok=True)
+DATA_DIR = BASE_DATA_DIR
 
-os.environ.setdefault("DATA_DIR", DATA_DIR)
-
-MAIN_DB = os.path.join(DATA_DIR, "besthome.db")
-LOCAL_DB = os.path.join(DATA_DIR, "local_data.db")
-AGENTS_DB = os.path.join(DATA_DIR, "agents.db")
+MAIN_DB = os.path.join(BASE_DATA_DIR, "besthome.db")
+LOCAL_DB = os.path.join(BASE_DATA_DIR, "local_data.db")
+AGENTS_DB = os.path.join(BASE_DATA_DIR, "agents.db")
 
 
 def _load_bot_token():
@@ -154,11 +152,20 @@ def _load_bot_token():
     return token
 
 
-def _verify_db_paths():
-    for db_path in (MAIN_DB, LOCAL_DB, AGENTS_DB):
-        if not os.path.exists(db_path):
-            raise RuntimeError(f"❌ DB tapılmadı: {db_path}")
-    logger.info("✅ Bütün DB-lər tapıldı və hazırdır")
+def _log_db_status():
+    for label, db_path in (
+        ("besthome", MAIN_DB),
+        ("local", LOCAL_DB),
+        ("agents", AGENTS_DB),
+    ):
+        if os.path.exists(db_path):
+            try:
+                size = os.path.getsize(db_path)
+                logger.info("DB status %s path=%s size=%s bytes", label, db_path, size)
+            except Exception:
+                logger.info("DB status %s path=%s exists", label, db_path)
+        else:
+            logger.warning("DB status %s path=%s MISSING", label, db_path)
 
 
 # ==============================
@@ -1006,6 +1013,42 @@ def download_zip_stream(url: str) -> str:
     raise RuntimeError(f"ZIP yükləmə alınmadı: {last_error}")
 
 
+def download_main_db_file(url: str) -> Tuple[str, bool]:
+    last_error = None
+    for candidate in normalize_dropbox_urls(url):
+        os.makedirs(DB_UPDATE_TMP_DIR, exist_ok=True)
+        fd, temp_path = tempfile.mkstemp(suffix=".db", dir=DB_UPDATE_TMP_DIR)
+        os.close(fd)
+        try:
+            with requests.get(
+                candidate,
+                stream=True,
+                timeout=(10, 120),
+                allow_redirects=True,
+            ) as r:
+                if r.status_code != 200:
+                    raise RuntimeError(f"HTTP status {r.status_code}")
+                total = 0
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > DB_UPDATE_MAX_ZIP_BYTES:
+                        raise RuntimeError("Fayl çox böyükdür")
+                    with open(temp_path, "ab") as f:
+                        f.write(chunk)
+                if total <= 0:
+                    raise RuntimeError("Fayl ölçüsü sıfırdır")
+            is_zip = zipfile.is_zipfile(temp_path)
+            return temp_path, is_zip
+        except Exception as exc:
+            last_error = exc
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            logger.warning("Failed to download db from %s: %s", candidate, exc)
+    raise RuntimeError(f"DB yükləmə alınmadı: {last_error}")
+
+
 def extract_main_db_from_zip(zip_path: str) -> Tuple[str, str]:
     if not zipfile.is_zipfile(zip_path):
         raise RuntimeError("Fayl ZIP formatında deyil")
@@ -1098,26 +1141,30 @@ def send_db_update_progress(admin_id: int, message: str) -> None:
 
 
 def run_db_update_pipeline(admin_id: int, url: str) -> None:
-    temp_zip_path = None
+    temp_download_path = None
     extracted_db_path = None
     extracted_dir = None
     backup_path = None
     try:
         main_db_update_in_progress.set()
-        send_db_update_progress(admin_id, "⬇️ Zip yüklənir…")
-        temp_zip_path = run_with_timeout(
-            "zip_download",
+        send_db_update_progress(admin_id, "⬇️ Fayl yüklənir…")
+        temp_download_path, is_zip = run_with_timeout(
+            "db_download",
             DB_UPDATE_DOWNLOAD_TIMEOUT_SECONDS,
-            download_zip_stream,
+            download_main_db_file,
             url,
         )
-        send_db_update_progress(admin_id, "📦 Zip açılır…")
-        extracted_db_path, extracted_dir = run_with_timeout(
-            "zip_extract",
-            DB_UPDATE_UNZIP_TIMEOUT_SECONDS,
-            extract_main_db_from_zip,
-            temp_zip_path,
-        )
+        if is_zip:
+            send_db_update_progress(admin_id, "📦 Zip açılır…")
+            extracted_db_path, extracted_dir = run_with_timeout(
+                "zip_extract",
+                DB_UPDATE_UNZIP_TIMEOUT_SECONDS,
+                extract_main_db_from_zip,
+                temp_download_path,
+            )
+        else:
+            extracted_db_path = temp_download_path
+
         send_db_update_progress(admin_id, "🗄️ DB yoxlanır…")
         run_with_timeout(
             "db_validate",
@@ -1211,7 +1258,7 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
         release_db_update_lock(admin_id)
         admin_update_state.pop(admin_id, None)
         clear_db_update_state(admin_id)
-        for path in (temp_zip_path, extracted_db_path):
+        for path in (temp_download_path, extracted_db_path):
             if path and os.path.exists(path):
                 try:
                     if os.path.isdir(path):
@@ -1235,6 +1282,7 @@ def sanity_check_main_db():
 
 
 def init_local_db():
+    os.makedirs(BASE_DATA_DIR, exist_ok=True)
     conn = get_local_conn()
     cur = conn.cursor()
 
@@ -1865,6 +1913,7 @@ def init_local_db():
 
 def init_agents_db():
     """Vasitəçi elanları üçün ayrıca baza."""
+    os.makedirs(BASE_DATA_DIR, exist_ok=True)
     conn = get_agents_conn()
     cur = conn.cursor()
     cur.execute(
@@ -14504,7 +14553,7 @@ def start_admin_update_db(chat_id: int, callback_id: Optional[str] = None):
     logger.info("Admin requested db update chat_id=%s", chat_id)
     safe_admin_step(
         chat_id,
-        "🔗 Dropbox ZIP linkini göndərin (besthome.db daxilində olmalıdır).",
+        "🔗 Dropbox yükləmə linkini göndərin (besthome.db birbaşa yüklənəcək).",
     )
 
 
@@ -14540,7 +14589,7 @@ def handle_admin_db_upload(message):
         or parts.scheme.lower() != "https"
         or "dropbox" not in parts.netloc.lower()
     ):
-        safe_admin_step(chat_id, "❌ Zəhmət olmasa HTTPS Dropbox ZIP linki göndərin.")
+        safe_admin_step(chat_id, "❌ Zəhmət olmasa HTTPS Dropbox yükləmə linki göndərin.")
         return
 
     running = get_running_db_update()
@@ -18825,7 +18874,8 @@ def _initialize_app_state():
     global _app_initialized
     if _app_initialized:
         return
-    _verify_db_paths()
+    logger.info("DATA_DIR resolved to %s", BASE_DATA_DIR)
+    _log_db_status()
     init_local_db()
     init_agents_db()
     init_main_db_indices()
@@ -18870,10 +18920,11 @@ def create_flask_app():
         def _handler():
             db_status = {"main": False, "local": False}
             try:
-                conn_main = get_main_conn()
-                conn_main.execute("SELECT 1")
-                db_status["main"] = True
-                close_main_conn(conn_main)
+                if os.path.exists(MAIN_DB):
+                    conn_main = get_main_conn()
+                    conn_main.execute("SELECT 1")
+                    db_status["main"] = True
+                    close_main_conn(conn_main)
             except Exception:
                 logger.exception("Health check failed for main DB")
             try:
@@ -19469,6 +19520,7 @@ def main():
     threading.Thread(target=saved_search_worker, daemon=True).start()
     threading.Thread(target=favorite_price_worker, daemon=True).start()
     threading.Thread(target=subscription_notifier, daemon=True).start()
+    threading.Thread(target=keepalive_worker, daemon=True).start()
 
     create_flask_app()
 
@@ -19491,6 +19543,21 @@ def run_bot():
         except Exception as e:
             logger.error(f"Polling crashed, restarting in 5s: {e}")
             time.sleep(5)
+
+
+def keepalive_worker(interval_seconds: int = 300):
+    while True:
+        try:
+            logger.info("⏳ Keep-alive heartbeat (DATA_DIR=%s)", BASE_DATA_DIR)
+            if os.path.exists(LOCAL_DB):
+                conn = get_local_conn()
+                try:
+                    conn.execute("SELECT 1")
+                finally:
+                    conn.close()
+        except Exception as exc:
+            logger.warning("Keep-alive ping failed: %s", exc)
+        time.sleep(interval_seconds)
 
 
 if __name__ == "__main__":
