@@ -24,7 +24,7 @@ import logging
 import json
 import hashlib
 from datetime import datetime, date, timedelta, timezone
-from collections import defaultdict
+from collections import Counter, defaultdict
 from functools import wraps
 from typing import Optional, Tuple, List, Dict, Any, Literal, Union
 from urllib.parse import quote, unquote, urlsplit, urlunsplit, parse_qs, urlencode
@@ -191,6 +191,7 @@ CUSTOMER_REQUEST_COOLDOWN_SECONDS = 300
 LISTING_SESSION_TTL_SECONDS = 4 * 3600
 listing_sessions: Dict[int, Dict[str, Any]] = {}
 user_stats_filter: Dict[int, str] = {}
+today_results_cache: Dict[int, Dict[str, Any]] = {}
 
 logger = logging.getLogger("besthome_bot")
 
@@ -7780,69 +7781,16 @@ def prompt_today_property(chat_id: int):
     bot.send_message(chat_id, "🏠 Əmlak tipini seç:", reply_markup=mk)
 
 
-def get_today_rayon_counts(filters: dict) -> Dict[str, int]:
-    if not os.path.exists(MAIN_DB):
-        return {}
+def get_today_rayon_counts(listings: List[dict]) -> Dict[str, int]:
+    rayon_counts: Counter[str] = Counter()
 
-    op_code = filters.get("op")
-    op_norm = None
-    if op_code == "sat":
-        op_norm = "sale"
-    elif op_code == "kir":
-        op_norm = "rent"
-    elif op_code:
-        op_norm = normalize_operation_value(op_code)
+    for item in listings or []:
+        candidates = extract_today_rayon_candidates(item)
+        if not candidates:
+            continue
+        rayon_counts[candidates[0]] += 1
 
-    operation_value = detect_db_operation_value(op_norm, "main") if op_norm else None
-
-    prop_code = filters.get("prop")
-    prop_filter = PROP_TYPES.get(prop_code) if prop_code and prop_code != "all" else None
-
-    since_dt = datetime.utcnow() - timedelta(hours=24)
-    params = [int(since_dt.timestamp()), format_sqlite_datetime(since_dt)]
-    where_parts = [
-        "WHERE ((typeof(created_at)='integer' AND created_at >= ?)",
-        "OR datetime(created_at) >= datetime(?))",
-        "AND COALESCE(TRIM(rayon), '') != ''",
-    ]
-
-    if operation_value:
-        where_parts.append("AND operation = ?")
-        params.append(operation_value)
-
-    if prop_filter:
-        where_parts.append("AND LOWER(prop_type) = LOWER(?)")
-        params.append(prop_filter)
-
-    sql = " ".join(
-        ["SELECT rayon, COUNT(*) as cnt", "FROM listings", *where_parts, "GROUP BY rayon"]
-    )
-
-    counts: Dict[str, int] = {}
-    name_by_norm: Dict[str, str] = {}
-    conn = None
-    try:
-        conn = get_main_conn()
-        cur = conn.cursor()
-        cur.execute(sql, params)
-        for row in cur.fetchall() or []:
-            rayon = (row[0] or "").strip()
-            cnt = int(row[1]) if row[1] is not None else 0
-            norm = normalize_today_rayon(rayon)
-            if not norm:
-                continue
-            key = name_by_norm.get(norm)
-            if not key:
-                name_by_norm[norm] = rayon or norm
-                key = name_by_norm[norm]
-            counts[key] = counts.get(key, 0) + cnt
-    except Exception:
-        logger.exception("Failed to fetch today rayon counts")
-    finally:
-        if conn:
-            close_main_conn(conn)
-
-    return counts
+    return dict(rayon_counts)
 
 
 def prompt_today_rayon(chat_id: int):
@@ -7850,10 +7798,9 @@ def prompt_today_rayon(chat_id: int):
     if not rayons:
         send_today_results(chat_id, today_flow_state.get(chat_id, {}))
         return
-    rayon_counts = get_today_rayon_counts(today_flow_state.get(chat_id, {}))
-    normalized_counts = {
-        normalize_today_rayon(name): cnt for name, cnt in rayon_counts.items()
-    }
+    cached_results = today_results_cache.get(chat_id, {})
+    listings = cached_results.get("items") or []
+    normalized_counts = get_today_rayon_counts(listings)
     mk = types.InlineKeyboardMarkup()
     mk.add(types.InlineKeyboardButton("Hamısı", callback_data="td|rn|all"))
     row = []
@@ -7916,6 +7863,7 @@ def send_today_results(chat_id: int, filters: dict, message=None):
 
 def start_today_flow(chat_id: int):
     reset_search_state(chat_id)
+    today_results_cache.pop(chat_id, None)
     today_flow_state[chat_id] = {"op": "all", "prop": "all", "rayon": "all"}
     set_ui_context(chat_id, UI_CONTEXT_TODAY)
     send_today_stats_message(chat_id, today_flow_state[chat_id])
@@ -12052,6 +12000,11 @@ def send_paginated_results(
             bot.send_message(chat_id, "❌ Bu bölmə yalnız admin üçündür.")
         return
     items, total = fetch_all_results(chat_id, mode, params)
+    if mode == "today":
+        today_results_cache[chat_id] = {
+            "filters": params.get("filters", {}),
+            "items": items,
+        }
     if total == 0:
         if not replace_loading_message(loading_ref, "Siyahı boşdur."):
             bot.send_message(chat_id, "Siyahı boşdur.")
@@ -17996,6 +17949,7 @@ def handle_bot_refresh(message):
     keyword_alert_state.pop(chat_id, None)
     agent_request_lookup_state.pop(chat_id, None)
     today_flow_state.pop(chat_id, None)
+    today_results_cache.pop(chat_id, None)
     complaint_flow_state.pop(chat_id, None)
     admin_reply_state.pop(chat_id, None)
     admin_stats_period.pop(chat_id, None)
