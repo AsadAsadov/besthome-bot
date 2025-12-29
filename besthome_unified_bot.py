@@ -6798,8 +6798,8 @@ def format_stats_text(
 def send_user_statistics(chat_id: int, period_key: str, message_id: Optional[int] = None):
     selected = period_key if period_key in STATS_FILTER_LABELS else "24h"
     user_stats_filter[chat_id] = selected
-    base_stats = fetch_global_statistics("all")
-    period_stats = fetch_global_statistics(selected)
+    base_stats = compute_user_statistics("all")
+    period_stats = compute_user_statistics(selected)
     is_admin = chat_id in set(int(x) for x in ADMIN_IDS)
     text = format_stats_text(base_stats, period_stats, selected, is_admin=is_admin)
     keyboard = build_user_stats_keyboard(selected)
@@ -10669,6 +10669,179 @@ def compute_stats(
             "land_count": _row_value_safe(row, "land_count", 0) or 0,
         }
     )
+    return stats
+
+
+def compute_user_statistics(period: str) -> dict:
+    key_base = period if period in {"24h", "7d", "30d", "all"} else "all"
+    cache_key = f"{STAT_CONTEXT_USER}:{key_base}"
+    now_ts = time.time()
+    cached = statistics_cache.get(cache_key)
+    cache_ts = cached.get("ts", 0) if cached else 0
+    if cached and now_ts - cache_ts < STATISTICS_CACHE_TTL_SECONDS:
+        return cached.get("data", {})
+
+    stats: Dict[str, Any] = {
+        "total": 0,
+        "sale_count": 0,
+        "rent_count": 0,
+        "apartment_count": 0,
+        "house_count": 0,
+        "land_count": 0,
+        "meta": {
+            "table": "listings",
+            "ts_col": None,
+            "ts_kind": "none",
+            "op_col": None,
+            "type_col": None,
+        },
+    }
+
+    if not os.path.exists(MAIN_DB):
+        logger.warning("User stats DB missing path=%s", MAIN_DB)
+        return stats
+
+    conn = None
+    try:
+        conn = get_main_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='listings'"
+        )
+        if not cur.fetchone():
+            logger.warning("User stats table not found in besthome.db")
+            return stats
+
+        try:
+            cur.execute("PRAGMA table_info(listings)")
+            col_rows = cur.fetchall() or []
+        except Exception:
+            col_rows = []
+
+        col_names = {str(r[1]).lower(): r[1] for r in col_rows if len(r) > 1}
+        col_types = {str(r[1]).lower(): str(r[2]).lower() for r in col_rows if len(r) > 2}
+
+        ts_col = None
+        for candidate in ("created_at", "inserted_at", "added_at"):
+            if candidate in col_names:
+                ts_col = col_names[candidate]
+                break
+
+        ts_kind = None
+        if ts_col:
+            declared = col_types.get(ts_col.lower(), "")
+            if declared and "int" in declared:
+                ts_kind = "unix"
+            elif declared:
+                ts_kind = "iso"
+            else:
+                ts_kind = _detect_ts_kind(cur, "listings", ts_col) or "iso"
+        else:
+            logger.warning("User stats timestamp column missing in listings table")
+
+        op_col = col_names.get("operation")
+        type_col = col_names.get("prop_type")
+
+        stats["meta"] = {
+            "table": "listings",
+            "ts_col": ts_col,
+            "ts_kind": ts_kind or "none",
+            "op_col": op_col,
+            "type_col": type_col,
+        }
+
+        logger.info(
+            "USER_STATS source_db=besthome.db table=listings period=%s",
+            key_base,
+        )
+
+        op_expr = f"LOWER(TRIM(COALESCE(l.\"{op_col}\", '')))" if op_col else None
+        type_expr = f"LOWER(TRIM(COALESCE(l.\"{type_col}\", '')))" if type_col else None
+
+        select_parts = ["COUNT(*) AS total"]
+        params: List[Any] = []
+
+        if op_expr:
+            sale_vals = STATS_OPERATION_BUCKETS["satilir"]
+            rent_vals = STATS_OPERATION_BUCKETS["kiraye"]
+            select_parts.append(
+                f"SUM(CASE WHEN {op_expr} IN ({','.join(['?']*len(sale_vals))}) THEN 1 ELSE 0 END) AS sale_count"
+            )
+            params += sale_vals
+            select_parts.append(
+                f"SUM(CASE WHEN {op_expr} IN ({','.join(['?']*len(rent_vals))}) THEN 1 ELSE 0 END) AS rent_count"
+            )
+            params += rent_vals
+        else:
+            select_parts.extend(["0 AS sale_count", "0 AS rent_count"])
+
+        if type_expr:
+            apt_vals = STATS_PROPERTY_BUCKETS["menzil"]
+            house_vals = STATS_PROPERTY_BUCKETS["heyet_evi"]
+            land_vals = STATS_PROPERTY_BUCKETS["torpaq"]
+            select_parts.append(
+                f"SUM(CASE WHEN {type_expr} IN ({','.join(['?']*len(apt_vals))}) THEN 1 ELSE 0 END) AS apartment_count"
+            )
+            params += apt_vals
+            select_parts.append(
+                f"SUM(CASE WHEN {type_expr} IN ({','.join(['?']*len(house_vals))}) THEN 1 ELSE 0 END) AS house_count"
+            )
+            params += house_vals
+            select_parts.append(
+                f"SUM(CASE WHEN {type_expr} IN ({','.join(['?']*len(land_vals))}) THEN 1 ELSE 0 END) AS land_count"
+            )
+            params += land_vals
+        else:
+            select_parts.extend(
+                ["0 AS apartment_count", "0 AS house_count", "0 AS land_count"]
+            )
+
+        where_clauses: List[str] = []
+        where_params: List[Any] = []
+        window_days = {"24h": 1, "7d": 7, "30d": 30}.get(key_base)
+
+        if key_base != "all" and window_days and ts_col:
+            if ts_kind == "unix":
+                seconds = window_days * 24 * 3600
+                where_clauses.append(
+                    f"COALESCE(l.\"{ts_col}\", 0) >= (strftime('%s','now') - ?)"
+                )
+                where_params.append(seconds)
+            else:
+                where_clauses.append(
+                    f"datetime(l.\"{ts_col}\") >= datetime('now', ?)"
+                )
+                where_params.append(f"-{window_days} days")
+        elif key_base != "all" and not ts_col:
+            stats["note"] = "Tarix məlumatı yoxdur, zaman filtri tətbiq edilmədi"
+
+        where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+        query = f"SELECT {', '.join(select_parts)} FROM listings l{where_sql}"
+
+        cur.execute(query, params + where_params)
+        row = cur.fetchone() or {}
+        stats.update(
+            {
+                "total": _row_value_safe(row, "total", 0) or 0,
+                "sale_count": _row_value_safe(row, "sale_count", 0) or 0,
+                "rent_count": _row_value_safe(row, "rent_count", 0) or 0,
+                "apartment_count": _row_value_safe(row, "apartment_count", 0) or 0,
+                "house_count": _row_value_safe(row, "house_count", 0) or 0,
+                "land_count": _row_value_safe(row, "land_count", 0) or 0,
+            }
+        )
+    except Exception:
+        logger.exception("Failed to compute user statistics")
+        return {}
+    finally:
+        if conn:
+            try:
+                close_main_conn(conn)
+            except Exception:
+                pass
+
+    statistics_cache[cache_key] = {"ts": now_ts, "data": stats}
+    _log_user_stats_consistency()
     return stats
 
 
