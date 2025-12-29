@@ -7468,6 +7468,17 @@ def search_system_menu(message):
     send_search_menu(message.chat.id)
 
 
+@bot.message_handler(func=lambda m: m.text == "⬅️ Əsas menyuya qayıt")
+def return_to_main_menu(message):
+    if not ensure_allowed(message):
+        return
+    chat_id = message.chat.id
+    reset_search_state(chat_id)
+    reset_user_state(chat_id)
+    set_ui_context(chat_id, UI_CONTEXT_MAIN)
+    send_main_menu(chat_id, "🏠 Əsas menyu", force=True)
+
+
 def prompt_today_operation(chat_id: int):
     mk = types.InlineKeyboardMarkup()
     mk.add(
