@@ -7859,8 +7859,6 @@ def prompt_today_rayon(chat_id: int):
     row = []
     for idx, rn in enumerate(rayons):
         count = normalized_counts.get(normalize_today_rayon(rn), 0)
-        if count == 0:
-            continue
         label = f"{rn} ({count})"
         row.append(types.InlineKeyboardButton(label, callback_data=f"td|rn|{idx}"))
         if len(row) == 2:
