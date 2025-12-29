@@ -18928,6 +18928,9 @@ def cb_unhandled_callback(c):
 
 _app_initialized = False
 app: Optional[Flask] = None
+__all__ = ["main", "create_flask_app", "app"]
+
+_polling_started = threading.Event()
 
 
 def _initialize_app_state():
@@ -19594,6 +19597,12 @@ def create_flask_app():
 
 
 def main():
+    if _polling_started.is_set():
+        logger.info("Bot polling already running; skipping duplicate start")
+        return
+
+    _polling_started.set()
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -19613,12 +19622,7 @@ def main():
     threading.Thread(target=keepalive_worker, daemon=True).start()
 
     create_flask_app()
-
-
-app = create_flask_app()
-
-
-__all__ = ["main", "create_flask_app", "app"]
+    run_bot()
 
 
 def run_bot():
@@ -19648,7 +19652,3 @@ def keepalive_worker(interval_seconds: int = 300):
         except Exception as exc:
             logger.warning("Keep-alive ping failed: %s", exc)
         time.sleep(interval_seconds)
-
-    # if __name__ == "__main__":
-    # main()
-    run_bot()
