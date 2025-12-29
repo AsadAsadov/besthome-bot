@@ -1261,7 +1261,7 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
                 f"📊 Ümumi elan sayı: {total_active}\n"
                 f"1⃣ Satılır: {sale_active}\n"
                 f"2⃣ Kirayə verilir: {rent_active}\n"
-                f"🆕 Bu gün daxil olan elanlar: {today_active}"
+                f"🕒 Son 24 saat elanları: {today_active}"
             )
             safe_admin_step(admin_id, report)
             logger.info(
@@ -4761,8 +4761,7 @@ def build_main_menu(
         )
 
     rows: List[List[str]] = [
-        ["🔎 Axtarış sistemi", "🆕 Bu gün daxil olan elanlar"],
-        ["📋 Elanlarım"],
+        ["🔎 Axtarış sistemi", "🕒 Son 24 saat"],
         ["👤 Hesabım", "📊 Statistika"],
         ["💳 Ödəniş", "ℹ️ Haqqında"],
     ]
@@ -4772,16 +4771,13 @@ def build_main_menu(
         complaint_row.append("📌 Müştəri istəkləri")
     rows.append(complaint_row)
 
-    if not is_admin_user:
-        rows.append(["🤝 Dostunu dəvət et"])
-
     for row in rows:
         kb.row(*row)
 
     if is_admin_user:
         kb.row(TEXTS_AZ["admin_panel_button"], MENU_REFRESH_BUTTON)
     else:
-        kb.row(MENU_REFRESH_BUTTON)
+        kb.row("🤝 Dostunu dəvət et", MENU_REFRESH_BUTTON)
     return kb
 
 
@@ -4812,6 +4808,7 @@ def send_main_menu(
 
 def build_search_menu_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row("🔍 Yeni axtarış", "📂 Elanlarım")
     kb.row("🏠 Satılır", "🏢 Kirayə verilir")
     kb.row("🔍 Açar sözlə axtar", "📞 Nömrə ilə axtar")
     kb.row("📝 Yeni elan əlavə et", "📝 Ev axtarıram")
@@ -7585,7 +7582,7 @@ def step_link(message):
 # =============== 📋 ELANLARIM ===============
 
 
-@bot.message_handler(func=lambda m: m.text == "📋 Elanlarım")
+@bot.message_handler(func=lambda m: m.text in ["📋 Elanlarım", "📂 Elanlarım"])
 def my_listings(message):
     if not ensure_allowed(message):
         return
@@ -7725,7 +7722,9 @@ def show_top_viewed(message):
 # =============== 🔎 AXTARIŞ SİSTEMİ ===============
 
 
-@bot.message_handler(func=lambda m: m.text == "🔎 Axtarış sistemi")
+@bot.message_handler(
+    func=lambda m: m.text in ["🔎 Axtarış sistemi", "🔍 Yeni axtarış"]
+)
 def search_system_menu(message):
     if not ensure_allowed(message):
         return
@@ -7809,7 +7808,7 @@ def compute_today_stats(filters: dict) -> dict:
 def send_today_stats_message(chat_id: int, filters: dict):
     stats = compute_today_stats(filters)
     text = (
-        "🆕 Bu gün daxil olan elanlar\n"
+        "🕒 Son 24 saat\n"
         f"📊 Ümumi: {stats['total']}\n"
         f"1⃣ Satılır: {stats['sale']}\n"
         f"2⃣ Kirayə: {stats['rent']}"
@@ -7842,7 +7841,7 @@ def start_today_flow(chat_id: int):
     prompt_today_operation(chat_id)
 
 
-@bot.message_handler(func=lambda m: m.text == "🆕 Bu gün daxil olan elanlar")
+@bot.message_handler(func=lambda m: m.text == "🕒 Son 24 saat")
 def handle_today_menu(message):
     if not ensure_allowed(message):
         return
