@@ -4763,8 +4763,12 @@ def build_main_menu(
     rows: List[List[str]] = [
         ["🔎 Axtarış sistemi", "🕒 Son 24 saat"],
         ["👤 Hesabım", "📊 Statistika"],
-        ["💳 Ödəniş", "ℹ️ Haqqında"],
     ]
+
+    if is_admin_user:
+        rows.append(["💳 Ödəniş", "ℹ️ Haqqında"])
+    else:
+        rows.append(["💳 Ödəniş", "🤝 Dostunu dəvət et"])
 
     complaint_row = ["📩 Şikayət və təkliflər"]
     if has_customer_access or is_admin_user:
@@ -4777,7 +4781,7 @@ def build_main_menu(
     if is_admin_user:
         kb.row(TEXTS_AZ["admin_panel_button"], MENU_REFRESH_BUTTON)
     else:
-        kb.row("🤝 Dostunu dəvət et", MENU_REFRESH_BUTTON)
+        kb.row("ℹ️ Haqqında", MENU_REFRESH_BUTTON)
     return kb
 
 
@@ -4808,12 +4812,11 @@ def send_main_menu(
 
 def build_search_menu_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row("🔍 Yeni axtarış", "📂 Elanlarım")
-    kb.row("🏠 Satılır", "🏢 Kirayə verilir")
-    kb.row("🔍 Açar sözlə axtar", "📞 Nömrə ilə axtar")
-    kb.row("📝 Yeni elan əlavə et", "📝 Ev axtarıram")
-    kb.row("⭐ Favorilərim", "🔔 Bildirişlərim")
-    kb.row("⬅️ Əsas menyuya qayıt")
+    kb.row("📂 Elanlarım", "🏠 Satılır")
+    kb.row("🏢 Kirayə verilir", "🔍 Açar sözlə axtar")
+    kb.row("📞 Nömrə ilə axtar", "📝 Yeni elan əlavə et")
+    kb.row("📝 Ev axtarıram", "⭐ Favorilərim")
+    kb.row("🔔 Bildirişlərim", "⬅️ Əsas menyuya qayıt")
     return kb
 
 
@@ -7722,9 +7725,7 @@ def show_top_viewed(message):
 # =============== 🔎 AXTARIŞ SİSTEMİ ===============
 
 
-@bot.message_handler(
-    func=lambda m: m.text in ["🔎 Axtarış sistemi", "🔍 Yeni axtarış"]
-)
+@bot.message_handler(func=lambda m: m.text == "🔎 Axtarış sistemi")
 def search_system_menu(message):
     if not ensure_allowed(message):
         return
