@@ -190,7 +190,6 @@ USER_STATE: Dict[int, str] = {}
 CUSTOMER_REQUEST_COOLDOWN_SECONDS = 300
 LISTING_SESSION_TTL_SECONDS = 4 * 3600
 listing_sessions: Dict[int, Dict[str, Any]] = {}
-pending_listing_requests: Dict[int, Dict[str, Any]] = {}
 user_stats_filter: Dict[int, str] = {}
 
 logger = logging.getLogger("besthome_bot")
@@ -1643,19 +1642,6 @@ def init_local_db():
     """
     )
 
-    # Elan statusları
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS listing_status (
-            source TEXT,
-            listing_id INTEGER,
-            status TEXT,
-            updated_at TEXT,
-            PRIMARY KEY (source, listing_id)
-        )
-    """
-    )
-
     # Elan baxışları
     cur.execute(
         """
@@ -1932,16 +1918,6 @@ def init_local_db():
         )
     """
     )
-
-    # Status cədvəli sütun yoxlaması (avtomatik migrasiya)
-    cur.execute("PRAGMA table_info(listing_status)")
-    cols = {row[1] for row in cur.fetchall()}
-    if "status" not in cols:
-        cur.execute(
-            "ALTER TABLE listing_status ADD COLUMN status TEXT DEFAULT 'active'"
-        )
-    if "updated_at" not in cols:
-        cur.execute("ALTER TABLE listing_status ADD COLUMN updated_at TEXT")
 
     # saved_searches cədvəli üçün sütun yoxlaması
     cur.execute("PRAGMA table_info(saved_searches)")
@@ -3903,18 +3879,7 @@ def count_main_active_listings(
             if date_col:
                 date_sql, date_params = build_today_clause(f"l.{date_col}")
         rayon_sql, rayon_params = build_rayon_filter_sql(cur, "listings", rayon, "l.")
-        if attached:
-            sql = (
-                "SELECT COUNT(*) FROM listings l "
-                "LEFT JOIN local_db.listing_status ls "
-                "ON ls.source='main' AND ls.listing_id = l.id "
-                + flt
-                + " AND (ls.status IS NULL OR ls.status NOT IN ('sold','rented','blacklisted'))"
-                + date_sql
-                + rayon_sql
-            )
-        else:
-            sql = "SELECT COUNT(*) FROM listings l " + flt + date_sql + rayon_sql
+        sql = "SELECT COUNT(*) FROM listings l " + flt + date_sql + rayon_sql
         cur.execute(sql, params + date_params + rayon_params)
         row = cur.fetchone()
         return int(row[0]) if row and row[0] is not None else 0
@@ -3944,15 +3909,7 @@ def count_local_active_listings(
         rayon_sql, rayon_params = build_rayon_filter_sql(
             cur, "listings_approved", rayon, "l."
         )
-        sql = (
-            "SELECT COUNT(*) FROM listings_approved l "
-            "LEFT JOIN listing_status ls "
-            "ON ls.source='local' AND ls.listing_id = l.id "
-            + flt
-            + " AND (ls.status IS NULL OR ls.status NOT IN ('sold','rented','blacklisted'))"
-            + date_sql
-            + rayon_sql
-        )
+        sql = "SELECT COUNT(*) FROM listings_approved l " + flt + date_sql + rayon_sql
         cur.execute(sql, params + date_params + rayon_params)
         row = cur.fetchone()
         return int(row[0]) if row and row[0] is not None else 0
@@ -3998,7 +3955,6 @@ def cleanup_listing_sessions():
     for chat_id, sess in list(listing_sessions.items()):
         if now - sess.get("timestamp", 0) > LISTING_SESSION_TTL_SECONDS:
             listing_sessions.pop(chat_id, None)
-            pending_listing_requests.pop(chat_id, None)
 
 
 def get_active_listing_session(chat_id: int):
@@ -4038,7 +3994,11 @@ def normalize_listing_item(item: dict):
     }
 
 
-def build_listing_navigation_keyboard(is_favorite: bool) -> types.InlineKeyboardMarkup:
+def build_listing_navigation_keyboard(
+    is_favorite: bool,
+    listing_link: Optional[str] = None,
+    whatsapp_url: Optional[str] = None,
+) -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup()
     fav_label = "❤️ Favori" if is_favorite else "🤍 Favori"
     mk.row(
@@ -4051,33 +4011,15 @@ def build_listing_navigation_keyboard(is_favorite: bool) -> types.InlineKeyboard
         types.InlineKeyboardButton("🔖 Saxla", callback_data="session:save"),
         types.InlineKeyboardButton("⏮ -5", callback_data="nav:-5"),
     )
+    action_buttons = []
+    if listing_link:
+        action_buttons.append(types.InlineKeyboardButton("📄 Elana bax", url=listing_link))
+    if whatsapp_url:
+        action_buttons.append(types.InlineKeyboardButton("💬 WhatsApp-da yaz", url=whatsapp_url))
+    if action_buttons:
+        mk.row(*action_buttons)
     mk.add(types.InlineKeyboardButton("🏠 Əsas menyu", callback_data="nav:home"))
     return mk
-
-
-def prompt_resume_listing_session(chat_id: int, loading_ref=None):
-    session = get_active_listing_session(chat_id)
-    if not session:
-        return False
-    mk = types.InlineKeyboardMarkup()
-    mk.add(
-        types.InlineKeyboardButton("▶️ Davam et", callback_data="session:resume"),
-        types.InlineKeyboardButton("❌ Ləğv et", callback_data="session:cancel"),
-    )
-    prompt_text = "Son baxdığınız elandan davam edim?"
-    if loading_ref:
-        try:
-            bot.edit_message_text(
-                prompt_text,
-                chat_id=loading_ref[0],
-                message_id=loading_ref[1],
-                reply_markup=mk,
-            )
-            return True
-        except Exception:
-            pass
-    bot.send_message(chat_id, prompt_text, reply_markup=mk)
-    return True
 
 
 def offer_save_search(chat_id: int, params: dict):
@@ -4266,44 +4208,6 @@ def get_saved_searches(chat_id: int):
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return rows
-
-
-def get_status_map():
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT source, listing_id, status FROM listing_status")
-    rows = cur.fetchall()
-    conn.close()
-    return {(r["source"], r["listing_id"]): r["status"] for r in rows}
-
-
-def get_listing_status(source: str, listing_id: int) -> str:
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT status FROM listing_status WHERE source=? AND listing_id=?",
-        (source, listing_id),
-    )
-    row = cur.fetchone()
-    conn.close()
-    return row[0] if row else "active"
-
-
-def update_listing_status(source: str, listing_id: int, status: str):
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO listing_status (source, listing_id, status, updated_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(source, listing_id) DO UPDATE SET
-            status=excluded.status,
-            updated_at=excluded.updated_at
-        """,
-        (source, listing_id, status, datetime.utcnow().isoformat()),
-    )
-    conn.commit()
-    conn.close()
 
 
 OPERATION_VARIANTS = {
@@ -4725,13 +4629,10 @@ def query_top_viewed_listings(days: int = 7, offset: int = 0, limit: int = None)
     rows = cur.fetchall()
     conn.close()
 
-    status_map = get_status_map()
     enriched = []
     for r in rows:
         ev = fetch_listing_by_any(r["listing_id"])
         if not ev:
-            continue
-        if not is_listing_active(ev, status_map):
             continue
         ev["__views"] = r["views"]
         ev["__favorites"] = r["favorites"]
@@ -4861,7 +4762,7 @@ def build_main_menu(
 
     rows: List[List[str]] = [
         ["🔎 Axtarış sistemi", "🆕 Bu gün daxil olan elanlar"],
-        ["📂 Elan statusları", "📋 Elanlarım"],
+        ["📋 Elanlarım"],
         ["👤 Hesabım", "📊 Statistika"],
         ["💳 Ödəniş", "ℹ️ Haqqında"],
     ]
@@ -5002,13 +4903,6 @@ def build_listing_text(ev: dict, source: str, progress_text: Optional[str] = Non
         else:
             location = metro
 
-    listing_id = ev.get("id") or ev.get("ID") or ev.get("Elan_kodu")
-    try:
-        listing_pk = int(str(listing_id)) if listing_id is not None else None
-    except (TypeError, ValueError):
-        listing_pk = None
-    status = get_listing_status(source, listing_pk) if listing_pk else "active"
-
     badges = []
     try:
         if datetime.utcnow() - safe_date(ev) <= timedelta(
@@ -5037,14 +4931,6 @@ def build_listing_text(ev: dict, source: str, progress_text: Optional[str] = Non
         f"📞 {phone} ({cname})\n"
         f"🧾 {summary}"
     )
-
-    if status != "active":
-        status_txt = {
-            "sold": "✅ Satılıb",
-            "rented": "✅ Kirayə verilib",
-            "blacklisted": "⛔ Qara siyahıda",
-        }.get(status, status)
-        text += f"\n📌 Status: {status_txt}"
 
     link = ev.get("link") or ev.get("source_link")
     if link:
@@ -5080,23 +4966,21 @@ def send_listing_card(
     ev: dict,
     source: str = "main",
     with_fav_button: bool = True,
-    status_controls: bool = True,
     extra_buttons=None,
     track_view: bool = False,
     viewer_id: Optional[int] = None,
 ):
-    listing_id = ev.get("id") or ev.get("ID") or ev.get("Elan_kodu")
-    try:
-        listing_pk = int(str(listing_id)) if listing_id is not None else None
-    except (TypeError, ValueError):
-        listing_pk = None
-    status = get_listing_status(source, listing_pk) if listing_pk else "active"
-
     if viewer_id:
         record_agent_activity(viewer_id, metric="views")
 
-    if listing_pk and track_view:
-        record_listing_view(source, listing_pk, viewer_id)
+    if track_view:
+        listing_id = ev.get("id") or ev.get("ID") or ev.get("Elan_kodu")
+        try:
+            listing_pk = int(str(listing_id)) if listing_id is not None else None
+        except (TypeError, ValueError):
+            listing_pk = None
+        if listing_pk:
+            record_listing_view(source, listing_pk, viewer_id)
 
     mk = types.InlineKeyboardMarkup()
 
@@ -5108,21 +4992,7 @@ def send_listing_card(
             )
         )
 
-    if status_controls and listing_pk:
-        mk.add(
-            types.InlineKeyboardButton(
-                "✅ Satılıb", callback_data=f"st|sold|{source}|{listing_pk}"
-            ),
-            types.InlineKeyboardButton(
-                "✅ Kirayə verilib", callback_data=f"st|rent|{source}|{listing_pk}"
-            ),
-        )
-        mk.add(
-            types.InlineKeyboardButton(
-                "⛔ Qara siyahıya", callback_data=f"st|blk|{source}|{listing_pk}"
-            )
-        )
-
+    phone = ev.get("phone") or ev.get("Elaqe_nomresi")
     wa_message = build_whatsapp_message(ev)
     wa_url = make_whatsapp_url(phone, wa_message)
     if wa_url:
@@ -7842,122 +7712,6 @@ def cb_remove_favorite(c):
         )
 
 
-# =============== 📌 ELAN STATUSLARI ===============
-
-
-def status_label(code: str) -> str:
-    return {
-        "sold": "✅ Satılıb",
-        "rented": "✅ Kirayə verilib",
-        "blacklisted": "⛔ Qara siyahıda",
-        "active": "Aktiv",
-    }.get(code, code)
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("st|"))
-@callback_guard
-def cb_listing_status(c):
-    if not ensure_allowed_cb(c):
-        return
-    parts = c.data.split("|")
-    if len(parts) < 4:
-        return
-    action, source, lid = parts[1], parts[2], parts[3]
-    try:
-        lid_int = int(lid)
-    except Exception:
-        return
-
-    new_status = {
-        "sold": "sold",
-        "rent": "rented",
-        "blk": "blacklisted",
-        "undo": "active",
-    }.get(action)
-
-    if not new_status:
-        return
-
-    update_listing_status(source, lid_int, new_status)
-    try:
-        bot.answer_callback_query(c.id, f"Status: {status_label(new_status)}")
-    except Exception:
-        pass
-    try:
-        bot.edit_message_reply_markup(c.message.chat.id, c.message.message_id)
-    except Exception:
-        pass
-
-
-def show_status_bucket(chat_id, status_code: str, title: str, undo_label: str):
-    reset_search_state(chat_id)
-    params = {"status": status_code, "undo_label": undo_label, "title": title}
-    send_paginated_results(
-        chat_id,
-        mode="statuslist",
-        params=params,
-        page=1,
-    )
-
-
-def status_menu_keyboard():
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row("🏠 Satılan elanlar", "🏢 Kirayə verilən elanlar")
-    kb.row("⛔ Qara siyahı")
-    kb.row("⬅️ Geri")
-    return kb
-
-
-@bot.message_handler(func=lambda m: m.text == "📂 Elan statusları")
-def open_status_menu(message):
-    if not ensure_allowed(message):
-        return
-    send_with_reply_keyboard(
-        message.chat.id,
-        "📂 Elan statuslarını seçin:",
-        status_menu_keyboard(),
-    )
-
-
-@bot.message_handler(func=lambda m: m.text == "🏠 Satılan elanlar")
-def show_sold_list(message):
-    if not ensure_allowed(message):
-        return
-    show_status_bucket(message.chat.id, "sold", "✅ Satılan elanlar:", "🔄 Geri qaytar")
-
-
-@bot.message_handler(func=lambda m: m.text == "🏢 Kirayə verilən elanlar")
-def show_rented_list(message):
-    if not ensure_allowed(message):
-        return
-    show_status_bucket(
-        message.chat.id,
-        "rented",
-        "✅ Kirayə verilən elanlar:",
-        "🔄 Geri qaytar",
-    )
-
-
-@bot.message_handler(func=lambda m: m.text == "⛔ Qara siyahı")
-def show_blacklist(message):
-    if not ensure_allowed(message):
-        return
-    show_status_bucket(
-        message.chat.id,
-        "blacklisted",
-        "⛔ Qara siyahıdakı elanlar:",
-        "🔄 Geri qaytar",
-    )
-
-
-@bot.message_handler(func=lambda m: m.text == "⬅️ Geri")
-def status_back_to_main(message):
-    if not ensure_allowed(message):
-        return
-    set_ui_context(message.chat.id, UI_CONTEXT_MAIN)
-    send_main_menu(message.chat.id, force=True)
-
-
 @bot.message_handler(func=lambda m: m.text == "🔥 Ən çox baxılan elanlar")
 def show_top_viewed(message):
     if not is_admin(message.chat.id):
@@ -9575,16 +9329,15 @@ def cb_keyword_hit_view(c):
     if target_type == "listing":
         listing = fetch_listing_by_source(source, target_id)
         if listing:
-            send_listing_card(
-                c.message.chat.id,
-                listing,
-                source=source,
-                with_fav_button=True,
-                status_controls=False,
-                track_view=False,
-                viewer_id=c.message.chat.id,
-                extra_buttons=[back_button],
-            )
+                send_listing_card(
+                    c.message.chat.id,
+                    listing,
+                    source=source,
+                    with_fav_button=True,
+                    track_view=False,
+                    viewer_id=c.message.chat.id,
+                    extra_buttons=[back_button],
+                )
         else:
             bot.send_message(c.message.chat.id, f"🗂 Elan tapılmadı: ID {target_id}")
     elif target_type == "request":
@@ -9818,7 +9571,6 @@ def cb_notifications_view_listing(c):
         listing,
         source=listing.get("__source", "main"),
         with_fav_button=True,
-        status_controls=False,
         track_view=False,
         viewer_id=c.message.chat.id,
         extra_buttons=[back_btn],
@@ -10654,17 +10406,6 @@ def matches_floor(ev: dict, floor_range):
     return True
 
 
-def is_listing_active(ev: dict, status_map: dict) -> bool:
-    src = ev.get("__source", "main")
-    lid = ev.get("id") or ev.get("ID") or ev.get("Elan_kodu")
-    try:
-        lid = int(str(lid))
-    except Exception:
-        return True
-    status = status_map.get((src, lid), "active")
-    return status not in {"sold", "rented", "blacklisted"}
-
-
 def compute_stats(
     conn: sqlite3.Connection,
     source_table: Optional[str],
@@ -11033,10 +10774,8 @@ def _listing_price_value(ev: dict):
     return parse_number(ev.get("price") or ev.get("Qiymet"))
 
 
-def matches_saved_search(ev: dict, saved: dict, status_map: dict) -> bool:
+def matches_saved_search(ev: dict, saved: dict) -> bool:
     # Notification matching uses its own rules (not search query parsing).
-    if not is_listing_active(ev, status_map):
-        return False
 
     op_filter = normalize_operation_value(saved.get("operation"))
     ev_op = normalize_operation_value(ev.get("operation") or ev.get("Emeliyyat"))
@@ -11123,7 +10862,6 @@ def process_saved_search_notifications():
     if not searches:
         return
 
-    status_map = get_status_map()
     now_iso = datetime.utcnow().isoformat()
 
     for s in searches:
@@ -11138,7 +10876,7 @@ def process_saved_search_notifications():
             since_dt = datetime.min
 
         candidates = load_recent_listings(since_dt)
-        matches = [ev for ev in candidates if matches_saved_search(ev, s, status_map)]
+        matches = [ev for ev in candidates if matches_saved_search(ev, s)]
 
         if not matches:
             continue
@@ -11250,7 +10988,6 @@ def check_favorite_price_drops():
                     ev,
                     source=src,
                     with_fav_button=True,
-                    status_controls=False,
                 )
             except Exception as e:
                 print("⚠️ Favorite price notification error:", e)
@@ -11316,12 +11053,9 @@ def query_structured_results(filters: dict, offset: int = 0, limit: int = None):
         results.append(d)
     conn.close()
 
-    status_map = get_status_map()
     filtered = []
     for ev in results:
         if not is_within_date_range(ev, date_days):
-            continue
-        if not is_listing_active(ev, status_map):
             continue
         if not matches_region_rayon(ev, filters):
             continue
@@ -11399,7 +11133,6 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
         results.append(d)
     conn.close()
 
-    status_map = get_status_map()
     start, end = get_today_bounds()
     filtered = []
     for ev in results:
@@ -11407,8 +11140,6 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
         if ev_dt == datetime.min:
             continue
         if not (start <= ev_dt <= end):
-            continue
-        if not is_listing_active(ev, status_map):
             continue
         if not matches_today_rayon(ev, filters):
             continue
@@ -11664,13 +11395,9 @@ def query_keyword_results(
         get_local_conn, "listings_approved", "local_listings_fts", op_local, "local"
     )
 
-    status_map = get_status_map()
-
     filtered: List[dict] = []
     for ev in results:
         if not is_within_date_range(ev, date_days):
-            continue
-        if not is_listing_active(ev, status_map):
             continue
         listing_text = build_listing_text_blob(ev)
         if not listing_text:
@@ -11916,12 +11643,9 @@ def query_smart_results(criteria: dict, offset: int = 0, limit: int = None):
         results.append(d)
     conn.close()
 
-    status_map = get_status_map()
     filtered = []
     for ev in results:
         if not is_within_date_range(ev, date_days):
-            continue
-        if not is_listing_active(ev, status_map):
             continue
         if not passes_room(ev):
             continue
@@ -11979,8 +11703,6 @@ def query_phone_results(raw: str, offset: int = 0, limit: int = None):
         results.append(d)
     conn.close()
 
-    status_map = get_status_map()
-    results = [r for r in results if is_listing_active(r, status_map)]
     results.sort(key=safe_date, reverse=True)
     total = len(results)
     if limit is not None:
@@ -12013,34 +11735,6 @@ def query_favorites_page(chat_id: int, offset: int = 0, limit: int = None):
     return items, total
 
 
-def query_status_page(status_code: str, offset: int = 0, limit: int = None):
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT COUNT(*) FROM listing_status WHERE status=?",
-        (status_code,),
-    )
-    total = cur.fetchone()[0]
-    cur.execute(
-        """
-        SELECT source, listing_id FROM listing_status
-        WHERE status=?
-        ORDER BY updated_at DESC
-        LIMIT ? OFFSET ?
-    """,
-        (status_code, limit if limit is not None else -1, offset),
-    )
-    rows = cur.fetchall()
-    conn.close()
-
-    items = []
-    for r in rows:
-        ev = fetch_listing_by_source(r["source"], r["listing_id"])
-        if ev:
-            items.append({"data": ev, "source": r["source"], "id": r["listing_id"]})
-    return items, total
-
-
 def fetch_page_results(chat_id: int, mode: str, params: dict, page: int):
     offset = (page - 1) * PAGE_SIZE
     if mode == "filter":
@@ -12064,10 +11758,6 @@ def fetch_page_results(chat_id: int, mode: str, params: dict, page: int):
         )
     if mode == "favorites":
         return query_favorites_page(chat_id, offset=offset, limit=PAGE_SIZE)
-    if mode == "statuslist":
-        return query_status_page(
-            params.get("status", ""), offset=offset, limit=PAGE_SIZE
-        )
     if mode == "topviews":
         return query_top_viewed_listings(
             days=params.get("days", 7), offset=offset, limit=PAGE_SIZE
@@ -12101,8 +11791,6 @@ def fetch_all_results(chat_id: int, mode: str, params: dict):
         return query_phone_results(params.get("digits", ""), offset=0, limit=None)
     if mode == "favorites":
         return query_favorites_page(chat_id, offset=0, limit=None)
-    if mode == "statuslist":
-        return query_status_page(params.get("status", ""), offset=0, limit=None)
     if mode == "topviews":
         return query_top_viewed_listings(days=params.get("days", 7), offset=0, limit=None)
     if mode == "today":
@@ -12163,7 +11851,11 @@ def render_listing_for_user(
     progress_text = f"📍 Elan {idx + 1} / {len(refs)}"
     is_fav = is_favorite_entry(chat_id, ref["source"], ref["id"])
     text = build_listing_text(listing, ref["source"], progress_text=progress_text)
-    markup = build_listing_navigation_keyboard(is_fav)
+    listing_link = listing.get("link") or listing.get("source_link")
+    wa_message = build_whatsapp_message(listing)
+    wa_phone = listing.get("phone") or listing.get("Elaqe_nomresi")
+    wa_url = make_whatsapp_url(wa_phone, wa_message)
+    markup = build_listing_navigation_keyboard(is_fav, listing_link, wa_url)
     try:
         markup_signature = json.dumps(markup.to_dic(), sort_keys=True)
     except Exception:
@@ -12250,7 +11942,6 @@ def start_listing_session(
         "track_view": track_view,
         "viewed": set(),
     }
-    pending_listing_requests.pop(chat_id, None)
     render_listing_for_user(chat_id, session_id, target_message=loading_ref)
 
 
@@ -12261,7 +11952,6 @@ def send_paginated_results(
     page: int = 1,
     loading_ref=None,
     show_summary: bool = True,
-    skip_resume_prompt: bool = False,
 ):
     if mode == "today":
         set_ui_context(chat_id, UI_CONTEXT_TODAY)
@@ -12271,7 +11961,6 @@ def send_paginated_results(
         "smart",
         "phone",
         "favorites",
-        "statuslist",
         "topviews",
         "keyword_notif",
     }:
@@ -12282,21 +11971,6 @@ def send_paginated_results(
         ):
             bot.send_message(chat_id, "❌ Bu bölmə yalnız admin üçündür.")
         return
-    if (
-        not skip_resume_prompt
-        and get_active_listing_session(chat_id)
-        and prompt_resume_listing_session(chat_id, loading_ref)
-    ):
-        pending_listing_requests[chat_id] = {
-            "chat_id": chat_id,
-            "mode": mode,
-            "params": params,
-            "page": page,
-            "loading_ref": loading_ref,
-            "show_summary": show_summary,
-        }
-        return
-
     items, total = fetch_all_results(chat_id, mode, params)
     if total == 0:
         if not replace_loading_message(loading_ref, "Siyahı boşdur."):
@@ -12307,7 +11981,7 @@ def send_paginated_results(
     set_pagination_state(chat_id, mode, params, min(page, total_pages), total_pages)
 
     start_index = max(0, min((page - 1) * PAGE_SIZE, max(total - 1, 0)))
-    track_view = mode in ("favorites", "statuslist")
+    track_view = mode == "favorites"
     start_listing_session(
         chat_id,
         mode,
@@ -12440,47 +12114,6 @@ def cb_listing_favorite_toggle(c):
         bot.answer_callback_query(c.id, msg)
     except Exception:
         pass
-
-
-@bot.callback_query_handler(func=lambda c: c.data == "session:resume")
-@callback_guard
-def cb_listing_resume(c):
-    if not ensure_allowed_cb(c):
-        return
-    chat_id = c.message.chat.id
-    session = get_active_listing_session(chat_id)
-    if session:
-        session["timestamp"] = time.time()
-        pending_listing_requests.pop(chat_id, None)
-        render_listing_for_user(chat_id, session.get("session_id"))
-    try:
-        bot.answer_callback_query(c.id, "Davam edildi")
-    except Exception:
-        pass
-
-
-@bot.callback_query_handler(func=lambda c: c.data == "session:cancel")
-@callback_guard
-def cb_listing_cancel(c):
-    if not ensure_allowed_cb(c):
-        return
-    chat_id = c.message.chat.id
-    listing_sessions.pop(chat_id, None)
-    pending = pending_listing_requests.pop(chat_id, None)
-    try:
-        bot.answer_callback_query(c.id, "Sessiya ləğv edildi")
-    except Exception:
-        pass
-    if pending:
-        send_paginated_results(
-            pending["chat_id"],
-            mode=pending.get("mode", ""),
-            params=pending.get("params", {}),
-            page=pending.get("page", 1),
-            loading_ref=pending.get("loading_ref"),
-            show_summary=pending.get("show_summary", True),
-            skip_resume_prompt=True,
-        )
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "session:save")
@@ -17953,7 +17586,6 @@ def handle_admin_approve(c):
             ev,
             source="local",
             with_fav_button=False,
-            status_controls=False,
             track_view=False,
         )
         scan_state = {}
@@ -20028,7 +19660,6 @@ def compute_besthome_overview_stats():
             except Exception:
                 pass
 
-    status_map = get_status_map()
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     last_24h_dt = datetime.utcnow() - timedelta(hours=24)
 
@@ -20046,9 +19677,6 @@ def compute_besthome_overview_stats():
                 "reject",
             }:
                 continue
-        if not is_listing_active(row, status_map):
-            continue
-
         stats["total_active"] += 1
         ev_dt = extract_listing_datetime(row)
         if not ev_dt:
@@ -20339,7 +19967,6 @@ def create_flask_app():
                 results.append(d)
             conn.close()
 
-            status_map = get_status_map()
             filtered = []
 
             phrase = None
@@ -20354,8 +19981,6 @@ def create_flask_app():
 
             for ev in results:
                 if not is_within_date_range(ev, date_days):
-                    continue
-                if not is_listing_active(ev, status_map):
                     continue
                 if not matches_region_rayon(ev, filters):
                     continue
