@@ -1,5 +1,21 @@
 import sys
 import os
+import threading
+from flask import Flask
+
+
+def start_keepalive_server():
+    app = Flask("keepalive")
+
+    @app.route("/")
+    def home():
+        return "OK", 200
+
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+
+threading.Thread(target=start_keepalive_server, daemon=True).start()
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
