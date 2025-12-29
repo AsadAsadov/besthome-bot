@@ -7782,15 +7782,17 @@ def prompt_today_property(chat_id: int):
 
 
 def get_today_rayon_counts(listings: List[dict]) -> Dict[str, int]:
-    rayon_counts: Counter[str] = Counter()
-
-    for item in listings or []:
-        raw_rayon = item.get("rayon")
-        key = normalize_rayon(raw_rayon)
-        if key:
-            rayon_counts[key] += 1
-
-    return dict(rayon_counts)
+    region_counter = Counter(
+        normalize_region(item.get("rayon"))
+        for item in listings
+        if item.get("rayon")
+    )
+    logger.info(
+        "REGION COUNTS DEBUG total=%d regions=%s",
+        len(listings),
+        dict(region_counter),
+    )
+    return dict(region_counter)
 
 
 def prompt_today_rayon(chat_id: int):
@@ -7798,13 +7800,28 @@ def prompt_today_rayon(chat_id: int):
     if not rayons:
         send_today_results(chat_id, today_flow_state.get(chat_id, {}))
         return
+    filters = today_flow_state.get(chat_id, {"op": "all", "prop": "all", "rayon": "all"})
+    filters_copy = dict(filters)
     cached_results = today_results_cache.get(chat_id, {})
-    listings = cached_results.get("items") or []
-    normalized_counts = get_today_rayon_counts(listings)
+    cached_filters = cached_results.get("filters") or {}
+    filtered_listings = (
+        cached_results.get("items")
+        if cached_filters == filters_copy
+        else None
+    )
+    if filtered_listings is None:
+        filtered_listings, _ = fetch_all_results(
+            chat_id, mode="today", params={"filters": filters_copy}
+        )
+        today_results_cache[chat_id] = {
+            "filters": filters_copy,
+            "items": filtered_listings,
+        }
+
+    normalized_counts = get_today_rayon_counts(filtered_listings or [])
     buttons = []
     for rayon_name in rayons:
-        norm = normalize_rayon(rayon_name)
-        count = normalized_counts.get(norm, 0)
+        count = normalized_counts.get(normalize_region(rayon_name), 0)
 
         text = f"{rayon_name} ({count})"
         buttons.append((text, rayon_name, count))
@@ -10386,16 +10403,11 @@ def normalize_rayon_name(value: Optional[str]) -> str:
     return str(value or "").strip().lower()
 
 
-def normalize_rayon(value: str) -> str:
+def normalize_region(value: str) -> str:
     if not value:
         return ""
-
-    v = value.lower().strip()
-
-    # remove common suffixes
-    v = re.sub(r"(rayonu|r\.|rayon)", "", v)
-
-    # normalize az chars
+    v = value.lower()
+    v = re.sub(r"(rayonu|rayon|r\.|r)", "", v)
     v = (
         v.replace("ə", "e")
         .replace("ş", "s")
@@ -10405,11 +10417,13 @@ def normalize_rayon(value: str) -> str:
         .replace("ç", "c")
         .replace("ı", "i")
     )
+    v = re.sub(r"[^a-z0-9 ]", "", v)
+    v = re.sub(r"\s+", " ", v)
+    return v.strip()
 
-    # remove extra spaces
-    v = re.sub(r"\s+", " ", v).strip()
 
-    return v
+def normalize_rayon(value: str) -> str:
+    return normalize_region(value)
 
 
 def normalize_today_rayon(value: Optional[str]) -> str:
@@ -11853,7 +11867,15 @@ def fetch_all_results(chat_id: int, mode: str, params: dict):
     if mode == "topviews":
         return query_top_viewed_listings(days=params.get("days", 7), offset=0, limit=None)
     if mode == "today":
-        return query_today_results(params.get("filters", {}), offset=0, limit=None)
+        filters = params.get("filters", {})
+        filters_copy = dict(filters)
+        cached = today_results_cache.get(chat_id, {})
+        if cached.get("filters") == filters_copy:
+            items = cached.get("items") or []
+            return items, len(items)
+        items, total = query_today_results(filters_copy, offset=0, limit=None)
+        today_results_cache[chat_id] = {"filters": filters_copy, "items": items}
+        return items, total
     if mode == "keyword_notif":
         items = keyword_notification_state.get(chat_id, {}).get("items", [])
         total = len(items)
