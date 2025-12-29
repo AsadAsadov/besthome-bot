@@ -188,6 +188,9 @@ agent_request_lookup_state = {}
 admin_customer_request_state = {}
 USER_STATE: Dict[int, str] = {}
 CUSTOMER_REQUEST_COOLDOWN_SECONDS = 300
+LISTING_SESSION_TTL_SECONDS = 4 * 3600
+listing_sessions: Dict[int, Dict[str, Any]] = {}
+pending_listing_requests: Dict[int, Dict[str, Any]] = {}
 user_stats_filter: Dict[int, str] = {}
 
 logger = logging.getLogger("besthome_bot")
@@ -3990,6 +3993,93 @@ def set_pagination_state(
     }
 
 
+def cleanup_listing_sessions():
+    now = time.time()
+    for chat_id, sess in list(listing_sessions.items()):
+        if now - sess.get("timestamp", 0) > LISTING_SESSION_TTL_SECONDS:
+            listing_sessions.pop(chat_id, None)
+            pending_listing_requests.pop(chat_id, None)
+
+
+def get_active_listing_session(chat_id: int):
+    cleanup_listing_sessions()
+    session = listing_sessions.get(chat_id)
+    if not session:
+        return None
+    if time.time() - session.get("timestamp", 0) > LISTING_SESSION_TTL_SECONDS:
+        listing_sessions.pop(chat_id, None)
+        return None
+    return session
+
+
+def make_listing_ref(source: str, listing_id: int) -> str:
+    return f"{source}:{listing_id}"
+
+
+def normalize_listing_item(item: dict):
+    ev = item.get("data") if isinstance(item, dict) and "data" in item else item
+    if not isinstance(ev, dict):
+        return None
+    source = (
+        item.get("source")
+        if isinstance(item, dict)
+        else ev.get("__source")
+        or "main"
+    )
+    try:
+        listing_id = ev.get("id") or ev.get("ID") or ev.get("Elan_kodu")
+        listing_id = int(str(listing_id))
+    except Exception:
+        return None
+    return {
+        "source": source,
+        "id": listing_id,
+        "data": ev,
+    }
+
+
+def build_listing_navigation_keyboard(is_favorite: bool) -> types.InlineKeyboardMarkup:
+    mk = types.InlineKeyboardMarkup()
+    fav_label = "❤️ Favori" if is_favorite else "🤍 Favori"
+    mk.row(
+        types.InlineKeyboardButton("⬅️ Əvvəlki", callback_data="nav:prev"),
+        types.InlineKeyboardButton(fav_label, callback_data="fav:toggle"),
+        types.InlineKeyboardButton("➡️ Növbəti", callback_data="nav:next"),
+    )
+    mk.row(
+        types.InlineKeyboardButton("⏭ +5", callback_data="nav:+5"),
+        types.InlineKeyboardButton("🔖 Saxla", callback_data="session:save"),
+        types.InlineKeyboardButton("⏮ -5", callback_data="nav:-5"),
+    )
+    mk.add(types.InlineKeyboardButton("🏠 Əsas menyu", callback_data="nav:home"))
+    return mk
+
+
+def prompt_resume_listing_session(chat_id: int, loading_ref=None):
+    session = get_active_listing_session(chat_id)
+    if not session:
+        return False
+    mk = types.InlineKeyboardMarkup()
+    mk.add(
+        types.InlineKeyboardButton("▶️ Davam et", callback_data="session:resume"),
+        types.InlineKeyboardButton("❌ Ləğv et", callback_data="session:cancel"),
+    )
+    prompt_text = "Son baxdığınız elandan davam edim?"
+    if loading_ref:
+        try:
+            bot.edit_message_text(
+                prompt_text,
+                chat_id=loading_ref[0],
+                message_id=loading_ref[1],
+                reply_markup=mk,
+            )
+            return True
+        except Exception:
+            pass
+    bot.send_message(chat_id, prompt_text, reply_markup=mk)
+    return True
+
+
 def offer_save_search(chat_id: int, params: dict):
     if not params:
         return
@@ -4493,6 +4583,7 @@ def add_favorite_entry(chat_id: int, source: str, listing_id: int) -> bool:
 
 
 def remove_favorite_entry(chat_id: int, source: str, listing_id: int) -> bool:
+    source = source or "main"
     conn = get_local_conn()
     cur = conn.cursor()
     cur.execute(
@@ -4503,6 +4594,19 @@ def remove_favorite_entry(chat_id: int, source: str, listing_id: int) -> bool:
     conn.commit()
     conn.close()
     return removed
+
+
+def is_favorite_entry(chat_id: int, source: str, listing_id: int) -> bool:
+    source = source or "main"
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT 1 FROM favorites WHERE chat_id=? AND listing_id=? AND source=?",
+        (chat_id, listing_id, source),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return bool(row)
 
 
 def should_track_interaction(
@@ -4875,16 +4979,7 @@ def build_whatsapp_message(ev: dict) -> str:
     return body
 
 
-def send_listing_card(
-    chat_id: int,
-    ev: dict,
-    source: str = "main",
-    with_fav_button: bool = True,
-    status_controls: bool = True,
-    extra_buttons=None,
-    track_view: bool = False,
-    viewer_id: Optional[int] = None,
-):
+def build_listing_text(ev: dict, source: str, progress_text: Optional[str] = None) -> str:
     date_val = (
         ev.get("date_read") or ev.get("date_added") or ev.get("created_at") or "-"
     )
@@ -4913,12 +5008,6 @@ def send_listing_card(
     except (TypeError, ValueError):
         listing_pk = None
     status = get_listing_status(source, listing_pk) if listing_pk else "active"
-
-    if viewer_id:
-        record_agent_activity(viewer_id, metric="views")
-
-    if listing_pk and track_view:
-        record_listing_view(source, listing_pk, viewer_id)
 
     badges = []
     try:
@@ -4969,6 +5058,46 @@ def send_listing_card(
     if ev.get("__views") is not None:
         text += f"\n👁️ Baxış: {ev['__views']}"
 
+    stats_parts = []
+    if ev.get("__views") is not None:
+        stats_parts.append(f"👁 Baxış sayı: {ev['__views']}")
+    if ev.get("__favorites") is not None:
+        stats_parts.append(f"⭐ Favorit sayı: {ev['__favorites']}")
+    if ev.get("__contacts") is not None:
+        stats_parts.append(f"📞 Əlaqə sayı: {ev['__contacts']}")
+    if ev.get("__popularity") is not None:
+        stats_parts.append(f"🔥 Populyarlıq skoru: {ev['__popularity']}")
+    if stats_parts:
+        text += "\n" + "\n".join(stats_parts)
+
+    if progress_text:
+        text += f"\n\n{progress_text}"
+    return text
+
+
+def send_listing_card(
+    chat_id: int,
+    ev: dict,
+    source: str = "main",
+    with_fav_button: bool = True,
+    status_controls: bool = True,
+    extra_buttons=None,
+    track_view: bool = False,
+    viewer_id: Optional[int] = None,
+):
+    listing_id = ev.get("id") or ev.get("ID") or ev.get("Elan_kodu")
+    try:
+        listing_pk = int(str(listing_id)) if listing_id is not None else None
+    except (TypeError, ValueError):
+        listing_pk = None
+    status = get_listing_status(source, listing_pk) if listing_pk else "active"
+
+    if viewer_id:
+        record_agent_activity(viewer_id, metric="views")
+
+    if listing_pk and track_view:
+        record_listing_view(source, listing_pk, viewer_id)
+
     mk = types.InlineKeyboardMarkup()
 
     if with_fav_button and ev.get("id"):
@@ -5003,21 +5132,11 @@ def send_listing_card(
         for btn in extra_buttons:
             mk.add(btn)
 
+    link = ev.get("link") or ev.get("source_link")
     if link:
         mk.add(types.InlineKeyboardButton("🌐 Elana bax", url=link))
 
-    stats_parts = []
-    if ev.get("__views") is not None:
-        stats_parts.append(f"👁 Baxış sayı: {ev['__views']}")
-    if ev.get("__favorites") is not None:
-        stats_parts.append(f"⭐ Favorit sayı: {ev['__favorites']}")
-    if ev.get("__contacts") is not None:
-        stats_parts.append(f"📞 Əlaqə sayı: {ev['__contacts']}")
-    if ev.get("__popularity") is not None:
-        stats_parts.append(f"🔥 Populyarlıq skoru: {ev['__popularity']}")
-    if stats_parts:
-        text += "\n" + "\n".join(stats_parts)
-
+    text = build_listing_text(ev, source)
     bot.send_message(chat_id, text, reply_markup=mk)
 
 
@@ -7946,12 +8065,6 @@ def send_today_stats_message(chat_id: int, filters: dict):
 
 def send_today_results(chat_id: int, filters: dict, message=None):
     loading_ref = show_loading_message(chat_id, message)
-    _, total = query_today_results(filters, offset=0, limit=PAGE_SIZE)
-    if not total:
-        if not replace_loading_message(loading_ref, "Bu gün üçün uyğun elan yoxdur."):
-            bot.send_message(chat_id, "Bu gün üçün uyğun elan yoxdur.")
-        return
-
     log_search_event(
         chat_id,
         "today",
@@ -11887,7 +12000,7 @@ def query_favorites_page(chat_id: int, offset: int = 0, limit: int = None):
         ORDER BY added_at DESC
         LIMIT ? OFFSET ?
     """,
-        (chat_id, limit or PAGE_SIZE, offset),
+        (chat_id, limit if limit is not None else -1, offset),
     )
     rows = cur.fetchall()
     conn.close()
@@ -11915,7 +12028,7 @@ def query_status_page(status_code: str, offset: int = 0, limit: int = None):
         ORDER BY updated_at DESC
         LIMIT ? OFFSET ?
     """,
-        (status_code, limit or PAGE_SIZE, offset),
+        (status_code, limit if limit is not None else -1, offset),
     )
     rows = cur.fetchall()
     conn.close()
@@ -11970,6 +12083,177 @@ def fetch_page_results(chat_id: int, mode: str, params: dict, page: int):
     return [], 0
 
 
+def fetch_all_results(chat_id: int, mode: str, params: dict):
+    if mode == "filter":
+        filters = params.get("filters") or params
+        return query_structured_results(filters, offset=0, limit=None)
+    if mode == "keyword":
+        return query_keyword_results(
+            params.get("operation"),
+            params.get("words", []),
+            params.get("date_days"),
+            offset=0,
+            limit=None,
+        )
+    if mode == "smart":
+        return query_smart_results(params.get("criteria", {}), offset=0, limit=None)
+    if mode == "phone":
+        return query_phone_results(params.get("digits", ""), offset=0, limit=None)
+    if mode == "favorites":
+        return query_favorites_page(chat_id, offset=0, limit=None)
+    if mode == "statuslist":
+        return query_status_page(params.get("status", ""), offset=0, limit=None)
+    if mode == "topviews":
+        return query_top_viewed_listings(days=params.get("days", 7), offset=0, limit=None)
+    if mode == "today":
+        return query_today_results(params.get("filters", {}), offset=0, limit=None)
+    if mode == "keyword_notif":
+        items = keyword_notification_state.get(chat_id, {}).get("items", [])
+        total = len(items)
+        return items, total
+    return [], 0
+
+
+def prepare_listing_session_items(items: List[dict]):
+    refs: List[Dict[str, Any]] = []
+    cache: Dict[str, dict] = {}
+    for item in items:
+        norm = normalize_listing_item(item)
+        if not norm:
+            continue
+        ref = {"source": norm["source"], "id": norm["id"]}
+        refs.append(ref)
+        cache_key = make_listing_ref(norm["source"], norm["id"])
+        cache.setdefault(cache_key, norm.get("data", {}))
+    return refs, cache
+
+
+def render_listing_for_user(
+    chat_id: int, session_id: Optional[str] = None, target_message=None
+):
+    session = get_active_listing_session(chat_id)
+    if not session or (session_id and session.get("session_id") != session_id):
+        return
+
+    refs = session.get("result_ids") or []
+    if not refs:
+        listing_sessions.pop(chat_id, None)
+        return
+
+    idx = max(0, min(session.get("current_index", 0), len(refs) - 1))
+    session["current_index"] = idx
+    ref = refs[idx]
+    cache_key = make_listing_ref(ref["source"], ref["id"])
+    listing = session.get("cache", {}).get(cache_key)
+    if not listing:
+        listing = fetch_listing_by_source(ref["source"], ref["id"])
+        if listing:
+            listing["__source"] = ref["source"]
+            session.setdefault("cache", {})[cache_key] = listing
+
+    if not listing:
+        if len(refs) > 1:
+            session["result_ids"].pop(idx)
+            session["current_index"] = max(0, min(idx, len(session["result_ids"]) - 1))
+            return render_listing_for_user(chat_id, session.get("session_id"), target_message)
+        listing_sessions.pop(chat_id, None)
+        bot.send_message(chat_id, "⚠️ Elan artıq mövcud deyil.")
+        return
+
+    progress_text = f"📍 Elan {idx + 1} / {len(refs)}"
+    is_fav = is_favorite_entry(chat_id, ref["source"], ref["id"])
+    text = build_listing_text(listing, ref["source"], progress_text=progress_text)
+    markup = build_listing_navigation_keyboard(is_fav)
+    try:
+        markup_signature = json.dumps(markup.to_dic(), sort_keys=True)
+    except Exception:
+        try:
+            markup_signature = json.dumps(markup.keyboard, default=str, sort_keys=True)
+        except Exception:
+            markup_signature = str(markup.keyboard)
+    signature = (text, markup_signature)
+
+    record_agent_activity(chat_id, metric="views")
+
+    if session.get("track_view"):
+        seen_key = make_listing_ref(ref["source"], ref["id"])
+        viewed = session.setdefault("viewed", set())
+        if seen_key not in viewed:
+            record_listing_view(ref["source"], ref["id"], chat_id)
+            viewed.add(seen_key)
+
+    session["timestamp"] = time.time()
+
+    if session.get("message_id"):
+        if session.get("last_signature") == signature:
+            return
+        try:
+            bot.edit_message_text(
+                text,
+                chat_id=chat_id,
+                message_id=session["message_id"],
+                reply_markup=markup,
+                disable_web_page_preview=True,
+            )
+            session["last_signature"] = signature
+            return
+        except Exception as e:
+            if "message is not modified" in str(e):
+                return
+            try:
+                msg = bot.send_message(
+                    chat_id, text, reply_markup=markup, disable_web_page_preview=True
+                )
+                session["message_id"] = msg.message_id
+                session["last_signature"] = signature
+                return
+            except Exception:
+                return
+
+    try:
+        msg = bot.send_message(
+            chat_id, text, reply_markup=markup, disable_web_page_preview=True
+        )
+        session["message_id"] = msg.message_id
+        session["last_signature"] = signature
+    except Exception:
+        session.pop("message_id", None)
+
+
+def start_listing_session(
+    chat_id: int,
+    mode: str,
+    params: dict,
+    items: List[dict],
+    *,
+    start_index: int = 0,
+    loading_ref=None,
+    track_view: bool = False,
+):
+    refs, cache = prepare_listing_session_items(items)
+    if not refs:
+        if not replace_loading_message(loading_ref, "Siyahı boşdur."):
+            bot.send_message(chat_id, "Siyahı boşdur.")
+        return
+
+    start_index = max(0, min(start_index, len(refs) - 1))
+    session_id = f"{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
+    listing_sessions[chat_id] = {
+        "session_id": session_id,
+        "mode": mode,
+        "params": params or {},
+        "result_ids": refs,
+        "current_index": start_index,
+        "timestamp": time.time(),
+        "message_id": loading_ref[1] if loading_ref else None,
+        "cache": cache,
+        "track_view": track_view,
+        "viewed": set(),
+    }
+    pending_listing_requests.pop(chat_id, None)
+    render_listing_for_user(chat_id, session_id, target_message=loading_ref)
+
+
 def send_paginated_results(
     chat_id: int,
     mode: str,
@@ -11977,6 +12261,7 @@ def send_paginated_results(
     page: int = 1,
     loading_ref=None,
     show_summary: bool = True,
+    skip_resume_prompt: bool = False,
 ):
     if mode == "today":
         set_ui_context(chat_id, UI_CONTEXT_TODAY)
@@ -11997,89 +12282,41 @@ def send_paginated_results(
         ):
             bot.send_message(chat_id, "❌ Bu bölmə yalnız admin üçündür.")
         return
-    items, total = fetch_page_results(chat_id, mode, params, page)
-    total_pages = compute_total_pages(total) if total else 1
-    if page > total_pages:
-        page = total_pages
-        items, total = fetch_page_results(chat_id, mode, params, page)
-    set_pagination_state(chat_id, mode, params, page, total_pages)
+    if (
+        not skip_resume_prompt
+        and get_active_listing_session(chat_id)
+        and prompt_resume_listing_session(chat_id, loading_ref)
+    ):
+        pending_listing_requests[chat_id] = {
+            "chat_id": chat_id,
+            "mode": mode,
+            "params": params,
+            "page": page,
+            "loading_ref": loading_ref,
+            "show_summary": show_summary,
+        }
+        return
 
+    items, total = fetch_all_results(chat_id, mode, params)
     if total == 0:
         if not replace_loading_message(loading_ref, "Siyahı boşdur."):
             bot.send_message(chat_id, "Siyahı boşdur.")
         return
 
-    summary_map = {
-        "filter": "🔍 Tapıldı",
-        "keyword": "🔍 Tapıldı",
-        "smart": "🔥 Tapıldı",
-        "phone": "☎️ Bu nömrə ilə",
-        "favorites": "⭐ Favorilər",
-        "statuslist": params.get("title", "📂 Siyahı"),
-        "topviews": "🔥 Ən çox baxılanlar",
-        "today": "🆕 Bu gün",
-    }
+    total_pages = compute_total_pages(total) if total else 1
+    set_pagination_state(chat_id, mode, params, min(page, total_pages), total_pages)
 
-    if show_summary:
-        prefix = summary_map.get(mode, "📄")
-        summary_text = (
-            f"{prefix}: {total} elan. Səhifə {page}/{total_pages}"
-            if mode != "favorites"
-            else f"⭐ Favori elanlarınız ({total}): Səhifə {page}/{total_pages}"
-        )
-        if not replace_loading_message(loading_ref, summary_text):
-            bot.send_message(chat_id, summary_text)
-
-    for item in items:
-        track_view = mode in ("favorites", "statuslist")
-        if mode == "favorites":
-            ev = item["data"]
-            src = item.get("source", ev.get("__source", "main"))
-            lid = ev.get("id") or ev.get("ID") or ev.get("Elan_kodu")
-            rm_btn = types.InlineKeyboardButton(
-                "❌ Favoritdən çıxart", callback_data=f"favdel|{src}|{lid}"
-            )
-            send_listing_card(
-                chat_id,
-                ev,
-                source=src,
-                with_fav_button=False,
-                status_controls=False,
-                extra_buttons=[rm_btn],
-                track_view=track_view,
-                viewer_id=chat_id,
-            )
-        elif mode == "statuslist":
-            ev = item["data"]
-            src = item.get("source", ev.get("__source", "main"))
-            lid = item.get("id")
-            undo_label = params.get("undo_label", "🔄 Geri qaytar")
-            btn = types.InlineKeyboardButton(
-                undo_label, callback_data=f"st|undo|{src}|{lid}"
-            )
-            send_listing_card(
-                chat_id,
-                ev,
-                source=src,
-                with_fav_button=True,
-                status_controls=False,
-                extra_buttons=[btn],
-                track_view=track_view,
-                viewer_id=chat_id,
-            )
-        else:
-            ev = item
-            send_listing_card(
-                chat_id,
-                ev,
-                source=ev.get("__source", "main"),
-                with_fav_button=True,
-                track_view=False,
-                viewer_id=chat_id,
-            )
-
-    nav = build_pagination_keyboard(page, total_pages)
-    bot.send_message(chat_id, f"📄 Səhifə {page}/{total_pages}", reply_markup=nav)
+    start_index = max(0, min((page - 1) * PAGE_SIZE, max(total - 1, 0)))
+    track_view = mode in ("favorites", "statuslist")
+    start_listing_session(
+        chat_id,
+        mode,
+        params,
+        items,
+        start_index=start_index,
+        loading_ref=loading_ref,
+        track_view=track_view,
+    )
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("pg:"))
@@ -12128,6 +12365,135 @@ def cb_pagination(c):
 
     try:
         bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("nav:"))
+@callback_guard
+def cb_listing_nav(c):
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id
+    session = get_active_listing_session(chat_id)
+    if not session:
+        try:
+            bot.answer_callback_query(c.id, "Aktiv siyahı yoxdur.")
+        except Exception:
+            pass
+        return
+
+    if not session.get("result_ids"):
+        try:
+            bot.answer_callback_query(c.id, "Siyahı boşdur.")
+        except Exception:
+            pass
+        return
+
+    action = c.data.split(":", 1)[1]
+    deltas = {"next": 1, "prev": -1, "+5": 5, "-5": -5}
+    if action == "home":
+        session["timestamp"] = time.time()
+        send_main_menu(chat_id, "🏠 Əsas menyu", force=True)
+        try:
+            bot.answer_callback_query(c.id, "Əsas menyu")
+        except Exception:
+            pass
+        return
+
+    delta = deltas.get(action, 0)
+    if delta:
+        session["current_index"] = max(
+            0, min(session.get("current_index", 0) + delta, len(session["result_ids"]) - 1)
+        )
+    session["timestamp"] = time.time()
+    render_listing_for_user(chat_id, session.get("session_id"))
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "fav:toggle")
+@callback_guard
+def cb_listing_favorite_toggle(c):
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id
+    session = get_active_listing_session(chat_id)
+    if not session or not session.get("result_ids"):
+        try:
+            bot.answer_callback_query(c.id, "Siyahı bitib.")
+        except Exception:
+            pass
+        return
+    ref = session["result_ids"][session.get("current_index", 0)]
+    is_fav = is_favorite_entry(chat_id, ref["source"], ref["id"])
+    if is_fav:
+        removed = remove_favorite_entry(chat_id, ref["source"], ref["id"])
+        msg = "❌ Favoritdən çıxarıldı" if removed else "Əvvəlcə əlavə olunmayıb"
+    else:
+        added = add_favorite_entry(chat_id, ref["source"], ref["id"])
+        msg = "❤️ Favoritə əlavə olundu" if added else "Artıq favoritdədir"
+    render_listing_for_user(chat_id, session.get("session_id"))
+    try:
+        bot.answer_callback_query(c.id, msg)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "session:resume")
+@callback_guard
+def cb_listing_resume(c):
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id
+    session = get_active_listing_session(chat_id)
+    if session:
+        session["timestamp"] = time.time()
+        pending_listing_requests.pop(chat_id, None)
+        render_listing_for_user(chat_id, session.get("session_id"))
+    try:
+        bot.answer_callback_query(c.id, "Davam edildi")
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "session:cancel")
+@callback_guard
+def cb_listing_cancel(c):
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id
+    listing_sessions.pop(chat_id, None)
+    pending = pending_listing_requests.pop(chat_id, None)
+    try:
+        bot.answer_callback_query(c.id, "Sessiya ləğv edildi")
+    except Exception:
+        pass
+    if pending:
+        send_paginated_results(
+            pending["chat_id"],
+            mode=pending.get("mode", ""),
+            params=pending.get("params", {}),
+            page=pending.get("page", 1),
+            loading_ref=pending.get("loading_ref"),
+            show_summary=pending.get("show_summary", True),
+            skip_resume_prompt=True,
+        )
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "session:save")
+@callback_guard
+def cb_listing_save(c):
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id
+    session = get_active_listing_session(chat_id)
+    if session:
+        session["timestamp"] = time.time()
+    try:
+        bot.answer_callback_query(c.id, "Sessiya yadda saxlanıldı")
     except Exception:
         pass
 
@@ -12567,21 +12933,8 @@ def perform_structured_search(chat_id, offset=0, edit_msg=None):
         rayon=filters.get("rayon"),
         query_text=str(filters),
     )
-
-    page_items, total = query_structured_results(filters, offset=0, limit=PAGE_SIZE)
     st["step"] = "results"
     inc_limit(chat_id, "structured", 1)
-
-    if not total:
-        if not replace_loading_message(
-            loading_ref, "❌ Uyğun elan tapılmadı. Yenidən axtarış edin."
-        ):
-            bot.send_message(chat_id, "❌ Uyğun elan tapılmadı. Yenidən axtarış edin.")
-        return
-
-    summary = f"🔍 Tapıldı: {total} elan. İlk nəticələr göstərilir."
-    if not replace_loading_message(loading_ref, summary):
-        bot.send_message(chat_id, summary)
 
     send_paginated_results(
         chat_id,
@@ -12628,17 +12981,6 @@ def keyword_search_handler(message):
 
     words = [w for w in text.split() if w]
 
-    page_items, total = query_keyword_results(
-        selected_op, words, st.get("date_days"), offset=0, limit=PAGE_SIZE
-    )
-
-    if not total:
-        if not replace_loading_message(
-            loading_ref, "❌ Uyğun elan tapılmadı. Yenidən axtarış edin."
-        ):
-            bot.send_message(chat_id, "❌ Uyğun elan tapılmadı. Yenidən axtarış edin.")
-        return
-
     inc_limit(chat_id, "keyword", 1)
     send_paginated_results(
         chat_id,
@@ -12676,15 +13018,6 @@ def smart_search_handler(message):
         query_text=text,
     )
 
-    _page_items, total = query_smart_results(criteria, offset=0, limit=PAGE_SIZE)
-
-    if not total:
-        if not replace_loading_message(
-            loading_ref, "❌ Uyğun elan tapılmadı. Yenidən axtarış edin."
-        ):
-            bot.send_message(chat_id, "❌ Uyğun elan tapılmadı. Yenidən axtarış edin.")
-        return
-
     inc_limit(chat_id, "smart", 1)
     send_paginated_results(
         chat_id,
@@ -12714,15 +13047,6 @@ def phone_search_handler(message):
 
     loading_ref = show_loading_message(chat_id)
     log_search_event(chat_id, "phone", query_text=raw)
-
-    page_items, total = query_phone_results(raw, offset=0, limit=PAGE_SIZE)
-
-    if not total:
-        if not replace_loading_message(
-            loading_ref, "❌ Uyğun elan tapılmadı. Yenidən axtarış edin."
-        ):
-            bot.send_message(chat_id, "❌ Bu nömrə ilə heç bir elan tapılmadı.")
-        return
 
     inc_limit(chat_id, "phone", 1)
     send_paginated_results(
