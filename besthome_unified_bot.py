@@ -3592,6 +3592,59 @@ def get_table_columns(cur, table: str):
         return {}
 
 
+def detect_user_listings_table(conn) -> Optional[str]:
+    cur = conn.cursor()
+
+    table = _select_first_existing_table(cur, ("listings",))
+    if table:
+        try:
+            cur.execute(f"SELECT 1 FROM {table} LIMIT 1")
+            if cur.fetchone():
+                return table
+        except Exception:
+            pass
+
+    try:
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        )
+        rows = cur.fetchall() or []
+    except Exception:
+        rows = []
+
+    for row in rows:
+        candidate = row[0]
+        candidate_l = str(candidate or "").lower()
+        if not candidate:
+            continue
+        if candidate_l.endswith("_approved"):
+            logger.error(
+                "User stats table candidate rejected (approved) table=%s", candidate
+            )
+            continue
+        if candidate_l.startswith("local_") or candidate_l == "local_listings":
+            continue
+        cols = get_table_columns(cur, candidate)
+        if not cols:
+            continue
+        required = {"price", "operation", "prop_type"}
+        if not required.issubset(set(cols.keys())):
+            continue
+        try:
+            cur.execute(f"SELECT 1 FROM {candidate} LIMIT 1")
+            if not cur.fetchone():
+                continue
+        except Exception:
+            continue
+        return candidate
+
+    logger.warning(
+        "User stats listings table not found in besthome.db (checked %s tables)",
+        len(rows),
+    )
+    return None
+
+
 def detect_table_date_column(cur, table: str) -> Optional[str]:
     cols = get_table_columns(cur, table)
     for key in ("inserted_at", "created_at", "date_added", "date_read", "added_at"):
@@ -3639,29 +3692,36 @@ def _select_first_existing_table(cur, candidates: Tuple[str, ...]) -> Optional[s
     return None
 
 
-def detect_stats_source(cur) -> Dict[str, Any]:
-    table = _select_first_existing_table(cur, ("listings_approved", "listings"))
+def detect_stats_source(cur, stat_context: str = STAT_CONTEXT_USER) -> Dict[str, Any]:
+    table = None
+    if stat_context == STAT_CONTEXT_USER:
+        table = detect_user_listings_table(cur.connection)
     if not table:
-        try:
-            cur.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' "
-                "AND lower(name) LIKE '%listing%' ORDER BY name"
-            )
-            rows = cur.fetchall() or []
-            for row in rows:
-                candidate = row[0]
-                cols = get_table_columns(cur, candidate)
-                if cols and (
-                    any(c in cols for c in STATS_TS_CANDIDATES)
-                    or any(c in cols for c in STATS_OPERATION_COLUMNS)
-                    or any(c in cols for c in STATS_PROPERTY_COLUMNS)
-                ):
-                    table = candidate
-                    break
-            if not table and rows:
-                table = rows[0][0]
-        except Exception:
-            table = None
+        candidates = ("listings",) if stat_context == STAT_CONTEXT_USER else ("listings_approved", "listings")
+        table = _select_first_existing_table(cur, candidates)
+        if not table:
+            try:
+                cur.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND lower(name) LIKE '%listing%' ORDER BY name"
+                )
+                rows = cur.fetchall() or []
+                for row in rows:
+                    candidate = row[0]
+                    if stat_context == STAT_CONTEXT_USER and str(candidate or "").lower().endswith("_approved"):
+                        continue
+                    cols = get_table_columns(cur, candidate)
+                    if cols and (
+                        any(c in cols for c in STATS_TS_CANDIDATES)
+                        or any(c in cols for c in STATS_OPERATION_COLUMNS)
+                        or any(c in cols for c in STATS_PROPERTY_COLUMNS)
+                    ):
+                        table = candidate
+                        break
+                if not table and rows:
+                    table = rows[0][0]
+            except Exception:
+                table = None
 
     cols = get_table_columns(cur, table) if table else {}
 
@@ -3693,8 +3753,10 @@ def detect_stats_source(cur) -> Dict[str, Any]:
         "op_col": op_col,
         "type_col": type_col,
     }
+    log_prefix = "USER_STATS" if stat_context == STAT_CONTEXT_USER else "STATS"
     logger.info(
-        "STATS source_table=%s ts_col=%s ts_kind=%s op_col=%s type_col=%s",
+        "%s source_table=%s ts_col=%s ts_kind=%s op_col=%s type_col=%s",
+        log_prefix,
         table,
         ts_col,
         ts_kind or "none",
@@ -4623,6 +4685,8 @@ MENU_VISIBILITY_HINT_COOLDOWN_SECONDS = 300
 menu_visibility_hint_last_sent = {}
 STATISTICS_CACHE_TTL_SECONDS = 60
 statistics_cache: Dict[str, Dict[str, Any]] = {}
+STAT_CONTEXT_USER = "user"
+STAT_CONTEXT_ADMIN = "admin"
 
 
 def send_refresh_button(chat_id: int):
@@ -10476,6 +10540,7 @@ def compute_stats(
     op_col: Optional[str],
     type_col: Optional[str],
     window: str,
+    stat_context: str = STAT_CONTEXT_USER,
 ) -> Dict[str, Any]:
     cur = conn.cursor()
     stats: Dict[str, Any] = {
@@ -10493,6 +10558,13 @@ def compute_stats(
             "type_col": type_col,
         },
     }
+
+    if (
+        stat_context == STAT_CONTEXT_USER
+        and source_table
+        and str(source_table).lower().endswith("_approved")
+    ):
+        raise RuntimeError("User stats must not use approved tables")
 
     if not source_table:
         stats["note"] = "Tarix məlumatı yoxdur, son 0 elan"
@@ -10600,20 +10672,57 @@ def compute_stats(
     return stats
 
 
-def fetch_global_statistics(period: str = "all") -> dict:
-    key = period if period in {"24h", "7d", "30d", "all"} else "all"
+def _log_user_stats_consistency():
+    required = ["24h", "7d", "30d", "all"]
+    available = {}
+    for key in required:
+        cached = statistics_cache.get(f"{STAT_CONTEXT_USER}:{key}")
+        if cached and cached.get("data"):
+            available[key] = cached["data"]
+    if set(required).issubset(set(available.keys())):
+        total = available["all"].get("total", 0)
+        d30 = available["30d"].get("total", 0)
+        d7 = available["7d"].get("total", 0)
+        d24 = available["24h"].get("total", 0)
+        if not (d24 <= d7 <= d30 <= total):
+            logger.warning(
+                "WARN USER_STATS inconsistency detected total=%s 30d=%s 7d=%s 24h=%s",
+                total,
+                d30,
+                d7,
+                d24,
+            )
+
+
+def fetch_global_statistics(period: str = "all", stat_context: str = STAT_CONTEXT_USER) -> dict:
+    key_base = period if period in {"24h", "7d", "30d", "all"} else "all"
+    cache_key = f"{stat_context}:{key_base}"
 
     now_ts = time.time()
-    cached = statistics_cache.get(key)
+    cached = statistics_cache.get(cache_key)
     cache_ts = cached.get("ts", 0) if cached else 0
     if cached and now_ts - cache_ts < STATISTICS_CACHE_TTL_SECONDS:
         return cached.get("data", {})
 
     started = time.time()
-    conn = get_local_conn()
+    conn = None
     try:
+        if stat_context == STAT_CONTEXT_USER:
+            if not os.path.exists(MAIN_DB):
+                logger.warning("User stats DB missing path=%s", MAIN_DB)
+                return {}
+            conn = get_main_conn()
+            source_db = MAIN_DB
+        else:
+            conn = get_local_conn()
+            source_db = LOCAL_DB
+
         cur = conn.cursor()
-        meta = detect_stats_source(cur)
+        meta = detect_stats_source(cur, stat_context=stat_context)
+        if stat_context == STAT_CONTEXT_USER:
+            logger.info(
+                "USER_STATS source_db=%s table=%s", source_db, meta.get("table")
+            )
         stats = compute_stats(
             conn,
             meta.get("table"),
@@ -10621,18 +10730,28 @@ def fetch_global_statistics(period: str = "all") -> dict:
             meta.get("ts_kind", "none"),
             meta.get("op_col"),
             meta.get("type_col"),
-            key,
+            key_base,
+            stat_context=stat_context,
         )
+    except Exception:
+        logger.exception("Failed to compute %s statistics", stat_context)
+        return {}
     finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        if conn:
+            try:
+                if stat_context == STAT_CONTEXT_USER:
+                    close_main_conn(conn)
+                else:
+                    conn.close()
+            except Exception:
+                pass
 
     elapsed_ms = (time.time() - started) * 1000
-    logger.info("Global statistics (%s) computed in %.1f ms", key, elapsed_ms)
+    logger.info("Global statistics (%s) computed in %.1f ms", key_base, elapsed_ms)
 
-    statistics_cache[key] = {"ts": now_ts, "data": stats}
+    statistics_cache[cache_key] = {"ts": now_ts, "data": stats}
+    if stat_context == STAT_CONTEXT_USER:
+        _log_user_stats_consistency()
     return stats
 
 
