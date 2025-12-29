@@ -96,10 +96,16 @@ class _BotProxy:
             raise RuntimeError("Bot is not initialized. Call main() first.")
         attr = getattr(self._bot, name)
 
-        if name.startswith("send_") or name.startswith("edit_message") or name in (
-            "answer_callback_query",
-            "delete_message",
+        if (
+            name.startswith("send_")
+            or name.startswith("edit_message")
+            or name
+            in (
+                "answer_callback_query",
+                "delete_message",
+            )
         ):
+
             def wrapped(*args, **kwargs):
                 try:
                     return attr(*args, **kwargs)
@@ -220,7 +226,9 @@ def _load_admin_password_config():
                 for item in parsed:
                     if not isinstance(item, dict):
                         continue
-                    ident = item.get("id") or item.get("username") or item.get("chat_id")
+                    ident = (
+                        item.get("id") or item.get("username") or item.get("chat_id")
+                    )
                     pwd_hash = item.get("password_hash") or item.get("hash")
                     if ident and pwd_hash:
                         mapping[str(ident).lower()] = str(pwd_hash)
@@ -235,7 +243,9 @@ def _load_admin_password_config():
     return mapping, (shared_hash or None)
 
 
-ADMIN_PANEL_PASSWORD_HASHES, ADMIN_PANEL_SHARED_PASSWORD_HASH = _load_admin_password_config()
+ADMIN_PANEL_PASSWORD_HASHES, ADMIN_PANEL_SHARED_PASSWORD_HASH = (
+    _load_admin_password_config()
+)
 
 user_state = {}  # Yeni elan proses state
 search_state = {}  # Açar sözlə axtarış paging state
@@ -490,7 +500,9 @@ ADMIN_PANEL_BACK_MAIN = TEXTS_AZ["admin_panel_back_main"]
 admin_panel_page_state = {}
 ADMIN_PANEL_ACTIONS = ADMIN_PANEL_PAGE1 + ADMIN_PANEL_PAGE2
 ADMIN_PANEL_ACTION_SET = set(ADMIN_PANEL_ACTIONS)
-ADMIN_PANEL_ACTION_KEYS = {text: str(idx) for idx, text in enumerate(ADMIN_PANEL_ACTIONS)}
+ADMIN_PANEL_ACTION_KEYS = {
+    text: str(idx) for idx, text in enumerate(ADMIN_PANEL_ACTIONS)
+}
 ADMIN_PANEL_ACTION_LOOKUP = {v: k for k, v in ADMIN_PANEL_ACTION_KEYS.items()}
 
 # Pagination
@@ -1461,7 +1473,9 @@ def init_local_db():
     cur.execute("DROP VIEW IF EXISTS users_with_status")
     user_columns = _table_columns(conn, "users")
     demo_end_expr = (
-        "COALESCE(strftime('%s', u.demo_end_at), 0)" if "demo_end_at" in user_columns else "0"
+        "COALESCE(strftime('%s', u.demo_end_at), 0)"
+        if "demo_end_at" in user_columns
+        else "0"
     )
     promo_expr = (
         "COALESCE(strftime('%s', u.promo_expires_at), 0)"
@@ -1578,9 +1592,7 @@ def init_local_db():
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_users_admin_pending ON users(approved, blocked, first_seen DESC)"
     )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_users_chat_id_lookup ON users(chat_id)"
-    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_users_chat_id_lookup ON users(chat_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_users_paid_until ON users(paid_until)")
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_users_demo_end ON users(demo_end_at, demo_expires_at)"
@@ -2010,9 +2022,13 @@ def ensure_fts_tables():
 
         address_cols = pick_cols_in_order(["address", "unvan", "adres"])
         source_text_cols = pick_cols_in_order(["source_text"])
-        extra_cols = pick_cols_in_order(["metro", "rayon", "contact_name", "operation", "project_name"])
+        extra_cols = pick_cols_in_order(
+            ["metro", "rayon", "contact_name", "operation", "project_name"]
+        )
 
-        chosen = list(dict.fromkeys(text_cols + address_cols + source_text_cols + extra_cols))
+        chosen = list(
+            dict.fromkeys(text_cols + address_cols + source_text_cols + extra_cols)
+        )
 
         cur.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (fts_name,)
@@ -2251,7 +2267,9 @@ def demo_user_clause(prefix_status: str = "uw", prefix_user: str = "u") -> str:
         if prefix_user is not None
         else "COALESCE(demo_end_at, demo_expires_at)"
     )
-    paid_until_col = col(prefix_user, "paid_until") if prefix_user is not None else "paid_until"
+    paid_until_col = (
+        col(prefix_user, "paid_until") if prefix_user is not None else "paid_until"
+    )
     effective_int = f"CAST({effective_col} AS INTEGER)"
     paid_blank = f"TRIM(COALESCE({paid_until_col}, ''))"
     return (
@@ -3597,7 +3615,9 @@ def build_today_clause(column: Optional[str]):
     )
 
 
-def build_date_range_clause(column: Optional[str], date_days: Optional[Union[int, str]]):
+def build_date_range_clause(
+    column: Optional[str], date_days: Optional[Union[int, str]]
+):
     """Return SQL snippet for date filtering using SQLite's datetime semantics."""
 
     if not column or date_days in (None, "all"):
@@ -4480,7 +4500,9 @@ def recover_main_menu(
         return
     if message:
         try:
-            bot.edit_message_reply_markup(chat_id, message.message_id, reply_markup=None)
+            bot.edit_message_reply_markup(
+                chat_id, message.message_id, reply_markup=None
+            )
         except Exception:
             logger.debug("Menu recovery edit failed chat_id=%s", chat_id)
     try:
@@ -4554,9 +4576,7 @@ def send_main_menu(
     parse_mode: Optional[str] = None,
     disable_preview: Optional[bool] = None,
 ):
-    kb = build_main_menu(
-        is_admin(chat_id), has_customer_requests_access(chat_id)
-    )
+    kb = build_main_menu(is_admin(chat_id), has_customer_requests_access(chat_id))
     send_with_reply_keyboard(
         chat_id,
         text or "🏠 Əsas menyu:",
@@ -5857,7 +5877,9 @@ def process_keyword_alerts_for_listing(
             continue
         if not keyword_region_matches(listing_rayon, alert.get("regions") or ""):
             continue
-        entry = matches_by_user.setdefault(user_id, {"keywords": set(), "alerts": set()})
+        entry = matches_by_user.setdefault(
+            user_id, {"keywords": set(), "alerts": set()}
+        )
         entry["keywords"].add(keyword_raw)
         if alert.get("id"):
             entry["alerts"].add(alert.get("id"))
@@ -5877,7 +5899,10 @@ def process_keyword_alerts_for_listing(
                 user_id, ev, source, matched_keywords, scan_state, listing_key
             )
         logger.info(
-            "keyword match listing_key=%s user_id=%s keywords=%s", listing_key, user_id, matched_keywords
+            "keyword match listing_key=%s user_id=%s keywords=%s",
+            listing_key,
+            user_id,
+            matched_keywords,
         )
 
 
@@ -5897,9 +5922,7 @@ def send_keyword_notification_summaries(scan_state: Dict[int, Dict[str, Any]]):
         total = len(items)
         mk = types.InlineKeyboardMarkup()
         mk.add(
-            types.InlineKeyboardButton(
-                "📂 Elanlara bax", callback_data="kw_notif_view"
-            )
+            types.InlineKeyboardButton("📂 Elanlara bax", callback_data="kw_notif_view")
         )
         summary_text = f"🔔 Açar sözlər üzrə {total} uyğun elan tapıldı"
         try:
@@ -10467,7 +10490,10 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
     filtered.sort(key=safe_date, reverse=True)
     total = len(filtered)
     logger.info(
-        "today query filtered count=%s op=%s rayon=%s", total, op_code, filters.get("rayon")
+        "today query filtered count=%s op=%s rayon=%s",
+        total,
+        op_code,
+        filters.get("rayon"),
     )
     if limit is not None:
         filtered = filtered[offset : offset + limit]
@@ -10645,7 +10671,11 @@ def query_keyword_results(
         return " AND ".join(clauses), params
 
     def load_results_from_table(
-        conn_factory, table: str, fts_table: str, operation_value: Optional[str], source: str
+        conn_factory,
+        table: str,
+        fts_table: str,
+        operation_value: Optional[str],
+        source: str,
     ):
         conn = conn_factory()
         cur = conn.cursor()
@@ -10872,7 +10902,9 @@ def query_smart_results(criteria: dict, offset: int = 0, limit: int = None):
     joined_keywords = " ".join(keywords)
     fts_phrase, fts_token = build_fts_queries(joined_keywords)
     normalized_tokens = [t for t in normalize_text(joined_keywords).split() if t]
-    or_query = " OR ".join([f"{t}*" for t in normalized_tokens]) if normalized_tokens else None
+    or_query = (
+        " OR ".join([f"{t}*" for t in normalized_tokens]) if normalized_tokens else None
+    )
 
     if os.path.exists(MAIN_DB):
         conn = get_main_conn()
@@ -13559,7 +13591,9 @@ def send_financial_reports_menu(chat_id: int):
             "📈 Aylıq gəlir hesabatı", callback_data="finrep:monthly"
         )
     )
-    mk.add(types.InlineKeyboardButton(FINANCIAL_REPORTS_BACK, callback_data="finrep:back"))
+    mk.add(
+        types.InlineKeyboardButton(FINANCIAL_REPORTS_BACK, callback_data="finrep:back")
+    )
     bot.send_message(chat_id, "💰 Maliyyə hesabatları:", reply_markup=mk)
 
 
@@ -14211,9 +14245,7 @@ def build_demo_users_view(page: int = 1) -> Tuple[str, types.InlineKeyboardMarku
         select_fields.append("demo_expires_at")
     else:
         select_fields.append("NULL AS demo_expires_at")
-    query = (
-        f"SELECT {', '.join(select_fields)} FROM {base_query} WHERE computed_status = 'DEMO'"
-    )
+    query = f"SELECT {', '.join(select_fields)} FROM {base_query} WHERE computed_status = 'DEMO'"
     cur.execute(query)
     rows = cur.fetchall()
     conn.close()
@@ -14589,7 +14621,9 @@ def handle_admin_db_upload(message):
         or parts.scheme.lower() != "https"
         or "dropbox" not in parts.netloc.lower()
     ):
-        safe_admin_step(chat_id, "❌ Zəhmət olmasa HTTPS Dropbox yükləmə linki göndərin.")
+        safe_admin_step(
+            chat_id, "❌ Zəhmət olmasa HTTPS Dropbox yükləmə linki göndərin."
+        )
         return
 
     running = get_running_db_update()
@@ -15483,7 +15517,9 @@ def admin_extend_user_time(
     return new_exp
 
 
-def bulk_extend_user_time(user_ids: List[int], days: int, note: str = "bulk_extend") -> int:
+def bulk_extend_user_time(
+    user_ids: List[int], days: int, note: str = "bulk_extend"
+) -> int:
     if not user_ids or days <= 0:
         return 0
     started = time.perf_counter()
@@ -15688,7 +15724,11 @@ def get_admin_users_state(chat_id: int) -> Dict[str, Any]:
 
 
 def update_admin_users_state(
-    chat_id: int, *, section: str = "users", filter_value: Optional[str] = None, page: int = None
+    chat_id: int,
+    *,
+    section: str = "users",
+    filter_value: Optional[str] = None,
+    page: int = None,
 ) -> Dict[str, Any]:
     state = get_admin_users_state(chat_id)
     state["section"] = section
@@ -16134,7 +16174,9 @@ def show_all_users(
                     continue
                 computed_status = _row_value_safe(row, "computed_status", "-") or "-"
                 expiry_raw = _row_value_safe(row, "effective_expires_at")
-                remaining_label = format_remaining_days_for_ui(computed_status, expiry_raw)
+                remaining_label = format_remaining_days_for_ui(
+                    computed_status, expiry_raw
+                )
                 label = (
                     f"{'☑' if uid_int in selected_ids else '☐'} {uid_int} | {computed_status} | "
                     f"{remaining_label}"
@@ -16191,7 +16233,10 @@ def show_all_users(
         except Exception:
             pass
         logger.info(
-            "ADMIN USERLIST CLOSE status=%s page=%s duration=%.3f", list_status, page, time.perf_counter() - started_at
+            "ADMIN USERLIST CLOSE status=%s page=%s duration=%.3f",
+            list_status,
+            page,
+            time.perf_counter() - started_at,
         )
 
 
@@ -16369,7 +16414,9 @@ def _send_bulk_action_menu(chat_id: int, list_status: str, page: int):
             "❌ Ləğv et", callback_data=f"adm_bulk_cancel:{list_status}:{page}"
         )
     )
-    bot.send_message(chat_id, "Seçilən istifadəçilər üçün müddət seçin:", reply_markup=mk)
+    bot.send_message(
+        chat_id, "Seçilən istifadəçilər üçün müddət seçin:", reply_markup=mk
+    )
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_ops:"))
@@ -16386,7 +16433,9 @@ def cb_admin_ops_menu(c):
         return
     selected = admin_selected_users.get(chat_id, set())
     if not selected:
-        safe_answer_callback_query(c.id, "⚠️ Əvvəlcə istifadəçiləri seçin", show_alert=True)
+        safe_answer_callback_query(
+            c.id, "⚠️ Əvvəlcə istifadəçiləri seçin", show_alert=True
+        )
         return
     _send_bulk_action_menu(chat_id, list_status, page)
 
@@ -16405,11 +16454,11 @@ def _perform_bulk_extend(chat_id: int, days: int, list_status: str, page: int):
     )
     updated = bulk_extend_user_time(selected_ids, days, note="bulk_extend")
     clear_selected_users(chat_id)
-    bot.send_message(
-        chat_id, f"✅ {updated} istifadəçinin vaxtı +{days} gün artırıldı"
-    )
+    bot.send_message(chat_id, f"✅ {updated} istifadəçinin vaxtı +{days} gün artırıldı")
     update_admin_users_state(chat_id, filter_value=list_status, page=page)
-    show_all_users(chat_id, status=list_status, page=page, message=None, force_new=False)
+    show_all_users(
+        chat_id, status=list_status, page=page, message=None, force_new=False
+    )
     logger.info(
         "ADMIN BULK EXTEND done chat_id=%s updated=%s duration=%.3f",
         chat_id,
@@ -16467,7 +16516,9 @@ def cb_admin_bulk_cancel(c):
     except Exception:
         return
     safe_answer_callback_query(c.id, "❌ Ləğv edildi")
-    show_all_users(chat_id, status=list_status, page=page, message=c.message, force_new=False)
+    show_all_users(
+        chat_id, status=list_status, page=page, message=c.message, force_new=False
+    )
 
 
 @bot.message_handler(func=lambda m: get_user_state(m.chat.id) == "ADMIN_BULK_EXTEND")
@@ -16483,7 +16534,11 @@ def admin_bulk_custom_input(message):
     if days <= 0:
         bot.send_message(chat_id, "⚠️ Gün sayı müsbət olmalıdır.")
         return
-    st = admin_pending_action.pop(chat_id, None) or admin_bulk_action_state.get(chat_id) or {}
+    st = (
+        admin_pending_action.pop(chat_id, None)
+        or admin_bulk_action_state.get(chat_id)
+        or {}
+    )
     list_status = st.get("list_status", "expired")
     page = int(st.get("page", 1))
     admin_bulk_action_state.pop(chat_id, None)
@@ -18749,7 +18804,13 @@ def compute_besthome_overview_stats():
         if approved_raw is None:
             approved_raw = row.get("is_approved")
         if approved_raw is not None:
-            if str(approved_raw).lower() in {"0", "false", "pending", "rejected", "reject"}:
+            if str(approved_raw).lower() in {
+                "0",
+                "false",
+                "pending",
+                "rejected",
+                "reject",
+            }:
                 continue
         if not is_listing_active(row, status_map):
             continue
@@ -18865,7 +18926,6 @@ def cb_unhandled_callback(c):
         recover_main_menu(c.message.chat.id, c.message)
 
 
-
 _app_initialized = False
 app: Optional[Flask] = None
 
@@ -18893,9 +18953,11 @@ def create_flask_app():
 
     _initialize_app_state()
     app = Flask(__name__)
-    app.secret_key = os.environ.get("ADMIN_PANEL_SECRET_KEY") or os.environ.get(
-        "FLASK_SECRET_KEY"
-    ) or os.urandom(32)
+    app.secret_key = (
+        os.environ.get("ADMIN_PANEL_SECRET_KEY")
+        or os.environ.get("FLASK_SECRET_KEY")
+        or os.urandom(32)
+    )
     app.config["SESSION_COOKIE_NAME"] = "besthome_admin_session"
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
@@ -18935,7 +18997,9 @@ def create_flask_app():
             except Exception:
                 logger.exception("Health check failed for local DB")
 
-            return api_ok_response({"time": datetime.utcnow().isoformat(), "db": db_status})
+            return api_ok_response(
+                {"time": datetime.utcnow().isoformat(), "db": db_status}
+            )
 
         return _wrap_api("health", _handler)
 
@@ -18995,7 +19059,12 @@ def create_flask_app():
                 cur = conn.cursor()
                 base = "SELECT * FROM listings"
                 flt, params = build_filters_sql(
-                    filters.get("op"), filters.get("prop"), None, min_price, max_price, mode="main"
+                    filters.get("op"),
+                    filters.get("prop"),
+                    None,
+                    min_price,
+                    max_price,
+                    mode="main",
                 )
                 date_col = detect_table_date_column(cur, "listings")
                 date_sql, date_params = build_date_range_clause(date_col, date_days)
@@ -19013,7 +19082,12 @@ def create_flask_app():
             cur = conn.cursor()
             base = "SELECT * FROM listings_approved"
             flt, params = build_filters_sql(
-                filters.get("op"), filters.get("prop"), None, min_price, max_price, mode="local"
+                filters.get("op"),
+                filters.get("prop"),
+                None,
+                min_price,
+                max_price,
+                mode="local",
             )
             date_col = detect_table_date_column(cur, "listings_approved")
             date_sql, date_params = build_date_range_clause(date_col, date_days)
@@ -19032,8 +19106,8 @@ def create_flask_app():
 
             phrase = None
             tokens: List[str] = []
-            if "\"" in query:
-                match = re.search(r'\"([^\"]+)\"', query)
+            if '"' in query:
+                match = re.search(r"\"([^\"]+)\"", query)
                 if match:
                     phrase = match.group(1)
             norm_query = normalize_text(query)
@@ -19107,10 +19181,14 @@ def create_flask_app():
                 ev = fetch_listing_by_source(src, listing_id)
                 if ev:
                     normalized = _normalize_listing_response(ev)
-                    logger.info("Listing detail fetched id=%s source=%s", listing_id, src)
+                    logger.info(
+                        "Listing detail fetched id=%s source=%s", listing_id, src
+                    )
                     if not normalized.get("source_link"):
                         logger.debug(
-                            "Listing detail missing source_link id=%s source=%s", listing_id, src
+                            "Listing detail missing source_link id=%s source=%s",
+                            listing_id,
+                            src,
                         )
                     return api_ok_response({"item": normalized})
             return api_error_response("Elan tapılmadı", 404)
@@ -19130,14 +19208,20 @@ def create_flask_app():
             op = normalize_operation_value(args.get("op") or args.get("operation"))
 
             if not os.path.exists(AGENTS_DB):
-                return api_ok_response({"page": page, "pages": 1, "total": 0, "items": []})
+                return api_ok_response(
+                    {"page": page, "pages": 1, "total": 0, "items": []}
+                )
 
             conn = get_agents_conn()
             cur = conn.cursor()
-            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='agents'")
+            cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='agents'"
+            )
             if not cur.fetchone():
                 conn.close()
-                return api_ok_response({"page": page, "pages": 1, "total": 0, "items": []})
+                return api_ok_response(
+                    {"page": page, "pages": 1, "total": 0, "items": []}
+                )
 
             cur.execute("SELECT * FROM agents")
             rows = [dict(r) for r in cur.fetchall()]
@@ -19175,7 +19259,12 @@ def create_flask_app():
                 {"q": query, "district": district, "op": op, "phone": phone},
             )
             return api_ok_response(
-                {"page": page, "pages": total_pages, "total": total, "items": page_items}
+                {
+                    "page": page,
+                    "pages": total_pages,
+                    "total": total,
+                    "items": page_items,
+                }
             )
 
         return _wrap_api("agents_search", _handler)
@@ -19464,7 +19553,9 @@ def create_flask_app():
                 return api_error_response("dropbox_url tələb olunur", 400)
             parts = urlsplit(dropbox_url)
             if parts.scheme.lower() != "https" or "dropbox" not in parts.netloc.lower():
-                return api_error_response("Yalnız Dropbox HTTPS linki qəbul edilir", 400)
+                return api_error_response(
+                    "Yalnız Dropbox HTTPS linki qəbul edilir", 400
+                )
 
             stale = cleanup_stale_db_updates()
             if stale:
@@ -19498,7 +19589,6 @@ def create_flask_app():
             return api_ok_response({"message": "Baza yenilənməsi başladı"})
 
         return _wrap_api("admin_db_update", _handler)
-
 
     return app
 
@@ -19559,7 +19649,6 @@ def keepalive_worker(interval_seconds: int = 300):
             logger.warning("Keep-alive ping failed: %s", exc)
         time.sleep(interval_seconds)
 
-
-if __name__ == "__main__":
-    main()
+    # if __name__ == "__main__":
+    # main()
     run_bot()
