@@ -702,7 +702,7 @@ def run_callback_background(
     task,
     *,
     waiting_text: str = "⏳ Zəhmət olmasa gözləyin...",
-    send_menu_on_finish: bool = True,
+    send_menu_on_finish: bool = False,
 ):
     chat_id = None
     try:
@@ -4487,6 +4487,8 @@ MENU_REFRESH_BUTTON = "🔄 Botu yenilə"
 MENU_VISIBILITY_HINT_TEXT = "ℹ️ Əsas menyu görünmür?\n" "➡️ /start yazın."
 MENU_VISIBILITY_HINT_COOLDOWN_SECONDS = 300
 menu_visibility_hint_last_sent = {}
+STATISTICS_CACHE_TTL_SECONDS = 60
+statistics_cache = {"ts": 0.0, "data": None}
 
 
 def send_refresh_button(chat_id: int):
@@ -4565,6 +4567,8 @@ def build_main_menu(
     add_button("🆕 Bu gün daxil olan elanlar")
     add_button("📂 Elan statusları")
     add_button("📋 Elanlarım")
+    add_button("👤 Hesabım")
+    add_button("📊 Statistika")
     add_button("💳 Ödəniş")
     add_button("ℹ️ Haqqında")
     add_button("📩 Şikayət və təkliflər")
@@ -6365,7 +6369,11 @@ def complaint_category_handler(message):
     if choice == COMPLAINT_BACK:
         complaint_flow_state.pop(chat_id, None)
         set_ui_context(chat_id, UI_CONTEXT_MAIN)
-        send_main_menu(chat_id, force=True)
+        send_with_reply_keyboard(
+            chat_id,
+            "✅ Şikayət göndərmə ləğv edildi.",
+            build_main_menu(is_admin(chat_id), has_customer_requests_access(chat_id)),
+        )
         return
     if choice not in COMPLAINT_CATEGORIES:
         bot.send_message(
@@ -6404,7 +6412,11 @@ def complaint_message_handler(message):
     except Exception:
         pass
     set_ui_context(chat_id, UI_CONTEXT_MAIN)
-    send_main_menu(chat_id, "✅ Mesajınız qəbul edildi.\nTəşəkkür edirik! 🙏", force=True)
+    send_with_reply_keyboard(
+        chat_id,
+        "✅ Mesajınız qəbul edildi.\nTəşəkkür edirik! 🙏",
+        build_main_menu(is_admin(chat_id), has_customer_requests_access(chat_id)),
+    )
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("complaint_reply:"))
@@ -6482,6 +6494,40 @@ def admin_reply_to_user(message):
         complaint_records[complaint_id] = record
 
     bot.send_message(chat_id, "✅ Cavab istifadəçiyə göndərildi.")
+
+
+# =============== 👤 Hesabım ===============
+
+
+@bot.message_handler(func=lambda m: m.text == "👤 Hesabım")
+def show_account_status(message):
+    if not ensure_allowed(message):
+        return
+    chat_id = message.chat.id
+    text = build_account_status_text(chat_id)
+    bot.send_message(chat_id, text)
+
+
+# =============== 📊 Statistika ===============
+
+
+@bot.message_handler(func=lambda m: m.text == "📊 Statistika")
+def show_global_statistics(message):
+    if not ensure_allowed(message):
+        return
+    stats = fetch_global_statistics()
+    text = (
+        "📊 BestHome Statistikası\n\n"
+        f"🏠 Ümumi elanlar: {stats.get('total', 0)}\n"
+        f"🔑 Satılır: {stats.get('sale_count', 0)}\n"
+        f"🛏 Kirayə: {stats.get('rent_count', 0)}\n\n"
+        f"🏢 Mənzil: {stats.get('apartment_count', 0)}\n"
+        f"🏡 Həyət evi: {stats.get('house_count', 0)}\n"
+        f"🌱 Torpaq: {stats.get('land_count', 0)}\n\n"
+        "📆 Son 30 gün:\n\n"
+        f"➕ Yeni elanlar: {stats.get('new_30d', 0)}"
+    )
+    bot.send_message(message.chat.id, text)
 
 
 # =============== ℹ️ Haqqında ===============
@@ -6669,7 +6715,11 @@ def cb_demo_activate(c):
     reset_user_state(chat_id)
     reset_search_state(chat_id)
     set_ui_context(chat_id, UI_CONTEXT_MAIN)
-    send_main_menu(chat_id, force=True)
+    send_with_reply_keyboard(
+        chat_id,
+        "🏠 Əsas menyu açıqdır.",
+        build_main_menu(is_admin(chat_id), has_customer_requests_access(chat_id)),
+    )
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -6781,9 +6831,12 @@ def handle_common_nav(message):
     txt = message.text
     if txt in CANCEL_CMDS:
         reset_user_state(chat_id)
-        bot.send_message(chat_id, "❌ Əməliyyat ləğv edildi.")
         set_ui_context(chat_id, UI_CONTEXT_MAIN)
-        send_main_menu(chat_id, force=True)
+        send_with_reply_keyboard(
+            chat_id,
+            "❌ Əməliyyat ləğv edildi.",
+            build_main_menu(is_admin(chat_id), has_customer_requests_access(chat_id)),
+        )
         return True
     return False
 
@@ -9583,7 +9636,11 @@ def finalize_notification_rule(chat_id: int):
     bot.send_message(chat_id, f"✅ Bildiriş qaydası yaradıldı (ID: {rule_id}).")
     send_criteria_list(chat_id)
     set_ui_context(chat_id, UI_CONTEXT_MAIN)
-    send_main_menu(chat_id, force=True)
+    send_with_reply_keyboard(
+        chat_id,
+        "🏠 Əsas menyu açıqdır.",
+        build_main_menu(is_admin(chat_id), has_customer_requests_access(chat_id)),
+    )
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_stopcrit:"))
@@ -10155,6 +10212,107 @@ def is_listing_active(ev: dict, status_map: dict) -> bool:
         return True
     status = status_map.get((src, lid), "active")
     return status not in {"sold", "rented", "blacklisted"}
+
+
+def _build_like_clause(column: str, keywords: List[str]) -> tuple:
+    if not keywords:
+        return "0", []
+    conds = []
+    params = []
+    for kw in keywords:
+        conds.append(f"LOWER(COALESCE({column}, '')) LIKE ?")
+        params.append(f"%{kw.lower()}%")
+    return "(" + " OR ".join(conds) + ")", params
+
+
+def fetch_global_statistics() -> dict:
+    now_ts = time.time()
+    cached = statistics_cache.get("data")
+    cache_ts = statistics_cache.get("ts", 0)
+    if cached and now_ts - cache_ts < STATISTICS_CACHE_TTL_SECONDS:
+        return cached
+
+    started = time.time()
+    conn = get_local_conn()
+    try:
+        cur = conn.cursor()
+
+        sale_clause, sale_params = _build_like_clause(
+            "l.operation", OP_CODES.get("sat", [])
+        )
+        rent_clause, rent_params = _build_like_clause(
+            "l.operation", OP_CODES.get("kir", [])
+        )
+        apt_clause, apt_params = _build_like_clause(
+            "l.prop_type", [PROP_TYPES.get("m", "")]
+        )
+        house_clause, house_params = _build_like_clause(
+            "l.prop_type", [PROP_TYPES.get("f", "")]
+        )
+        land_clause, land_params = _build_like_clause(
+            "l.prop_type", [PROP_TYPES.get("t", "")]
+        )
+
+        active_filter = (
+            "COALESCE(ls.status, 'active') NOT IN ('sold','rented','blacklisted')"
+        )
+
+        query = f"""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN {sale_clause} THEN 1 ELSE 0 END) AS sale_count,
+                SUM(CASE WHEN {rent_clause} THEN 1 ELSE 0 END) AS rent_count,
+                SUM(CASE WHEN {apt_clause} THEN 1 ELSE 0 END) AS apartment_count,
+                SUM(CASE WHEN {house_clause} THEN 1 ELSE 0 END) AS house_count,
+                SUM(CASE WHEN {land_clause} THEN 1 ELSE 0 END) AS land_count
+            FROM listings_approved l
+            LEFT JOIN listing_status ls ON ls.source = 'local' AND ls.listing_id = l.id
+            WHERE {active_filter}
+        """
+
+        params = sale_params + rent_params + apt_params + house_params + land_params
+        cur.execute(query, params)
+        row = cur.fetchone() or {}
+
+        date_col = detect_table_date_column(cur, "listings_approved")
+        new_30d = 0
+        if date_col:
+            cutoff = datetime.utcnow() - timedelta(days=30)
+            try:
+                cur.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM listings_approved l
+                    LEFT JOIN listing_status ls ON ls.source = 'local' AND ls.listing_id = l.id
+                    WHERE {active_filter} AND {date_col} >= ?
+                    """,
+                    (cutoff.isoformat(),),
+                )
+                new_30d = cur.fetchone()[0] or 0
+            except Exception:
+                logger.exception("Failed to compute 30d stats using column=%s", date_col)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    stats = {
+        "total": _row_value_safe(row, "total", 0) or 0,
+        "sale_count": _row_value_safe(row, "sale_count", 0) or 0,
+        "rent_count": _row_value_safe(row, "rent_count", 0) or 0,
+        "apartment_count": _row_value_safe(row, "apartment_count", 0) or 0,
+        "house_count": _row_value_safe(row, "house_count", 0) or 0,
+        "land_count": _row_value_safe(row, "land_count", 0) or 0,
+        "new_30d": new_30d,
+    }
+
+    elapsed_ms = (time.time() - started) * 1000
+    logger.info("Global statistics computed in %.1f ms", elapsed_ms)
+
+    statistics_cache["data"] = stats
+    statistics_cache["ts"] = now_ts
+    return stats
 
 
 def _listing_price_value(ev: dict):
@@ -11336,7 +11494,7 @@ def cb_pagination(c):
         except Exception:
             pass
         set_ui_context(chat_id, UI_CONTEXT_MAIN)
-        send_main_menu(chat_id, "Əsas menyu bərpa edildi", force=True)
+        bot.send_message(chat_id, "⚠️ Axtarış məlumatı tapılmadı. Yeni axtarışa başlayın.")
         return
 
     action = c.data.split(":", 1)[1]
@@ -15874,6 +16032,57 @@ def format_remaining_days_for_ui(
         return "—"
     days = math.ceil((expiry - now).total_seconds() / 86400)
     return f"{days} gün"
+
+
+def format_long_date(dt: datetime) -> str:
+    months = [
+        "Yanvar",
+        "Fevral",
+        "Mart",
+        "Aprel",
+        "May",
+        "İyun",
+        "İyul",
+        "Avqust",
+        "Sentyabr",
+        "Oktyabr",
+        "Noyabr",
+        "Dekabr",
+    ]
+    return f"{dt.day} {months[dt.month - 1]} {dt.year}"
+
+
+def build_account_status_text(chat_id: int) -> str:
+    sub = get_subscription(chat_id) or {}
+    record = get_user_record(chat_id) or {}
+
+    expiry = get_effective_expires_at(chat_id)
+    now = datetime.utcnow()
+
+    demo_end_raw = record.get("demo_end_at") or record.get("demo_expires_at")
+    demo_end = parse_dt_safe(demo_end_raw)
+    is_demo_account = bool(sub.get("is_demo")) or (
+        demo_end is not None and demo_end > now and not sub.get("plan")
+    )
+
+    status_text = "Bitib"
+    if expiry and expiry > now:
+        status_text = "Demo" if is_demo_account else "Aktiv"
+
+    remaining_days = 0
+    if expiry and expiry > now:
+        remaining_days = max(0, math.ceil((expiry - now).total_seconds() / 86400))
+
+    exp_text = format_long_date(expiry) if expiry else "—"
+    account_type = "Demo" if is_demo_account else "Ödənişli"
+
+    return (
+        "👤 Hesab Məlumatları\n\n"
+        f"📌 Status: {status_text}\n"
+        f"⏳ Qalan gün: {remaining_days} gün\n"
+        f"📅 Bitmə tarixi: {exp_text}\n"
+        f"💳 Tip: {account_type}"
+    )
 
 
 def resolve_admin_user_status(record: Optional[dict]) -> str:
