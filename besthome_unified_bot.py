@@ -1152,6 +1152,8 @@ def extract_main_db_from_zip(zip_path: str) -> Tuple[str, str]:
         extracted_path = os.path.join(temp_dir, "besthome.db")
         with zf.open(target) as src, open(extracted_path, "wb") as dst:
             shutil.copyfileobj(src, dst)
+    if not os.path.exists(extracted_path):
+        raise RuntimeError("ZIP extraction failed: /tmp/besthome_update/besthome.db not found")
     logger.info("📦 DB extracted to /tmp")
     return extracted_path, temp_dir
 
@@ -1198,21 +1200,30 @@ def count_new_listings_since(db_path: str, last_max_id: Optional[int]) -> int:
 
 
 def atomic_replace_main_db(new_db_path: str) -> Optional[str]:
+    temp_target = os.path.join(BASE_DATA_DIR, "besthome.db.new")
     backup_path = backup_main_db_file()
     last_error = None
     for _ in range(3):
         try:
-            os.replace(new_db_path, MAIN_DB)
+            if os.path.exists(temp_target):
+                os.remove(temp_target)
+            shutil.copy2(new_db_path, temp_target)
+            os.replace(temp_target, MAIN_DB)
             last_error = None
             break
         except Exception as exc:
             last_error = exc
             time.sleep(0.5)
+    try:
+        if os.path.exists(temp_target):
+            os.remove(temp_target)
+    except Exception:
+        pass
     if last_error:
         raise last_error
     with open(MAIN_DB, "rb") as f:
         os.fsync(f.fileno())
-    logger.info("✅ Database replaced successfully")
+    logger.info("✅ Database replaced successfully (copy + replace)")
     return backup_path
 
 
