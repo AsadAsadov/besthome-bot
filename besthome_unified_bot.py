@@ -23,6 +23,7 @@ import html
 import logging
 import json
 import hashlib
+import glob
 from datetime import datetime, date, timedelta, timezone
 from collections import Counter, defaultdict
 from functools import wraps
@@ -274,8 +275,10 @@ DB_UPDATE_UNZIP_TIMEOUT_SECONDS = 120
 DB_UPDATE_VALIDATE_TIMEOUT_SECONDS = 60
 DB_UPDATE_REPLACE_TIMEOUT_SECONDS = 60
 DB_UPDATE_STATE_PATH = os.path.join(DATA_DIR, "db_update_state.json")
-DB_UPDATE_TMP_DIR = "/data/tmp"
-DB_UPDATE_BACKUP_DIR = "/data/backups"
+DB_UPDATE_TMP_DIR = "/tmp/besthome_update"
+DB_UPDATE_BACKUP_DIR = "/tmp/besthome_backups"
+DB_UPDATE_ZIP_PATH = "/tmp/besthome_update.zip"
+DB_UPDATE_DB_PATH = "/tmp/besthome_update.db"
 complaint_flow_state = {}
 complaint_records = {}
 admin_reply_state = {}
@@ -938,6 +941,49 @@ def get_user_step(chat_id: int):
     return None
 
 
+class DiskFullError(RuntimeError):
+    pass
+
+
+def clean_old_update_artifacts():
+    for path in glob.glob(os.path.join(DATA_DIR, "besthome_update_*.db")):
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+
+    data_tmp_dir = os.path.join(DATA_DIR, "tmp")
+    if os.path.isdir(data_tmp_dir):
+        for entry in os.listdir(data_tmp_dir):
+            entry_path = os.path.join(data_tmp_dir, entry)
+            try:
+                if os.path.isdir(entry_path):
+                    shutil.rmtree(entry_path, ignore_errors=True)
+                else:
+                    os.remove(entry_path)
+            except Exception:
+                pass
+
+    legacy_backup_dir = os.path.join(DATA_DIR, "backups")
+    if os.path.isdir(legacy_backup_dir):
+        shutil.rmtree(legacy_backup_dir, ignore_errors=True)
+
+    logger.info("🧹 Old backups cleaned")
+
+
+def ensure_tmp_workspace():
+    shutil.rmtree(DB_UPDATE_TMP_DIR, ignore_errors=True)
+    os.makedirs(DB_UPDATE_TMP_DIR, exist_ok=True)
+
+
+def ensure_sufficient_disk_space(admin_id: int):
+    usage = shutil.disk_usage(DATA_DIR)
+    if usage.free < 200 * 1024 * 1024:
+        logger.warning("❌ Update aborted: disk full")
+        safe_admin_step(admin_id, "❌ Disk doludur. Köhnə backup-lar silinməlidir.")
+        raise DiskFullError("Diskdə kifayət qədər boş yer yoxdur")
+
+
 def prepare_main_db_for_swap():
     try:
         conn = sqlite3.connect(MAIN_DB, timeout=5)
@@ -1049,8 +1095,10 @@ def download_main_db_file(url: str) -> Tuple[str, bool]:
     last_error = None
     for candidate in normalize_dropbox_urls(url):
         os.makedirs(DB_UPDATE_TMP_DIR, exist_ok=True)
-        fd, temp_path = tempfile.mkstemp(suffix=".db", dir=DB_UPDATE_TMP_DIR)
-        os.close(fd)
+        temp_path = DB_UPDATE_ZIP_PATH
+        for path in (DB_UPDATE_ZIP_PATH, DB_UPDATE_DB_PATH):
+            if os.path.exists(path):
+                os.remove(path)
         try:
             with requests.get(
                 candidate,
@@ -1072,6 +1120,9 @@ def download_main_db_file(url: str) -> Tuple[str, bool]:
                 if total <= 0:
                     raise RuntimeError("Fayl ölçüsü sıfırdır")
             is_zip = zipfile.is_zipfile(temp_path)
+            if not is_zip:
+                os.replace(temp_path, DB_UPDATE_DB_PATH)
+                temp_path = DB_UPDATE_DB_PATH
             return temp_path, is_zip
         except Exception as exc:
             last_error = exc
@@ -1085,8 +1136,8 @@ def extract_main_db_from_zip(zip_path: str) -> Tuple[str, str]:
     if not zipfile.is_zipfile(zip_path):
         raise RuntimeError("Fayl ZIP formatında deyil")
 
-    os.makedirs(DB_UPDATE_TMP_DIR, exist_ok=True)
-    temp_dir = tempfile.mkdtemp(dir=DB_UPDATE_TMP_DIR)
+    ensure_tmp_workspace()
+    temp_dir = DB_UPDATE_TMP_DIR
     with zipfile.ZipFile(zip_path, "r") as zf:
         bad_file = zf.testzip()
         if bad_file:
@@ -1101,6 +1152,7 @@ def extract_main_db_from_zip(zip_path: str) -> Tuple[str, str]:
         extracted_path = os.path.join(temp_dir, "besthome.db")
         with zf.open(target) as src, open(extracted_path, "wb") as dst:
             shutil.copyfileobj(src, dst)
+    logger.info("📦 DB extracted to /tmp")
     return extracted_path, temp_dir
 
 
@@ -1147,13 +1199,10 @@ def count_new_listings_since(db_path: str, last_max_id: Optional[int]) -> int:
 
 def atomic_replace_main_db(new_db_path: str) -> Optional[str]:
     backup_path = backup_main_db_file()
-    ts = now_utc().strftime("%Y-%m-%d_%H-%M-%S")
-    temp_target = os.path.join(DATA_DIR, f"besthome_update_{ts}.db")
-    shutil.copy2(new_db_path, temp_target)
     last_error = None
     for _ in range(3):
         try:
-            os.replace(temp_target, MAIN_DB)
+            os.replace(new_db_path, MAIN_DB)
             last_error = None
             break
         except Exception as exc:
@@ -1163,6 +1212,7 @@ def atomic_replace_main_db(new_db_path: str) -> Optional[str]:
         raise last_error
     with open(MAIN_DB, "rb") as f:
         os.fsync(f.fileno())
+    logger.info("✅ Database replaced successfully")
     return backup_path
 
 
@@ -1179,6 +1229,15 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
     backup_path = None
     try:
         main_db_update_in_progress.set()
+        clean_old_update_artifacts()
+        ensure_tmp_workspace()
+        for path in (DB_UPDATE_ZIP_PATH, DB_UPDATE_DB_PATH):
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+        ensure_sufficient_disk_space(admin_id)
         send_db_update_progress(admin_id, "⬇️ Fayl yüklənir…")
         temp_download_path, is_zip = run_with_timeout(
             "db_download",
@@ -1280,6 +1339,8 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
                 admin_id,
                 "✅ DB yeniləndi, amma statistika hesablama zamanı xəta oldu (bot işləkdir).",
             )
+    except DiskFullError:
+        logger.info("❌ Update aborted: disk full")
     except Exception as exc:
         logger.exception("DB update failed chat_id=%s", admin_id)
         safe_admin_step(admin_id, f"❌ Yenilənmə alınmadı: {exc}")
@@ -1290,7 +1351,7 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
         release_db_update_lock(admin_id)
         admin_update_state.pop(admin_id, None)
         clear_db_update_state(admin_id)
-        for path in (temp_download_path, extracted_db_path):
+        for path in (temp_download_path, extracted_db_path, DB_UPDATE_ZIP_PATH):
             if path and os.path.exists(path):
                 try:
                     if os.path.isdir(path):
@@ -1301,6 +1362,8 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
                     pass
         if extracted_dir and os.path.exists(extracted_dir):
             shutil.rmtree(extracted_dir, ignore_errors=True)
+        elif os.path.exists(DB_UPDATE_TMP_DIR):
+            shutil.rmtree(DB_UPDATE_TMP_DIR, ignore_errors=True)
 
 
 def sanity_check_main_db():
