@@ -588,6 +588,13 @@ def get_local_conn():
     return conn
 
 
+def get_db():
+    conn = sqlite3.connect(LOCAL_DB, timeout=30, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
 def get_agents_conn():
     conn = sqlite3.connect(AGENTS_DB, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -2822,29 +2829,27 @@ demo_warn_cache = set()
 
 
 def ensure_subscription_record(chat_id: int):
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT OR IGNORE INTO subscriptions (chat_id, plan, expires_at, is_active, is_demo, last_payment_note)
-        VALUES (?, NULL, NULL, 0, 0, NULL)
-        """,
-        (chat_id,),
-    )
-    conn.commit()
-    conn.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO subscriptions (chat_id, plan, expires_at, is_active, is_demo, last_payment_note)
+            VALUES (?, NULL, NULL, 0, 0, NULL)
+            """,
+            (chat_id,),
+        )
+        conn.commit()
 
 
 def get_subscription(chat_id: int) -> Optional[dict]:
     ensure_subscription_record(chat_id)
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT chat_id, plan, expires_at, is_active, is_demo, last_payment_note FROM subscriptions WHERE chat_id=?",
-        (chat_id,),
-    )
-    row = cur.fetchone()
-    conn.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT chat_id, plan, expires_at, is_active, is_demo, last_payment_note FROM subscriptions WHERE chat_id=?",
+            (chat_id,),
+        )
+        row = cur.fetchone()
     if not row:
         return None
     return {
