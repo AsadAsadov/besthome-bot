@@ -323,7 +323,7 @@ TEXTS_AZ = {
     "admin_panel_title": "🛠 Admin Panel:",
     "admin_panel_nav_next": "▶️ Növbəti səhifə",
     "admin_panel_nav_prev": "◀️ Əvvəlki səhifə",
-    "admin_panel_back_main": "⬅️ Əsas menyuya qayıt",
+    "admin_panel_back_main": "⬅️ Geri",
     "admin_panel_pending_listings": "✅ Təsdiqlənməyən elanlar",
     "admin_panel_stats": "📊 Statistikalar",
     "admin_panel_customer_requests": "📌 Müştəri istəkləri",
@@ -4967,11 +4967,11 @@ def send_main_menu(
 
 def build_search_menu_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row("📂 Elanlarım", "🏠 Satılır")
-    kb.row("🏢 Kirayə verilir", "🔍 Açar sözlə axtar")
-    kb.row("📞 Nömrə ilə axtar", "📝 Yeni elan əlavə et")
-    kb.row("📝 Ev axtarıram", "⭐ Favorilərim")
-    kb.row("🔔 Bildirişlərim", "⬅️ Əsas menyuya qayıt")
+    kb.row("🏠 Satılır", "🏢 Kirayə verilir")
+    kb.row("🔍 Açar sözlə axtar", "📞 Nömrə ilə axtar")
+    kb.row("📝 Ev axtarıram", "📝 Yeni elan əlavə et")
+    kb.row("📂 Elanlarım", "⭐ Favorilərim")
+    kb.row("🔔 Bildirişlərim", "⬅️ Geri")
     return kb
 
 
@@ -7934,7 +7934,7 @@ def search_system_menu(message):
     send_search_menu(message.chat.id)
 
 
-@bot.message_handler(func=lambda m: m.text == "⬅️ Əsas menyuya qayıt")
+@bot.message_handler(func=lambda m: m.text == "⬅️ Geri")
 def return_to_main_menu(message):
     if not ensure_allowed(message):
         return
