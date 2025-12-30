@@ -303,6 +303,9 @@ user_callback_locks: Dict[int, threading.Lock] = defaultdict(threading.Lock)
 admin_user_last_list: Dict[int, str] = {}
 admin_navigation_state: Dict[int, Dict[str, Any]] = {}
 BLOCKED_MESSAGE_TEXT = "Hesabınız müvəqqəti olaraq dayandırıldı."
+BLOCKED_PROMPT_TEXT = (
+    "Hesabınız aktiv deyil. Davam etmək üçün ödəniş edin və ya 3 gün demo istifadə edin."
+)
 STATUS_PENDING = "pending"
 STATUS_ACTIVE_PAID = "active_paid"
 STATUS_ACTIVE_DEMO = "active_demo"
@@ -321,7 +324,6 @@ TEXTS_AZ = {
     "admin_panel_customer_requests": "📌 Müştəri istəkləri",
     "admin_panel_financial_reports": "💰 Maliyyə hesabatları",
     "admin_panel_agents_notify": "📢 Vasitəçilərə bildiriş",
-    "admin_panel_agent_activity": "🧠 Aktiv / passiv maklerlər",
     "admin_panel_user_search": "🆔 İstifadəçi ID ilə axtar",
     "admin_panel_users": "👥 İstifadəçilər",
     "admin_panel_promos": "🎟 Promo kodlar",
@@ -489,7 +491,6 @@ ADMIN_PANEL_PAGE1 = [
     TEXTS_AZ["admin_panel_customer_requests"],
     FINANCIAL_REPORTS_BUTTON,
     TEXTS_AZ["admin_panel_agents_notify"],
-    TEXTS_AZ["admin_panel_agent_activity"],
     TEXTS_AZ["admin_panel_user_search"],
     TEXTS_AZ["admin_panel_users"],
 ]
@@ -1519,6 +1520,8 @@ def init_local_db():
             u.username,
             u.approved,
             u.blocked,
+            u.is_active,
+            u.deleted_at,
 
             -- effective_expires_at ALWAYS as unix timestamp
             MAX(
@@ -1533,6 +1536,8 @@ def init_local_db():
 
             CASE
                 WHEN u.blocked = 1 THEN 'BLOCKED'
+                WHEN COALESCE(u.is_active, 1) = 0 THEN 'BLOCKED'
+                WHEN u.deleted_at IS NOT NULL AND u.deleted_at != '' THEN 'BLOCKED'
                 WHEN u.approved = 0 THEN 'PENDING'
                 WHEN
                     MAX(
@@ -1553,7 +1558,7 @@ def init_local_db():
             ON s.chat_id = u.chat_id
             AND s.is_active = 1
 
-        GROUP BY u.chat_id, u.full_name, u.username, u.approved, u.blocked
+        GROUP BY u.chat_id, u.full_name, u.username, u.approved, u.blocked, u.is_active, u.deleted_at
         """
     )
 
@@ -3439,7 +3444,7 @@ def subscription_payment_code(chat_id: int) -> str:
 
 def is_demo_available(chat_id: int) -> bool:
     status = get_user_computed_status(chat_id)
-    if status in {"ACTIVE", "BLOCKED"}:
+    if status == "ACTIVE":
         return False
     return True
 
@@ -3473,19 +3478,30 @@ def send_payment_menu(chat_id: int):
     )
 
 
-def check_subscription(chat_id: int, silent: bool = False) -> bool:
+def send_blocked_prompt(chat_id: int):
+    mk = types.InlineKeyboardMarkup()
+    mk.add(types.InlineKeyboardButton("💳 Ödəniş et", callback_data="open_pay_menu"))
+    if is_demo_available(chat_id):
+        mk.add(
+            types.InlineKeyboardButton(
+                "🎁 3 gün demo istifadə et", callback_data="demo3"
+            )
+        )
+    bot.send_message(chat_id, BLOCKED_PROMPT_TEXT, reply_markup=mk)
+
+
+def check_subscription(
+    chat_id: int, silent: bool = False, allow_blocked: bool = False
+) -> bool:
     status = get_user_computed_status(chat_id)
     if status == "ACTIVE":
         return True
     if status == "BLOCKED":
+        if allow_blocked:
+            return True
         if not silent:
-            try:
-                bot.send_message(
-                    chat_id,
-                    "❌ Hesabınız deaktiv edilib. Admin ilə əlaqə saxlayın @esedovesed.",
-                )
-            except Exception:
-                pass
+            logger.info("User blocked access attempt chat_id=%s", chat_id)
+            send_blocked_prompt(chat_id)
         return False
     if not silent:
         send_payment_menu(chat_id)
@@ -3496,14 +3512,14 @@ def is_user_allowed(chat_id: int) -> bool:
     return is_user_active(chat_id)
 
 
-def ensure_allowed(message) -> bool:
+def ensure_allowed(message, allow_blocked: bool = False) -> bool:
     chat_id = message.chat.id
-    return check_subscription(chat_id)
+    return check_subscription(chat_id, allow_blocked=allow_blocked)
 
 
-def ensure_allowed_cb(c) -> bool:
+def ensure_allowed_cb(c, allow_blocked: bool = False) -> bool:
     chat_id = c.message.chat.id
-    return check_subscription(chat_id)
+    return check_subscription(chat_id, allow_blocked=allow_blocked)
 
 
 def check_limit(chat_id: int, key_type: str, daily_limit: int) -> bool:
@@ -4018,7 +4034,6 @@ def build_listing_navigation_keyboard(
     )
     mk.row(
         types.InlineKeyboardButton("⏭ +5", callback_data="nav:+5"),
-        types.InlineKeyboardButton("🔖 Saxla", callback_data="session:save"),
         types.InlineKeyboardButton("⏮ -5", callback_data="nav:-5"),
     )
     action_buttons = []
@@ -4700,6 +4715,9 @@ MENU_VISIBILITY_HINT_COOLDOWN_SECONDS = 300
 menu_visibility_hint_last_sent = {}
 STATISTICS_CACHE_TTL_SECONDS = 60
 statistics_cache: Dict[str, Dict[str, Any]] = {}
+MARKET_PULSE_CACHE_TTL_SECONDS = 300
+MARKET_PULSE_SPEED_THRESHOLDS = (10, 25)
+market_pulse_cache: Dict[str, Dict[str, Any]] = {}
 STAT_CONTEXT_USER = "user"
 STAT_CONTEXT_ADMIN = "admin"
 
@@ -6464,12 +6482,6 @@ def handle_request_phone(message):
 
 
 def is_complaint_access_allowed(chat_id: int) -> bool:
-    if get_user_computed_status(chat_id) == "BLOCKED":
-        try:
-            bot.send_message(chat_id, BLOCKED_MESSAGE_TEXT)
-        except Exception:
-            pass
-        return False
     return True
 
 
@@ -6694,7 +6706,7 @@ def admin_reply_to_user(message):
 
 @bot.message_handler(func=lambda m: m.text == "👤 Hesabım")
 def show_account_status(message):
-    if not ensure_allowed(message):
+    if not ensure_allowed(message, allow_blocked=True):
         return
     chat_id = message.chat.id
     text = build_account_status_text(chat_id)
@@ -6755,7 +6767,23 @@ def build_user_stats_keyboard(selected: str) -> types.InlineKeyboardMarkup:
             types.InlineKeyboardButton(f"{prefix}{label}", callback_data=f"stats:{key}")
         )
     mk.row(*buttons)
+    mk.add(types.InlineKeyboardButton("📊 Rayon statistikası", callback_data="stats:pulse"))
     return mk
+
+
+def format_market_pulse_text(records: List[Dict[str, Any]]) -> str:
+    if not records:
+        return "❌ Rayon statistikası üçün məlumat tapılmadı."
+    lines: List[str] = []
+    for item in records:
+        lines.append(f"📊 {item.get('rayon', '-')}:" )
+        lines.append(f"• Son 7 gün: {item.get('new_count', 0)} yeni elan")
+        lines.append("• Satış sürəti:")
+        lines.append(f"    - {item.get('speed', 'orta')}")
+        lines.append("• Orta qiymət:")
+        lines.append(f"    - {item.get('price_trend', '→ stabil')}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
 
 
 def format_stats_text(
@@ -6842,9 +6870,15 @@ def send_user_statistics(chat_id: int, period_key: str, message_id: Optional[int
         )
 
 
+def send_market_pulse_overview(chat_id: int):
+    records = compute_market_pulse()
+    text = format_market_pulse_text(records)
+    bot.send_message(chat_id, text)
+
+
 @bot.message_handler(func=lambda m: m.text == "📊 Statistika")
 def show_global_statistics(message):
-    if not ensure_allowed(message):
+    if not ensure_allowed(message, allow_blocked=True):
         return
     chat_id = message.chat.id
     default_period = user_stats_filter.get(chat_id, "24h")
@@ -6855,10 +6889,17 @@ def show_global_statistics(message):
 @callback_guard
 def handle_user_stats_callback(c):
     period = c.data.split(":", 1)[1] if c.data else "all"
-    if not ensure_allowed_cb(c):
+    if not ensure_allowed_cb(c, allow_blocked=True):
         return
     chat_id = c.message.chat.id if c.message else c.from_user.id
     user_stats_filter[chat_id] = period
+    if period == "pulse":
+        try:
+            bot.answer_callback_query(c.id, "📊 Rayon statistikası")
+        except Exception:
+            pass
+        send_market_pulse_overview(chat_id)
+        return
     try:
         bot.answer_callback_query(c.id, STATS_FILTER_LABELS.get(period, "🧾 Ümumi"))
     except Exception:
@@ -6907,6 +6948,17 @@ def about(message):
 @bot.message_handler(func=lambda m: m.text == "💳 Ödəniş")
 def payment_menu_entry(message):
     send_payment_menu(message.chat.id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "open_pay_menu")
+@callback_guard
+def cb_open_pay_menu(c):
+    chat_id = c.message.chat.id
+    send_payment_menu(chat_id)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "payinfo")
@@ -10790,6 +10842,203 @@ def _log_user_stats_consistency():
             )
 
 
+def _build_market_ts_clause(ts_col: Optional[str], ts_kind: str, days: int):
+    if not ts_col or days <= 0:
+        return "", []
+    if ts_kind == "unix":
+        return (
+            f" AND COALESCE(l.\"{ts_col}\", 0) >= (strftime('%s','now') - ?)",
+            [days * 24 * 3600],
+        )
+    if ts_kind == "iso":
+        return (
+            f" AND datetime(l.\"{ts_col}\") >= datetime('now', ?)",
+            [f"-{days} days"],
+        )
+    return "", []
+
+
+def _market_dom_expr(ts_col: Optional[str], ts_kind: str) -> Optional[str]:
+    if not ts_col:
+        return None
+    if ts_kind == "unix":
+        return (
+            f"((strftime('%s','now') - COALESCE(l.\"{ts_col}\", strftime('%s','now'))) / 86400.0)"
+        )
+    if ts_kind == "iso":
+        return f"(julianday('now') - julianday(l.\"{ts_col}\"))"
+    return None
+
+
+def compute_market_pulse() -> List[Dict[str, Any]]:
+    now_ts = time.time()
+    cached = market_pulse_cache.get("data")
+    cache_ts = market_pulse_cache.get("ts", 0)
+    if cached is not None and now_ts - cache_ts < MARKET_PULSE_CACHE_TTL_SECONDS:
+        return cached
+
+    results: List[Dict[str, Any]] = []
+    started = time.perf_counter()
+    status_tag = "ok"
+
+    if not os.path.exists(MAIN_DB):
+        status_tag = "missing_db"
+    else:
+        conn = None
+        try:
+            conn = get_main_conn()
+            cur = conn.cursor()
+            meta = detect_stats_source(cur, STAT_CONTEXT_USER)
+            table = meta.get("table")
+            ts_col = meta.get("ts_col")
+            ts_kind = meta.get("ts_kind", "none")
+            if not table or not ts_col:
+                status_tag = "missing_table"
+            else:
+                cols = get_table_columns(cur, table) or {}
+                rayon_col = next(
+                    (cols.get(key) for key in ("rayon", "district", "region", "area") if key in cols),
+                    None,
+                )
+                price_col = next(
+                    (
+                        cols.get(key)
+                        for key in (
+                            "price",
+                            "qiymet",
+                            "qiymət",
+                            "price_azn",
+                            "price_az",
+                            "amount",
+                        )
+                        if key in cols
+                    ),
+                    None,
+                )
+                dom_col = next(
+                    (cols.get(key) for key in ("days_on_market", "dom", "market_days") if key in cols),
+                    None,
+                )
+                op_col = meta.get("op_col")
+                type_col = meta.get("type_col")
+
+                if not rayon_col:
+                    status_tag = "missing_rayon"
+                else:
+                    seven_clause, seven_params = _build_market_ts_clause(ts_col, ts_kind, 7)
+                    thirty_clause, thirty_params = _build_market_ts_clause(ts_col, ts_kind, 30)
+
+                    op_filter = f" AND COALESCE(l.\"{op_col}\", '') != ''" if op_col else ""
+                    type_filter = f" AND COALESCE(l.\"{type_col}\", '') != ''" if type_col else ""
+
+                    rayon_base_where = (
+                        f"WHERE l.\"{rayon_col}\" IS NOT NULL AND l.\"{rayon_col}\" != ''"
+                        f"{thirty_clause}{op_filter}{type_filter}"
+                    )
+                    cur.execute(
+                        f"SELECT DISTINCT l.\"{rayon_col}\" AS rayon FROM {table} l {rayon_base_where} ORDER BY rayon",
+                        thirty_params,
+                    )
+                    rayons = [
+                        r[0] if not isinstance(r, dict) else r.get("rayon") for r in cur.fetchall() or []
+                    ]
+
+                    dom_expr = _market_dom_expr(ts_col, ts_kind) if not dom_col else None
+
+                    for rayon in rayons:
+                        base_params = [rayon]
+
+                        cur.execute(
+                            f"SELECT COUNT(*) AS cnt FROM {table} l WHERE l.\"{rayon_col}\"=?{seven_clause}{op_filter}{type_filter}",
+                            base_params + seven_params,
+                        )
+                        row = cur.fetchone() or {}
+                        new_count = _row_value_safe(row, "cnt", 0) or 0
+
+                        avg_price_7 = None
+                        avg_price_30 = None
+                        if price_col:
+                            cur.execute(
+                                f"SELECT AVG(CAST(l.\"{price_col}\" AS REAL)) AS avg_price "
+                                f"FROM {table} l WHERE l.\"{rayon_col}\"=?{seven_clause}{op_filter}{type_filter}",
+                                base_params + seven_params,
+                            )
+                            price_row = cur.fetchone() or {}
+                            avg_price_7 = _row_value_safe(price_row, "avg_price")
+
+                            cur.execute(
+                                f"SELECT AVG(CAST(l.\"{price_col}\" AS REAL)) AS avg_price "
+                                f"FROM {table} l WHERE l.\"{rayon_col}\"=?{thirty_clause}{op_filter}{type_filter}",
+                                base_params + thirty_params,
+                            )
+                            price_row = cur.fetchone() or {}
+                            avg_price_30 = _row_value_safe(price_row, "avg_price")
+
+                        avg_dom = None
+                        if dom_col:
+                            cur.execute(
+                                f"SELECT AVG(CAST(l.\"{dom_col}\" AS REAL)) AS avg_dom "
+                                f"FROM {table} l WHERE l.\"{rayon_col}\"=?{thirty_clause}{op_filter}{type_filter}",
+                                base_params + thirty_params,
+                            )
+                            dom_row = cur.fetchone() or {}
+                            avg_dom = _row_value_safe(dom_row, "avg_dom")
+                        elif dom_expr:
+                            cur.execute(
+                                f"SELECT AVG({dom_expr}) AS avg_dom FROM {table} l "
+                                f"WHERE l.\"{rayon_col}\"=?{thirty_clause}{op_filter}{type_filter}",
+                                base_params + thirty_params,
+                            )
+                            dom_row = cur.fetchone() or {}
+                            avg_dom = _row_value_safe(dom_row, "avg_dom")
+
+                        if avg_dom is None:
+                            speed = "orta"
+                        elif avg_dom < MARKET_PULSE_SPEED_THRESHOLDS[0]:
+                            speed = "yüksək"
+                        elif avg_dom < MARKET_PULSE_SPEED_THRESHOLDS[1]:
+                            speed = "orta"
+                        else:
+                            speed = "zəif"
+
+                        price_trend = "→ stabil"
+                        if avg_price_7 is not None and avg_price_30 not in (None, 0):
+                            if avg_price_7 > avg_price_30:
+                                price_trend = "↑ qalxır"
+                            elif avg_price_7 < avg_price_30:
+                                price_trend = "↓ düşür"
+
+                        results.append(
+                            {
+                                "rayon": str(rayon) if rayon is not None else "-",
+                                "new_count": new_count,
+                                "speed": speed,
+                                "price_trend": price_trend,
+                            }
+                        )
+
+        except Exception:
+            status_tag = "error"
+            logger.exception("Failed to compute market pulse")
+        finally:
+            if conn:
+                try:
+                    close_main_conn(conn)
+                except Exception:
+                    pass
+
+    duration = time.perf_counter() - started
+    logger.info(
+        "Market pulse computation duration=%.3fs rayons=%s status=%s",
+        duration,
+        len(results),
+        status_tag,
+    )
+    market_pulse_cache["ts"] = now_ts
+    market_pulse_cache["data"] = results
+    return results
+
+
 def fetch_global_statistics(period: str = "all", stat_context: str = STAT_CONTEXT_USER) -> dict:
     key_base = period if period in {"24h", "7d", "30d", "all"} else "all"
     cache_key = f"{stat_context}:{key_base}"
@@ -12213,21 +12462,6 @@ def cb_listing_favorite_toggle(c):
         pass
 
 
-@bot.callback_query_handler(func=lambda c: c.data == "session:save")
-@callback_guard
-def cb_listing_save(c):
-    if not ensure_allowed_cb(c):
-        return
-    chat_id = c.message.chat.id
-    session = get_active_listing_session(chat_id)
-    if session:
-        session["timestamp"] = time.time()
-    try:
-        bot.answer_callback_query(c.id, "Sessiya yadda saxlanıldı")
-    except Exception:
-        pass
-
-
 def render_op_step(chat_id, message=None):
     st = search_state.setdefault(chat_id, {})
     st["step"] = "op"
@@ -13113,8 +13347,6 @@ def _handle_admin_panel_action(chat_id: int, action_text: str):
     elif action_text == TEXTS_AZ["admin_panel_agents_notify"]:
         msg = bot.send_message(chat_id, "✍️ Vasitəçilərə göndəriləcək mətni yaz:")
         bot.register_next_step_handler(msg, admin_agents_broadcast)
-    elif action_text == TEXTS_AZ["admin_panel_agent_activity"]:
-        show_agent_activity_overview(chat_id)
     elif action_text == TEXTS_AZ["admin_panel_user_search"]:
         msg = bot.send_message(chat_id, "🔍 İstifadəçi chat_id daxil et:")
         bot.register_next_step_handler(msg, admin_search_by_id_step)
@@ -15570,9 +15802,6 @@ def cb_admin(c):
         )
         bot.register_next_step_handler(msg, admin_agents_broadcast)
 
-    elif cmd == "agent_activity":
-        show_agent_activity_overview(c.message.chat.id)
-
     elif cmd == "search":
         msg = bot.send_message(
             c.message.chat.id, "🔍 Açar söz yaz (əsas baza + lokal):"
@@ -16888,6 +17117,7 @@ def deactivate_user(user_id: int) -> bool:
     cur.execute(f"UPDATE users SET {', '.join(updates)} WHERE chat_id=?", params)
     conn.commit()
     conn.close()
+    logger.info("User deletion chat_id=%s", user_id)
     return True
 
 
@@ -18879,67 +19109,6 @@ def handle_agent_request_rayon(message):
     for row in entries:
         send_public_request_card(chat_id, row)
 
-
-# =============== VASITƏÇİ ANALİTİKASI ===============
-
-
-def show_agent_activity_overview(chat_id: int):
-    if not is_admin(chat_id):
-        return
-
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT a.chat_id, a.name, a.phone,
-               aa.last_activity, aa.searches, aa.views, aa.whatsapp, aa.favorites
-        FROM agents a
-        LEFT JOIN agent_activity aa ON aa.chat_id = a.chat_id
-        ORDER BY (aa.last_activity IS NULL), datetime(aa.last_activity) DESC
-        """
-    )
-    rows = cur.fetchall()
-    conn.close()
-
-    if not rows:
-        bot.send_message(chat_id, "❌ Heç bir vasitəçi qeydiyyatı tapılmadı.")
-        return
-
-    cutoff = datetime.utcnow() - timedelta(days=7)
-    active, passive = [], []
-
-    for r in rows:
-        last_raw = r["last_activity"]
-        last_dt = None
-        if last_raw:
-            try:
-                last_dt = datetime.fromisoformat(str(last_raw))
-            except Exception:
-                last_dt = None
-
-        metrics = (
-            f"🔍 {r['searches'] or 0} | 👁 {r['views'] or 0} | "
-            f"💬 {r['whatsapp'] or 0} | ⭐ {r['favorites'] or 0}"
-        )
-        last_txt = last_dt.strftime("%d.%m.%Y") if last_dt else "-"
-        name = r["name"] or "(ad yoxdur)"
-        phone = r["phone"] or "-"
-        item_txt = f"• {name} ({r['chat_id']}, {phone}) — {metrics} — Son: {last_txt}"
-
-        if last_dt and last_dt >= cutoff:
-            active.append(item_txt)
-        else:
-            passive.append(item_txt)
-
-    resp = "🧠 Aktiv / passiv maklerlər\n\n"
-    resp += "🔥 Aktiv (son 7 gün):\n"
-    resp += "\n".join(active) if active else "• Aktiv vasitəçi yoxdur"
-    resp += "\n\n⏸ Passiv (7+ gün):\n"
-    resp += "\n".join(passive) if passive else "• Passiv vasitəçi yoxdur"
-
-    bot.send_message(chat_id, resp)
-
-
 # =============== ADMIN STATİSTİKA, AXTARIŞ, BROADCAST ===============
 
 
@@ -19756,6 +19925,47 @@ def admin_search_handler(message):
             message.chat.id,
             f"✅ Admin axtarış nəticəsi: {found} uyğun qeydə baxdın.",
         )
+
+
+def has_active_text_flow(chat_id: int) -> bool:
+    flow_states = [
+        user_state,
+        complaint_flow_state,
+        admin_reply_state,
+        admin_direct_message_state,
+        admin_user_message_state,
+        admin_user_extend_state,
+        admin_user_action_state,
+        admin_message_state,
+        admin_update_state,
+        customer_request_state,
+        agent_request_lookup_state,
+        admin_customer_request_state,
+        customer_request_rule_state,
+        keyword_alert_state,
+        notification_rule_state,
+    ]
+    if search_state.get(chat_id, {}).get("step"):
+        return True
+    for state in flow_states:
+        entry = state.get(chat_id)
+        if not entry:
+            continue
+        if isinstance(entry, dict):
+            if entry.get("step"):
+                return True
+        else:
+            return True
+    return False
+
+
+@bot.message_handler(content_types=["text"])
+def guard_idle_messages(message):
+    if message.text and message.text.startswith("/"):
+        return
+    if has_active_text_flow(message.chat.id):
+        return
+    bot.send_message(message.chat.id, "Əvvəlcə menudan seçim edin, sonra yazın.")
 
 
 # =============== RUN (Render / Lokal) ===============
