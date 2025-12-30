@@ -4225,7 +4225,7 @@ def build_saved_search_from_structured(filters: dict):
     prop_code = filters.get("prop")
     prop_type = None
     if prop_code:
-        prop_type = PROP_TYPES.get(prop_code)
+        prop_type = resolve_property_type_from_code(prop_code)
 
     rayon = filters.get("rayon")
     if rayon == "all":
@@ -7431,7 +7431,7 @@ def step_operation(message):
 
     extra = [
         ["Mənzil", "Fərdi yaşayış evi"],
-        ["Qeyri-yaşayış sahəsi", "Bağ evi"],
+        ["Qeyri yaşayış sahəsi", "Bağ evi"],
         ["Torpaq"],
     ]
     kb = new_listing_keyboard(extra=extra)
@@ -7446,13 +7446,14 @@ def step_prop_type(message):
     chat_id = message.chat.id
     if handle_common_nav(message):
         return
-    choice = message.text.strip()
-    valid = ["Mənzil", "Fərdi yaşayış evi", "Qeyri-yaşayış sahəsi", "Bağ evi", "Torpaq"]
-    if choice not in valid:
+    choice = (message.text or "").strip()
+    valid = ["Mənzil", "Fərdi yaşayış evi", "Qeyri yaşayış sahəsi", "Bağ evi", "Torpaq"]
+    normalized_choice = normalize_property_type_ui_value(choice)
+    if not normalized_choice or normalized_choice not in valid:
         bot.send_message(chat_id, "Verilən siyahıdan əmlak tipini seçin.")
         return
     st = user_state[chat_id]
-    st["prop_type"] = choice
+    st["prop_type"] = normalized_choice
 
     kb = new_listing_keyboard(
         extra=[
@@ -9971,7 +9972,7 @@ def cb_notification_rule_prop(c):
             pass
         return
     prop_code = c.data.split(":", 1)[1]
-    prop_map = {"m": "mənzil", "b": "bağ evi", "t": "torpaq", "all": None}
+    prop_map = {"m": "Mənzil", "b": "Bağ evi", "t": "Torpaq", "all": None}
     state["prop_type"] = prop_map.get(prop_code)
     state["step"] = "min_price"
     notification_rule_state[chat_id] = state
@@ -10040,7 +10041,8 @@ def handle_notification_rule_max_price(message):
             return
         state["price_max"] = int(value)
     prop_type = state.get("prop_type")
-    if prop_type in {"mənzil", "bağ evi"} or prop_type is None:
+    prop_type_norm = normalize_property_type_ui_value(prop_type)
+    if prop_type_norm in {"Mənzil", "Bağ evi"} or prop_type_norm is None:
         state["step"] = "rooms"
         notification_rule_state[chat_id] = state
         bot.send_message(
@@ -10305,15 +10307,64 @@ OP_CODES = {
     "kir": ["kirayə verilir", "kirayə", "icarə"],
 }
 
+PROPERTY_TYPE_MAP = {
+    "Mənzil": ["Mənzil", "menzil", "apartment"],
+    "Fərdi yaşayış evi": ["Fərdi yaşayış evi", "Həyət evi", "heyet evi", "house"],
+    "Bağ evi": ["Bağ evi", "bag evi", "villa"],
+    "Torpaq": ["Torpaq", "torpaq sahəsi", "land"],
+    "Qeyri yaşayış sahəsi": [
+        "Qeyri yaşayış sahəsi",
+        "Qeyri-yaşayış sahəsi",
+        "Qeyri yaşayış",
+        "Non-residential",
+        "Commercial",
+        "Kommersiya",
+    ],
+}
+
 PROP_TYPES = {
     "all": None,
-    "m": "mənzil",
-    "f": "fərdi yaşayış evi",
-    "q": "qeyri-yaşayış sahəsi",
-    "b": "bağ evi",
-    "t": "torpaq",
-    "d": "digər",
+    "m": "Mənzil",
+    "f": "Fərdi yaşayış evi",
+    "q": "Qeyri yaşayış sahəsi",
+    "b": "Bağ evi",
+    "t": "Torpaq",
+    "d": "Digər",
 }
+
+
+def normalize_property_type_ui_value(raw_value: Optional[str]) -> Optional[str]:
+    if raw_value is None:
+        return None
+    cleaned = str(raw_value).strip()
+    if not cleaned:
+        return None
+    for key in PROPERTY_TYPE_MAP:
+        if cleaned.lower() == key.lower():
+            return key
+    return None
+
+
+def resolve_property_type_from_code(prop_code: Optional[str]) -> Optional[str]:
+    if not prop_code or prop_code == "all":
+        return None
+    mapped = PROP_TYPES.get(prop_code)
+    normalized = normalize_property_type_ui_value(mapped or prop_code)
+    return normalized
+
+
+def get_property_type_filter_values(
+    prop_code: Optional[str] = None, ui_value: Optional[str] = None
+) -> Tuple[Optional[str], List[str]]:
+    ui_choice = normalize_property_type_ui_value(ui_value)
+    if ui_choice is None:
+        ui_choice = resolve_property_type_from_code(prop_code)
+    if not ui_choice:
+        return None, []
+    db_values = PROPERTY_TYPE_MAP.get(ui_choice, [])
+    logger.debug("Filtering prop_type UI='%s' → DB_VALUES=%s", ui_choice, db_values)
+    normalized_values = [str(v).strip().lower() for v in db_values if str(v).strip()]
+    return ui_choice, normalized_values
 
 RAYON_GROUPS = {
     "all": None,
@@ -10428,10 +10479,11 @@ def build_filters_sql(
         sql += " AND (" + " OR ".join(conds) + ")"
 
     # Əmlak tipi
-    prop_kw = PROP_TYPES.get(prop_code)
-    if prop_kw:
-        sql += " AND LOWER(prop_type) LIKE ?"
-        params.append(f"%{prop_kw}%")
+    _, prop_values = get_property_type_filter_values(prop_code)
+    if prop_values:
+        placeholders = ",".join(["?"] * len(prop_values))
+        sql += f" AND LOWER(prop_type) IN ({placeholders})"
+        params.extend(prop_values)
 
     # Rayon qrupu
     kws = RAYON_GROUPS.get(rayon_group)
@@ -11317,8 +11369,12 @@ def matches_saved_search(ev: dict, saved: dict) -> bool:
 
     prop_filter = saved.get("prop_type")
     if prop_filter:
+        _, prop_values = get_property_type_filter_values(ui_value=prop_filter)
         prop_text = str(ev.get("prop_type") or ev.get("Emlakin_novu") or "").lower()
-        if prop_filter.lower() not in prop_text:
+        if prop_values:
+            if prop_text not in prop_values:
+                return False
+        elif prop_filter.lower() not in prop_text:
             return False
 
     return True
