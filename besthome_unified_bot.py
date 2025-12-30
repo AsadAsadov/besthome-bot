@@ -3609,6 +3609,13 @@ def compute_total_pages(total_count: int) -> int:
     return max(1, math.ceil(total_count / PAGE_SIZE))
 
 
+def get_last_24h_window():
+    now = datetime.utcnow()
+    start = now - timedelta(hours=24)
+    logger.info("Last 24h stats computed using rolling window (now-24h)")
+    return start, now
+
+
 def get_today_bounds():
     now = datetime.now()
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -3833,13 +3840,18 @@ def ensure_created_at_column(
         )
 
 
-def build_today_clause(column: Optional[str]):
+def build_last_24h_clause(
+    column: Optional[str],
+    window: Optional[Tuple[datetime, datetime]] = None,
+):
     if not column:
         return "", []
-    start, end = get_today_bounds()
+    start, end = window if window else get_last_24h_window()
     return (
-        " AND ((typeof({col})='integer' AND {col} BETWEEN ? AND ?) "
-        "OR datetime({col}) BETWEEN datetime(?) AND datetime(?))".format(col=column),
+        " AND ((typeof({col})='integer' AND {col} >= ? AND {col} < ?) "
+        "OR (datetime({col}) >= datetime(?) AND datetime({col}) < datetime(?)))".format(
+            col=column
+        ),
         [
             int(start.timestamp()),
             int(end.timestamp()),
@@ -3847,6 +3859,13 @@ def build_today_clause(column: Optional[str]):
             format_sqlite_datetime(end),
         ],
     )
+
+
+def build_today_clause(
+    column: Optional[str],
+    window: Optional[Tuple[datetime, datetime]] = None,
+):
+    return build_last_24h_clause(column, window)
 
 
 def build_date_range_clause(
@@ -3934,7 +3953,8 @@ def count_main_active_listings(
         if only_today:
             date_col = detect_table_date_column(cur, "listings")
             if date_col:
-                date_sql, date_params = build_today_clause(f"l.{date_col}")
+                window = get_last_24h_window()
+                date_sql, date_params = build_today_clause(f"l.{date_col}", window)
         rayon_sql, rayon_params = build_rayon_filter_sql(cur, "listings", rayon, "l.")
         sql = "SELECT COUNT(*) FROM listings l " + flt + date_sql + rayon_sql
         cur.execute(sql, params + date_params + rayon_params)
@@ -3962,7 +3982,8 @@ def count_local_active_listings(
         if only_today:
             date_col = detect_table_date_column(cur, "listings_approved")
             if date_col:
-                date_sql, date_params = build_today_clause(f"l.{date_col}")
+                window = get_last_24h_window()
+                date_sql, date_params = build_today_clause(f"l.{date_col}", window)
         rayon_sql, rayon_params = build_rayon_filter_sql(
             cur, "listings_approved", rayon, "l."
         )
@@ -10678,23 +10699,41 @@ def compute_stats(
 
     where_clauses = []
     where_params: List[Any] = []
-    window_days = {"24h": 1, "7d": 7, "30d": 30}.get(window)
     use_recent = False
-    if window != "all" and window_days:
+    if window == "24h":
+        start, end = get_last_24h_window()
         if ts_col and ts_kind == "unix":
-            seconds = window_days * 24 * 3600
             where_clauses.append(
-                f"COALESCE(l.\"{ts_col}\", 0) >= (strftime('%s','now') - ?)"
+                f"COALESCE(l.\"{ts_col}\", 0) >= ? AND COALESCE(l.\"{ts_col}\", 0) < ?"
             )
-            where_params.append(seconds)
+            where_params.extend([int(start.timestamp()), int(end.timestamp())])
         elif ts_col and ts_kind == "iso":
             where_clauses.append(
-                f"datetime(l.\"{ts_col}\") >= datetime('now', ?)"
+                f"datetime(l.\"{ts_col}\") >= datetime(?) AND datetime(l.\"{ts_col}\") < datetime(?)"
             )
-            where_params.append(f"-{window_days} days")
+            where_params.extend(
+                [format_sqlite_datetime(start), format_sqlite_datetime(end)]
+            )
         else:
             use_recent = True
             stats["note"] = f"Tarix məlumatı yoxdur, son {STATS_RECENT_LIMIT} elan"
+    else:
+        window_days = {"7d": 7, "30d": 30}.get(window)
+        if window != "all" and window_days:
+            if ts_col and ts_kind == "unix":
+                seconds = window_days * 24 * 3600
+                where_clauses.append(
+                    f"COALESCE(l.\"{ts_col}\", 0) >= (strftime('%s','now') - ?)"
+                )
+                where_params.append(seconds)
+            elif ts_col and ts_kind == "iso":
+                where_clauses.append(
+                    f"datetime(l.\"{ts_col}\") >= datetime('now', ?)"
+                )
+                where_params.append(f"-{window_days} days")
+            else:
+                use_recent = True
+                stats["note"] = f"Tarix məlumatı yoxdur, son {STATS_RECENT_LIMIT} elan"
 
     cols = get_table_columns(cur, source_table)
     order_col = None
@@ -10815,13 +10854,22 @@ def compute_user_statistics(period: str) -> dict:
 
         where_clauses: List[str] = []
         where_params: List[Any] = []
-        window_days = {"24h": 1, "7d": 7, "30d": 30}.get(key_base)
 
-        if key_base != "all" and window_days and ts_col:
+        if key_base == "24h" and ts_col:
+            start, end = get_last_24h_window()
             where_clauses.append(
-                f"datetime(l.\"{ts_col}\") >= datetime('now', ?)"
+                f"datetime(l.\"{ts_col}\") >= datetime(?) AND datetime(l.\"{ts_col}\") < datetime(?)"
             )
-            where_params.append(f"-{window_days} days")
+            where_params.extend(
+                [format_sqlite_datetime(start), format_sqlite_datetime(end)]
+            )
+        elif key_base != "all" and ts_col:
+            window_days = {"7d": 7, "30d": 30}.get(key_base)
+            if window_days:
+                where_clauses.append(
+                    f"datetime(l.\"{ts_col}\") >= datetime('now', ?)"
+                )
+                where_params.append(f"-{window_days} days")
         elif key_base != "all" and not ts_col:
             stats["note"] = "Tarix məlumatı yoxdur, zaman filtri tətbiq edilmədi"
 
@@ -11456,6 +11504,7 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
     op_code = filters.get("op", "all")
     prop_code = filters.get("prop", "all")
     results = []
+    window = get_last_24h_window()
     logger.info(
         "today query start filters=%s offset=%s limit=%s", filters, offset, limit
     )
@@ -11466,7 +11515,7 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
         base = "SELECT * FROM listings"
         flt, params = build_filters_sql(op_code, prop_code, None, mode="main")
         date_col = detect_table_date_column(cur, "listings")
-        date_sql, date_params = build_today_clause(date_col)
+        date_sql, date_params = build_today_clause(date_col, window)
         rayon_sql, rayon_params = build_rayon_filter_sql(
             cur, "listings", filters.get("rayon"), ""
         )
@@ -11492,7 +11541,7 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
     base = "SELECT * FROM listings_approved"
     flt, params = build_filters_sql(op_code, prop_code, None, mode="local")
     date_col = detect_table_date_column(cur, "listings_approved")
-    date_sql, date_params = build_today_clause(date_col)
+    date_sql, date_params = build_today_clause(date_col, window)
     rayon_sql, rayon_params = build_rayon_filter_sql(
         cur, "listings_approved", filters.get("rayon"), ""
     )
@@ -11513,13 +11562,13 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
         results.append(d)
     conn.close()
 
-    start, end = get_today_bounds()
+    start, end = window
     filtered = []
     for ev in results:
         ev_dt = safe_date(ev)
         if ev_dt == datetime.min:
             continue
-        if not (start <= ev_dt <= end):
+        if not (start <= ev_dt < end):
             continue
         if not matches_today_rayon(ev, filters):
             continue
@@ -20258,8 +20307,8 @@ def compute_besthome_overview_stats():
             except Exception:
                 pass
 
+    last_24h_window = get_last_24h_window()
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    last_24h_dt = datetime.utcnow() - timedelta(hours=24)
 
     for row in rows:
         row["__source"] = "main"
@@ -20280,7 +20329,7 @@ def compute_besthome_overview_stats():
         if not ev_dt:
             continue
 
-        if ev_dt >= last_24h_dt:
+        if last_24h_window[0] <= ev_dt < last_24h_window[1]:
             stats["last_24h"] += 1
         if ev_dt >= today_start:
             stats["today_total"] += 1
