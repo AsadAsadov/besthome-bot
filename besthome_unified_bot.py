@@ -313,6 +313,8 @@ STATUS_ACTIVE_FREE = "active_free"
 STATUS_BLOCKED = "blocked"
 STATUS_REJECTED = "rejected"
 ACTIVE_STATUSES = {STATUS_ACTIVE_PAID, STATUS_ACTIVE_DEMO, STATUS_ACTIVE_FREE}
+
+DEMO_DAYS = 3
 TEXTS_AZ = {
     "admin_panel_button": "📊 Admin Panel",
     "admin_panel_title": "🛠 Admin Panel:",
@@ -2271,7 +2273,7 @@ def admin_effective_expires_expr() -> str:
 def admin_user_status_subquery() -> str:
     return (
         "(SELECT uw.chat_id, uw.full_name, uw.username, uw.effective_expires_at, "
-        "uw.computed_status, u.paid_until "
+        "uw.computed_status, u.paid_until, u.demo_end_at, u.demo_expires_at "
         "FROM users_with_status uw "
         "LEFT JOIN users u ON u.chat_id = uw.chat_id)"
     )
@@ -2317,7 +2319,13 @@ def admin_user_status_where(status: str) -> tuple:
         "demo": "DEMO",
     }
     if normalized == "demo":
-        return "computed_status = 'DEMO'", ()
+        clause = (
+            "((demo_end_at IS NOT NULL AND "
+            "strftime('%s', demo_end_at) > strftime('%s','now')) "
+            "OR (demo_expires_at IS NOT NULL AND "
+            "strftime('%s', demo_expires_at) > strftime('%s','now')))"
+        )
+        return clause, ()
     computed = status_map.get(normalized, "ACTIVE")
     return "computed_status = ?", (computed,)
 
@@ -3445,6 +3453,16 @@ def subscription_payment_code(chat_id: int) -> str:
 def is_demo_available(chat_id: int) -> bool:
     status = get_user_computed_status(chat_id)
     if status == "ACTIVE":
+        return False
+
+    record = get_user_record(chat_id) or {}
+    demo_used = record.get("demo_used", 0)
+    demo_end = parse_dt_safe(record.get("demo_end_at") or record.get("demo_expires_at"))
+    now = datetime.utcnow()
+
+    if demo_end and demo_end > now:
+        return False
+    if demo_used:
         return False
     return True
 
@@ -6767,7 +6785,6 @@ def build_user_stats_keyboard(selected: str) -> types.InlineKeyboardMarkup:
             types.InlineKeyboardButton(f"{prefix}{label}", callback_data=f"stats:{key}")
         )
     mk.row(*buttons)
-    mk.add(types.InlineKeyboardButton("📊 Rayon statistikası", callback_data="stats:pulse"))
     return mk
 
 
@@ -6893,13 +6910,6 @@ def handle_user_stats_callback(c):
         return
     chat_id = c.message.chat.id if c.message else c.from_user.id
     user_stats_filter[chat_id] = period
-    if period == "pulse":
-        try:
-            bot.answer_callback_query(c.id, "📊 Rayon statistikası")
-        except Exception:
-            pass
-        send_market_pulse_overview(chat_id)
-        return
     try:
         bot.answer_callback_query(c.id, STATS_FILTER_LABELS.get(period, "🧾 Ümumi"))
     except Exception:
@@ -7060,18 +7070,37 @@ def cb_payplan(c):
 @callback_guard
 def cb_demo_activate(c):
     chat_id = c.message.chat.id
-    if not is_demo_available(chat_id):
-        try:
-            bot.answer_callback_query(
-                c.id, "Demo artıq istifadə olunub və ya hesab aktivdir", show_alert=True
-            )
-        except Exception:
-            pass
+    record = get_user_record(chat_id) or {}
+    now = datetime.utcnow()
+    demo_end = parse_dt_safe(record.get("demo_end_at") or record.get("demo_expires_at"))
+    demo_used = record.get("demo_used", 0)
+
+    if demo_end and demo_end > now:
+        msg = (
+            "ℹ️ Siz artıq demo istifadə edirsiniz.\n"
+            f"Bitmə tarixi: {demo_end.strftime('%d.%m.%Y %H:%M')}"
+        )
+        bot.send_message(chat_id, msg)
+        logger.info("Demo denied (already active) chat_id=%s", chat_id)
         return
+
+    if demo_used:
+        logger.info("Demo denied (expired) chat_id=%s", chat_id)
+        send_payment_menu(chat_id)
+        return
+
     ensure_subscription_record(chat_id)
-    expires = datetime.utcnow() + timedelta(days=3)
+    expires = now + timedelta(days=DEMO_DAYS)
+    was_blocked = bool(record.get("blocked"))
+    update_user_status(
+        chat_id,
+        STATUS_ACTIVE_DEMO,
+        demo_start_at=now,
+        demo_end_at=expires,
+        paid_until=parse_dt_safe(record.get("paid_until")),
+        blocked_at=None,
+    )
     set_subscription(chat_id, "demo", expires, is_active=1, is_demo=1, note="demo")
-    mark_demo_used(chat_id, expires)
     try:
         bot.edit_message_reply_markup(
             chat_id,
@@ -7080,10 +7109,15 @@ def cb_demo_activate(c):
         )
     except Exception:
         pass
+
     bot.send_message(
         chat_id,
-        "🎉 Demo aktiv edildi!\nBotdan 3 gün pulsuz istifadə edə bilərsiniz.",
+        f"🎁 Demo aktiv edildi. Bitmə tarixi: {expires.strftime('%d.%m.%Y %H:%M')}",
     )
+    if was_blocked:
+        logger.info("User auto-unblocked via demo chat_id=%s", chat_id)
+    logger.info("Demo activated chat_id=%s expires=%s", chat_id, expires.isoformat())
+
     conn = get_local_conn()
     cur = conn.cursor()
     cur.execute("SELECT full_name, username FROM users WHERE chat_id=?", (chat_id,))
@@ -15353,7 +15387,10 @@ def build_demo_users_view(page: int = 1) -> Tuple[str, types.InlineKeyboardMarku
         select_fields.append("demo_expires_at")
     else:
         select_fields.append("NULL AS demo_expires_at")
-    query = f"SELECT {', '.join(select_fields)} FROM {base_query} WHERE computed_status = 'DEMO'"
+    query = (
+        f"SELECT {', '.join(select_fields)} FROM {base_query} "
+        "WHERE (demo_end_at IS NOT NULL OR demo_expires_at IS NOT NULL)"
+    )
     cur.execute(query)
     rows = cur.fetchall()
     conn.close()
@@ -19965,7 +20002,11 @@ def guard_idle_messages(message):
         return
     if has_active_text_flow(message.chat.id):
         return
-    bot.send_message(message.chat.id, "Əvvəlcə menudan seçim edin, sonra yazın.")
+    bot.send_message(
+        message.chat.id,
+        "Əvvəlcə menudan seçim edin, sonra yazın.\n"
+        "Əgər menyu görünmürsə /start yazın, menyu açılacaq.",
+    )
 
 
 # =============== RUN (Render / Lokal) ===============
