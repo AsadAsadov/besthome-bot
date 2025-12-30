@@ -5207,7 +5207,7 @@ def start_cmd(message):
     username = message.from_user.username or ""
     first_name = message.from_user.first_name or ""
     full_name = message.from_user.full_name or ""
-    start_arg = message.get_args().strip().lower() if message.get_args() else None
+    start_arg = (message.get_args() or "").strip().lower()
     if start_arg in ALLOWED_START_AREAS:
         source_type = "qr"
         source_area: Optional[str] = start_arg
@@ -5228,7 +5228,12 @@ def start_cmd(message):
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "SELECT chat_id, approved, is_admin, last_version, is_first_start FROM users WHERE chat_id=?",
+        """
+        SELECT chat_id, approved, is_admin, last_version, is_first_start, source_type,
+               source_area, demo_days, demo_end_at, demo_expires_at, demo_used
+        FROM users
+        WHERE chat_id=?
+        """,
         (chat_id,),
     )
     row = cur.fetchone()
@@ -5236,16 +5241,19 @@ def start_cmd(message):
     is_first_start = False
     attribution_created_at = datetime.now(timezone.utc).isoformat()
     created_at = attribution_created_at
+    demo_expiry: Optional[datetime] = None
+    demo_info_text: Optional[str] = None
 
     # 🧩 Əgər user bazada yoxdursa, əlavə et
     if not row:
         is_first_time = True
         is_first_start = True
+        demo_expiry = datetime.utcnow() + timedelta(days=demo_days)
         try:
             cur.execute(
                 """
-                INSERT INTO users (chat_id, username, full_name, first_seen, approved, is_admin, last_version, referred_by, referral_bonus_used, referral_milestone_used, is_first_start, first_name, source_type, source_area, attribution_created_at, created_at, demo_days)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO users (chat_id, username, full_name, first_seen, approved, is_admin, last_version, referred_by, referral_bonus_used, referral_milestone_used, is_first_start, first_name, source_type, source_area, attribution_created_at, created_at, demo_days, demo_end_at, demo_expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chat_id,
@@ -5265,6 +5273,8 @@ def start_cmd(message):
                     attribution_created_at,
                     created_at,
                     demo_days,
+                    demo_expiry.isoformat() if demo_expiry else None,
+                    demo_expiry.isoformat() if demo_expiry else None,
                 ),
             )
             conn.commit()
@@ -5294,21 +5304,22 @@ def start_cmd(message):
             conn.rollback()
             logger.exception("Failed to reset approval flags chat_id=%s", chat_id)
             bot.send_message(chat_id, "⚠️ Texniki problem oldu, amma bot aktivdir.")
-        try:
-            ensure_subscription_record(chat_id)
-            admin_grant_demo_days(chat_id, demo_days)
-        except Exception as e:
-            logger.exception("Failed to assign demo for new user chat_id=%s", chat_id)
-            bot.send_message(chat_id, "⚠️ Texniki problem oldu, amma bot aktivdir.")
     else:
         is_first_start = (
             bool(row["is_first_start"]) if row["is_first_start"] is not None else False
         )
-        try:
-            ensure_subscription_record(chat_id)
-        except Exception as e:
-            logger.exception("Failed to ensure subscription chat_id=%s", chat_id)
-            bot.send_message(chat_id, "⚠️ Texniki problem oldu, amma bot aktivdir.")
+        demo_end_raw = row.get("demo_end_at") or row.get("demo_expires_at")
+        demo_expiry = parse_dt_safe(demo_end_raw)
+        if demo_expiry and demo_expiry > datetime.utcnow():
+            remaining = demo_expiry - datetime.utcnow()
+            remaining_days = remaining.days
+            remaining_hours = (remaining.seconds // 3600)
+            demo_info_text = (
+                "🎁 Demo aktivdir. \n"
+                f"Bitmə tarixi: {demo_expiry.strftime('%d.%m.%Y %H:%M')} (qalıb {remaining_days} gün {remaining_hours} saat)"
+            )
+        elif row.get("demo_used"):
+            demo_info_text = "🎁 Demo müddətiniz bitib. Ödəniş menyusundan yeniləyə bilərsiniz."
 
     if is_first_time:
         send_payment_menu(chat_id)
@@ -5320,13 +5331,6 @@ def start_cmd(message):
                 "UPDATE users SET approved=1, is_admin=1 WHERE chat_id=?", (chat_id,)
             )
             conn.commit()
-            insert_subscription(
-                chat_id,
-                "admin",
-                datetime.utcnow() + timedelta(days=3650),
-                is_demo=0,
-                note="admin_auto",
-            )
             set_user_state(chat_id, "ADMIN")
         except Exception:
             conn.rollback()
@@ -5334,13 +5338,6 @@ def start_cmd(message):
             bot.send_message(chat_id, "⚠️ Texniki problem oldu, amma bot aktivdir.")
 
     conn.close()
-
-    user_status = get_user_computed_status(chat_id)
-    if user_status == "BLOCKED":
-        bot.send_message(
-            chat_id,
-            "❌ Hesabınız deaktiv edilib. Admin ilə əlaqə saxlayın @esedovesed.",
-        )
 
     if is_first_start and not is_admin(chat_id):
         bot.send_message(
@@ -5355,26 +5352,29 @@ def start_cmd(message):
         )
         set_first_start_false_for_user(chat_id)
 
-    if not check_subscription(chat_id, silent=True):
-        send_payment_menu(chat_id)
-
     set_user_state(chat_id, "MAIN")
     set_ui_context(chat_id, UI_CONTEXT_MAIN)
-
-    if source_type == "qr":
-        bot.send_message(
-            chat_id,
-            "🎉 QR vasitəsilə qoşuldunuz.\n"
-            "Sizə avtomatik olaraq 7 gün PULSUZ demo aktiv edildi.",
+    if is_first_time:
+        if source_type == "qr":
+            demo_info_text = (
+                "🎉 QR vasitəsilə qoşuldunuz.\n"
+                "Sizə avtomatik olaraq 7 gün PULSUZ demo aktiv edildi."
+            )
+        else:
+            demo_info_text = (
+                "🎉 Xoş gəldiniz.\n"
+                "Sizə avtomatik olaraq 3 gün PULSUZ demo aktiv edildi."
+            )
+    if not demo_info_text:
+        demo_info_text = (
+            "🎁 Demo müddətiniz mövcud deyil. Ödəniş menyusundan tam akses əldə edə bilərsiniz."
         )
-    else:
-        bot.send_message(
-            chat_id,
-            "🎉 Xoş gəldiniz.\n"
-            "Sizə avtomatik olaraq 3 gün PULSUZ demo aktiv edildi.",
-        )
 
-    main_menu(chat_id)
+    if demo_info_text:
+        bot.send_message(chat_id, demo_info_text)
+
+    send_main_menu(chat_id, "📋 Əsas menyudan seçim et:", force=True)
+    logger.info("/start executed successfully for user %s", chat_id)
 
 
 @bot.message_handler(func=lambda m: m.text == "🤝 Dostunu dəvət et")
