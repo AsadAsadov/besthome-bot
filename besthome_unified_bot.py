@@ -6879,6 +6879,7 @@ PROP_TYPE_EMOJI_MAP = {
     "Mənzil": "🏠",
     "Bağ evi": "🏡",
     "Fərdi yaşayış evi": "🏘️",
+    "Obyekt / Ofis": "🏢",
     "Qeyri yaşayış sahəsi": "🏢",
     "Torpaq": "🌱",
 }
@@ -7444,7 +7445,14 @@ def step_prop_type(message):
     if handle_common_nav(message):
         return
     choice = (message.text or "").strip()
-    valid = ["Mənzil", "Fərdi yaşayış evi", "Qeyri yaşayış sahəsi", "Bağ evi", "Torpaq"]
+    valid = [
+        "Mənzil",
+        "Fərdi yaşayış evi",
+        "Qeyri yaşayış sahəsi",
+        "Obyekt / Ofis",
+        "Bağ evi",
+        "Torpaq",
+    ]
     normalized_choice = normalize_property_type_ui_value(choice)
     if not normalized_choice or normalized_choice not in valid:
         bot.send_message(chat_id, "Verilən siyahıdan əmlak tipini seçin.")
@@ -10309,21 +10317,34 @@ PROPERTY_TYPE_MAP = {
     "Fərdi yaşayış evi": ["Fərdi yaşayış evi", "Həyət evi", "heyet evi", "house"],
     "Bağ evi": ["Bağ evi", "bag evi", "villa"],
     "Torpaq": ["Torpaq", "torpaq sahəsi", "land"],
-    "Qeyri yaşayış sahəsi": [
+    "Obyekt / Ofis": [
+        "Obyekt / Ofis",
+        "Obyekt",
+        "Ofis",
         "Qeyri yaşayış sahəsi",
         "Qeyri-yaşayış sahəsi",
         "Qeyri yaşayış",
         "Non-residential",
         "Commercial",
         "Kommersiya",
+        "obyekt",
+        "ofis",
+        "obyekt/ofis",
     ],
 }
+
+PROPERTY_TYPE_NORMALIZATION_MAP = {}
+for canonical, variants in PROPERTY_TYPE_MAP.items():
+    for variant in [canonical, *variants]:
+        key = str(variant).strip().lower()
+        if key:
+            PROPERTY_TYPE_NORMALIZATION_MAP[key] = canonical
 
 PROP_TYPES = {
     "all": None,
     "m": "Mənzil",
     "f": "Fərdi yaşayış evi",
-    "q": "Qeyri yaşayış sahəsi",
+    "q": "Obyekt / Ofis",
     "b": "Bağ evi",
     "t": "Torpaq",
     "d": "Digər",
@@ -10336,10 +10357,8 @@ def normalize_property_type_ui_value(raw_value: Optional[str]) -> Optional[str]:
     cleaned = str(raw_value).strip()
     if not cleaned:
         return None
-    for key in PROPERTY_TYPE_MAP:
-        if cleaned.lower() == key.lower():
-            return key
-    return None
+    normalized = PROPERTY_TYPE_NORMALIZATION_MAP.get(cleaned.lower())
+    return normalized
 
 
 def resolve_property_type_from_code(prop_code: Optional[str]) -> Optional[str]:
