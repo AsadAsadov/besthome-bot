@@ -1558,7 +1558,9 @@ def init_local_db():
             customer_requests_enabled INTEGER DEFAULT 0,
             source_type TEXT,
             source_area TEXT,
-            attribution_created_at TEXT
+            attribution_created_at TEXT,
+            created_at TEXT,
+            demo_days INTEGER
         )
         """
     )
@@ -1590,6 +1592,8 @@ def init_local_db():
         "ALTER TABLE users ADD COLUMN source_type TEXT",
         "ALTER TABLE users ADD COLUMN source_area TEXT",
         "ALTER TABLE users ADD COLUMN attribution_created_at TEXT",
+        "ALTER TABLE users ADD COLUMN created_at TEXT",
+        "ALTER TABLE users ADD COLUMN demo_days INTEGER",
         "ALTER TABLE users ADD COLUMN is_blocked INTEGER DEFAULT 0",
         "ALTER TABLE users ADD COLUMN last_error TEXT",
         "ALTER TABLE users ADD COLUMN is_active INTEGER DEFAULT 1",
@@ -5203,13 +5207,15 @@ def start_cmd(message):
     username = message.from_user.username or ""
     first_name = message.from_user.first_name or ""
     full_name = message.from_user.full_name or ""
-    start_arg = (message.get_args() or "").strip().lower()
+    start_arg = message.get_args().strip().lower() if message.get_args() else None
     if start_arg in ALLOWED_START_AREAS:
         source_type = "qr"
         source_area: Optional[str] = start_arg
+        demo_days = 7
     else:
         source_type = "direct"
         source_area = None
+        demo_days = 3
     first_seen = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     search_reminder_shown.discard(chat_id)
     reset_user_state(chat_id)
@@ -5228,17 +5234,18 @@ def start_cmd(message):
     row = cur.fetchone()
     is_first_time = False
     is_first_start = False
+    attribution_created_at = datetime.now(timezone.utc).isoformat()
+    created_at = attribution_created_at
 
     # 🧩 Əgər user bazada yoxdursa, əlavə et
     if not row:
         is_first_time = True
         is_first_start = True
-        attribution_created_at = datetime.now(timezone.utc).isoformat()
         try:
             cur.execute(
                 """
-                INSERT INTO users (chat_id, username, full_name, first_seen, approved, is_admin, last_version, referred_by, referral_bonus_used, referral_milestone_used, is_first_start, first_name, source_type, source_area, attribution_created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO users (chat_id, username, full_name, first_seen, approved, is_admin, last_version, referred_by, referral_bonus_used, referral_milestone_used, is_first_start, first_name, source_type, source_area, attribution_created_at, created_at, demo_days)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chat_id,
@@ -5256,6 +5263,8 @@ def start_cmd(message):
                     source_type,
                     source_area,
                     attribution_created_at,
+                    created_at,
+                    demo_days,
                 ),
             )
             conn.commit()
@@ -5265,43 +5274,64 @@ def start_cmd(message):
                 source_type,
                 chat_id,
             )
-        except Exception:
+        except Exception as e:
             conn.rollback()
             logger.exception("Failed to insert new user chat_id=%s", chat_id)
+            bot.send_message(chat_id, "⚠️ Texniki problem oldu, amma bot aktivdir.")
 
         if referred_by_value:
-            save_referral(referred_by_value, chat_id, is_new_user=True)
-
-        cur.execute(
-            "UPDATE users SET approved=0, blocked=0 WHERE chat_id=?", (chat_id,)
-        )
+            try:
+                save_referral(referred_by_value, chat_id, is_new_user=True)
+            except Exception:
+                logger.exception("Failed to save referral for chat_id=%s", chat_id)
+                bot.send_message(chat_id, "⚠️ Texniki problem oldu, amma bot aktivdir.")
+        try:
+            cur.execute(
+                "UPDATE users SET approved=0, blocked=0 WHERE chat_id=?", (chat_id,)
+            )
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            logger.exception("Failed to reset approval flags chat_id=%s", chat_id)
+            bot.send_message(chat_id, "⚠️ Texniki problem oldu, amma bot aktivdir.")
+        try:
+            ensure_subscription_record(chat_id)
+            admin_grant_demo_days(chat_id, demo_days)
+        except Exception as e:
+            logger.exception("Failed to assign demo for new user chat_id=%s", chat_id)
+            bot.send_message(chat_id, "⚠️ Texniki problem oldu, amma bot aktivdir.")
     else:
         is_first_start = (
             bool(row["is_first_start"]) if row["is_first_start"] is not None else False
         )
-        record = get_user_record(chat_id)
+        try:
+            ensure_subscription_record(chat_id)
+        except Exception as e:
+            logger.exception("Failed to ensure subscription chat_id=%s", chat_id)
+            bot.send_message(chat_id, "⚠️ Texniki problem oldu, amma bot aktivdir.")
 
-    ensure_subscription_record(chat_id)
     if is_first_time:
         send_payment_menu(chat_id)
 
     # 🧩 Admin üçün avtomatik təsdiq
     if is_admin(chat_id):
-        cur.execute(
-            "UPDATE users SET approved=1, is_admin=1 WHERE chat_id=?", (chat_id,)
-        )
-        conn.commit()
-        insert_subscription(
-            chat_id,
-            "admin",
-            datetime.utcnow() + timedelta(days=3650),
-            is_demo=0,
-            note="admin_auto",
-        )
-        conn.close()
-        set_user_state(chat_id, "ADMIN")
-        main_menu(chat_id)
-        return
+        try:
+            cur.execute(
+                "UPDATE users SET approved=1, is_admin=1 WHERE chat_id=?", (chat_id,)
+            )
+            conn.commit()
+            insert_subscription(
+                chat_id,
+                "admin",
+                datetime.utcnow() + timedelta(days=3650),
+                is_demo=0,
+                note="admin_auto",
+            )
+            set_user_state(chat_id, "ADMIN")
+        except Exception:
+            conn.rollback()
+            logger.exception("Failed to auto-approve admin chat_id=%s", chat_id)
+            bot.send_message(chat_id, "⚠️ Texniki problem oldu, amma bot aktivdir.")
 
     conn.close()
 
@@ -5311,7 +5341,6 @@ def start_cmd(message):
             chat_id,
             "❌ Hesabınız deaktiv edilib. Admin ilə əlaqə saxlayın @esedovesed.",
         )
-        return
 
     if is_first_start and not is_admin(chat_id):
         bot.send_message(
@@ -5328,10 +5357,23 @@ def start_cmd(message):
 
     if not check_subscription(chat_id, silent=True):
         send_payment_menu(chat_id)
-        return
 
     set_user_state(chat_id, "MAIN")
     set_ui_context(chat_id, UI_CONTEXT_MAIN)
+
+    if source_type == "qr":
+        bot.send_message(
+            chat_id,
+            "🎉 QR vasitəsilə qoşuldunuz.\n"
+            "Sizə avtomatik olaraq 7 gün PULSUZ demo aktiv edildi.",
+        )
+    else:
+        bot.send_message(
+            chat_id,
+            "🎉 Xoş gəldiniz.\n"
+            "Sizə avtomatik olaraq 3 gün PULSUZ demo aktiv edildi.",
+        )
+
     main_menu(chat_id)
 
 
