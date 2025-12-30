@@ -2520,7 +2520,6 @@ def ensure_user_exists(chat_id: int, username: str = "", full_name: str = "") ->
     )
     conn.commit()
     conn.close()
-    ensure_subscription_record(chat_id)
     return get_user_record(chat_id) or {}
 
 
@@ -2842,7 +2841,6 @@ def ensure_subscription_record(chat_id: int):
 
 
 def get_subscription(chat_id: int) -> Optional[dict]:
-    ensure_subscription_record(chat_id)
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -3117,7 +3115,6 @@ def record_referral_log(
 def extend_subscription_with_bonus(
     chat_id: int, bonus_days: int, note: str
 ) -> datetime:
-    ensure_subscription_record(chat_id)
     sub = get_subscription(chat_id) or {}
     base = resolve_extension_base(chat_id)
     new_exp = base + timedelta(days=bonus_days)
@@ -3445,7 +3442,6 @@ def apply_promo_code(chat_id: int, code_raw: str):
     if has_used_promo(chat_id, code):
         return False, "? Bu promo kodu art?q istifad? etmisiniz", None
 
-    ensure_subscription_record(chat_id)
     sub = get_subscription(chat_id) or {}
     record = get_user_record(chat_id) or {}
     now = datetime.utcnow()
@@ -7155,7 +7151,6 @@ def cb_payplan(c):
     plan = SUBSCRIPTION_PLANS.get(plan_key)
     if not plan:
         return
-    ensure_subscription_record(chat_id)
     set_payment_note(chat_id, f"plan:{plan_key}")
 
     mk = types.InlineKeyboardMarkup()
@@ -7201,8 +7196,6 @@ def cb_demo_activate(c):
         logger.info("Demo denied (expired) chat_id=%s", chat_id)
         send_payment_menu(chat_id)
         return
-
-    ensure_subscription_record(chat_id)
     expires = now + timedelta(days=DEMO_DAYS)
     was_blocked = bool(record.get("blocked"))
     update_user_status(
@@ -7313,7 +7306,6 @@ def cb_pay_admin(c):
         uid = int(uid_raw)
     except Exception:
         return
-    ensure_subscription_record(uid)
     sub = get_subscription(uid)
     plan = SUBSCRIPTION_PLANS.get(plan_key)
     if not plan:
@@ -16818,8 +16810,6 @@ def cb_subscription_control(c):
         uid = int(uid_raw)
     except Exception:
         return
-
-    ensure_subscription_record(uid)
     sub = get_subscription(uid) or {}
     exp_dt = parse_subscription_expiry(sub)
 
@@ -16871,7 +16861,6 @@ def admin_extend_user_time(
     logger.info(
         "besthome_bot: Admin extend user_id=%s days=%s note=%s", user_id, days, note
     )
-    ensure_subscription_record(user_id)
     sub = get_subscription(user_id) or {}
     base = resolve_extension_base(user_id)
     new_exp = base + timedelta(days=days)
@@ -18248,7 +18237,6 @@ def send_admin_user_action_menu(chat_id: int, user_id: int, status_text: str):
 
 
 def activate_user_for_days(user_id: int, days: int):
-    ensure_subscription_record(user_id)
     sub = get_subscription(user_id) or {}
     base = resolve_extension_base(user_id)
     new_exp = base + timedelta(days=days)
@@ -21135,7 +21123,6 @@ def create_flask_app():
 
             ensure_user_exists(admin_id)
             ensure_user_exists(user_id)
-            ensure_subscription_record(user_id)
 
             conn = get_local_conn()
             try:
