@@ -58,6 +58,14 @@ REFERRAL_REWARD_DAYS = 3
 REFERRAL_MILESTONE_COUNT = 10
 REFERRAL_MILESTONE_BONUS_DAYS = 45
 
+ALLOWED_START_AREAS = {
+    "mehle",
+    "nerimanov",
+    "xetai",
+    "28may",
+    "genclik",
+}
+
 # ==============================
 # 🔐 BOT KONFİQURASİYASI
 # ==============================
@@ -1515,6 +1523,7 @@ def init_local_db():
             chat_id INTEGER PRIMARY KEY,
             full_name TEXT,
             username TEXT,
+            first_name TEXT,
             role TEXT,
             date_joined TEXT,
             approved INTEGER DEFAULT 0,
@@ -1530,7 +1539,10 @@ def init_local_db():
             demo_end_at TEXT,
             paid_until TEXT,
             last_status_change_at TEXT,
-            customer_requests_enabled INTEGER DEFAULT 0
+            customer_requests_enabled INTEGER DEFAULT 0,
+            source_type TEXT,
+            source_area TEXT,
+            attribution_created_at TEXT
         )
         """
     )
@@ -1558,6 +1570,10 @@ def init_local_db():
         "ALTER TABLE users ADD COLUMN last_status_change_at TEXT",
         "ALTER TABLE users ADD COLUMN is_first_start INTEGER DEFAULT 0",
         "ALTER TABLE users ADD COLUMN customer_requests_enabled INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN first_name TEXT",
+        "ALTER TABLE users ADD COLUMN source_type TEXT",
+        "ALTER TABLE users ADD COLUMN source_area TEXT",
+        "ALTER TABLE users ADD COLUMN attribution_created_at TEXT",
         "ALTER TABLE users ADD COLUMN is_blocked INTEGER DEFAULT 0",
         "ALTER TABLE users ADD COLUMN last_error TEXT",
         "ALTER TABLE users ADD COLUMN is_active INTEGER DEFAULT 1",
@@ -5169,7 +5185,15 @@ def send_listing_card(
 def start_cmd(message):
     chat_id = message.chat.id
     username = message.from_user.username or ""
+    first_name = message.from_user.first_name or ""
     full_name = message.from_user.full_name or ""
+    start_arg = (message.get_args() or "").strip().lower()
+    if start_arg in ALLOWED_START_AREAS:
+        source_type = "qr"
+        source_area: Optional[str] = start_arg
+    else:
+        source_type = "direct"
+        source_area = None
     first_seen = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     search_reminder_shown.discard(chat_id)
     reset_user_state(chat_id)
@@ -5179,7 +5203,7 @@ def start_cmd(message):
         referrer_chat_id if referrer_chat_id and referrer_chat_id != chat_id else None
     )
 
-    conn = get_local_conn()
+    conn = get_db()
     cur = conn.cursor()
     cur.execute(
         "SELECT chat_id, approved, is_admin, last_version, is_first_start FROM users WHERE chat_id=?",
@@ -5193,26 +5217,41 @@ def start_cmd(message):
     if not row:
         is_first_time = True
         is_first_start = True
-        cur.execute(
-            """
-            INSERT INTO users (chat_id, username, full_name, first_seen, approved, is_admin, last_version, referred_by, referral_bonus_used, referral_milestone_used, is_first_start)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
+        attribution_created_at = datetime.now(timezone.utc).isoformat()
+        try:
+            cur.execute(
+                """
+                INSERT INTO users (chat_id, username, full_name, first_seen, approved, is_admin, last_version, referred_by, referral_bonus_used, referral_milestone_used, is_first_start, first_name, source_type, source_area, attribution_created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    chat_id,
+                    username,
+                    full_name,
+                    first_seen,
+                    0,
+                    0,
+                    CURRENT_VERSION,
+                    referred_by_value,
+                    0,
+                    0,
+                    1,
+                    first_name,
+                    source_type,
+                    source_area,
+                    attribution_created_at,
+                ),
+            )
+            conn.commit()
+            logger.info(
+                "📍 User attribution saved: area=%s, type=%s, user_id=%s",
+                source_area,
+                source_type,
                 chat_id,
-                username,
-                full_name,
-                first_seen,
-                0,
-                0,
-                CURRENT_VERSION,
-                referred_by_value,
-                0,
-                0,
-                1,
-            ),
-        )
-        conn.commit()
+            )
+        except Exception:
+            conn.rollback()
+            logger.exception("Failed to insert new user chat_id=%s", chat_id)
 
         if referred_by_value:
             save_referral(referred_by_value, chat_id, is_new_user=True)
