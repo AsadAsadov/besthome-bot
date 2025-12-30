@@ -27,7 +27,7 @@ import glob
 from datetime import datetime, date, timedelta, timezone
 from collections import Counter, defaultdict
 from functools import wraps
-from typing import Optional, Tuple, List, Dict, Any, Literal, Union
+from typing import Optional, Tuple, List, Dict, Any, Literal, Union, Set
 from urllib.parse import quote, unquote, urlsplit, urlunsplit, parse_qs, urlencode
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
@@ -6878,9 +6878,8 @@ STATS_PROPERTY_BUCKETS = {
 PROP_TYPE_EMOJI_MAP = {
     "Mənzil": "🏠",
     "Bağ evi": "🏡",
-    "Fərdi yaşayış evi": "🏘️",
+    "Həyət evi": "🏘️",
     "Obyekt / Ofis": "🏢",
-    "Qeyri yaşayış sahəsi": "🏢",
     "Torpaq": "🌱",
 }
 
@@ -7381,7 +7380,7 @@ def start_new_listing(message):
         "📝 *Yeni elan əlavə etmə qaydası:*\n"
         "1️⃣ Rol (Vasitəçi / Əmlak sahibi)\n"
         "2️⃣ Əməliyyat (Satılır / Kirayə verilir)\n"
-        "3️⃣ Əmlak tipi (Mənzil / Fərdi yaşayış evi / Qeyri-yaşayış sahəsi / Bağ evi / Torpaq)\n"
+        "3️⃣ Əmlak tipi (Mənzil / Həyət evi / Obyekt / Ofis / Bağ evi / Torpaq)\n"
         "4️⃣ Otaq sayı, ərazi, metro, sahə, qiymət, əlaqə\n"
         "5️⃣ Elan admin təsdiqindən sonra sistemə düşəcək."
     )
@@ -7427,11 +7426,7 @@ def step_operation(message):
     st = user_state[chat_id]
     st["operation"] = choice
 
-    extra = [
-        ["Mənzil", "Fərdi yaşayış evi"],
-        ["Qeyri yaşayış sahəsi", "Bağ evi"],
-        ["Torpaq"],
-    ]
+    extra = [["Mənzil", "Həyət evi"], ["Obyekt / Ofis", "Bağ evi"], ["Torpaq"]]
     kb = new_listing_keyboard(extra=extra)
     st["step"] = "prop_type"
     bot.send_message(chat_id, "🏠 Əmlak tipini seçin:", reply_markup=kb)
@@ -7445,14 +7440,7 @@ def step_prop_type(message):
     if handle_common_nav(message):
         return
     choice = (message.text or "").strip()
-    valid = [
-        "Mənzil",
-        "Fərdi yaşayış evi",
-        "Qeyri yaşayış sahəsi",
-        "Obyekt / Ofis",
-        "Bağ evi",
-        "Torpaq",
-    ]
+    valid = ["Mənzil", "Həyət evi", "Obyekt / Ofis", "Bağ evi", "Torpaq"]
     normalized_choice = normalize_property_type_ui_value(choice)
     if not normalized_choice or normalized_choice not in valid:
         bot.send_message(chat_id, "Verilən siyahıdan əmlak tipini seçin.")
@@ -10312,38 +10300,43 @@ OP_CODES = {
     "kir": ["kirayə verilir", "kirayə", "icarə"],
 }
 
-PROPERTY_TYPE_MAP = {
-    "Mənzil": ["Mənzil", "menzil", "apartment"],
-    "Fərdi yaşayış evi": ["Fərdi yaşayış evi", "Həyət evi", "heyet evi", "house"],
-    "Bağ evi": ["Bağ evi", "bag evi", "villa"],
-    "Torpaq": ["Torpaq", "torpaq sahəsi", "land"],
-    "Obyekt / Ofis": [
-        "Obyekt / Ofis",
-        "Obyekt",
-        "Ofis",
-        "Qeyri yaşayış sahəsi",
-        "Qeyri-yaşayış sahəsi",
-        "Qeyri yaşayış",
-        "Non-residential",
-        "Commercial",
-        "Kommersiya",
-        "obyekt",
-        "ofis",
-        "obyekt/ofis",
-    ],
+PROP_TYPE_MAP = {
+    "mənzil": "Mənzil",
+    "menzil": "Mənzil",
+    "həyət evi": "Həyət evi",
+    "ferdi yasayis evi": "Həyət evi",
+    "fərdi yaşayış evi": "Həyət evi",
+    "obyekt / ofis": "Obyekt / Ofis",
+    "obyekt": "Obyekt / Ofis",
+    "ofis": "Obyekt / Ofis",
+    "qeyri yaşayış sahəsi": "Obyekt / Ofis",
+    "bağ evi": "Bağ evi",
+    "torpaq": "Torpaq",
 }
 
-PROPERTY_TYPE_NORMALIZATION_MAP = {}
-for canonical, variants in PROPERTY_TYPE_MAP.items():
-    for variant in [canonical, *variants]:
-        key = str(variant).strip().lower()
-        if key:
-            PROPERTY_TYPE_NORMALIZATION_MAP[key] = canonical
+PROPERTY_TYPE_NORMALIZATION_MAP: Dict[str, str] = {}
+PROPERTY_TYPE_VARIANTS: Dict[str, Set[str]] = {}
+for variant, canonical in PROP_TYPE_MAP.items():
+    key = str(variant).strip().lower()
+    if not key:
+        continue
+    PROPERTY_TYPE_NORMALIZATION_MAP[key] = canonical
+    PROPERTY_TYPE_VARIANTS.setdefault(canonical, set()).add(key)
+
+for canonical in set(PROP_TYPE_MAP.values()):
+    base_key = str(canonical).strip().lower()
+    if base_key:
+        PROPERTY_TYPE_NORMALIZATION_MAP.setdefault(base_key, canonical)
+        PROPERTY_TYPE_VARIANTS.setdefault(canonical, set()).add(base_key)
+
+PROPERTY_TYPE_MAP = {
+    canonical: sorted(list(variants)) for canonical, variants in PROPERTY_TYPE_VARIANTS.items()
+}
 
 PROP_TYPES = {
     "all": None,
     "m": "Mənzil",
-    "f": "Fərdi yaşayış evi",
+    "f": "Həyət evi",
     "q": "Obyekt / Ofis",
     "b": "Bağ evi",
     "t": "Torpaq",
@@ -12741,10 +12734,10 @@ def render_prop_step(chat_id, message=None):
     mk = types.InlineKeyboardMarkup()
     mk.add(
         types.InlineKeyboardButton("Mənzil", callback_data="fs|tp|m"),
-        types.InlineKeyboardButton("Fərdi ev", callback_data="fs|tp|f"),
+        types.InlineKeyboardButton("Həyət evi", callback_data="fs|tp|f"),
     )
     mk.add(
-        types.InlineKeyboardButton("Qeyri-yaşayış", callback_data="fs|tp|q"),
+        types.InlineKeyboardButton("Obyekt / Ofis", callback_data="fs|tp|q"),
         types.InlineKeyboardButton("Bağ evi", callback_data="fs|tp|b"),
     )
     mk.add(
