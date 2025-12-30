@@ -2444,21 +2444,34 @@ def ensure_user_exists(chat_id: int, username: str = "", full_name: str = "") ->
 
 
 def get_user_computed_status(chat_id: int) -> Optional[str]:
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT computed_status FROM users_with_status WHERE chat_id=?",
-        (chat_id,),
-    )
-    row = cur.fetchone()
-    conn.close()
-    if not row:
+    record = get_user_record(chat_id)
+    if not record:
         return None
-    return (
-        row["computed_status"]
-        if isinstance(row, dict) or hasattr(row, "keys")
-        else row[0]
-    )
+    if record.get("blocked") or record.get("is_blocked"):
+        return "BLOCKED"
+    if record.get("is_active") == 0:
+        return "BLOCKED"
+    if record.get("deleted_at"):
+        return "BLOCKED"
+    if record.get("approved") == 0:
+        return "PENDING"
+
+    if is_user_unlimited(chat_id):
+        return "ACTIVE"
+
+    now = datetime.utcnow()
+    demo_end = parse_dt_safe(record.get("demo_end_at") or record.get("demo_expires_at"))
+    if demo_end and demo_end > now:
+        return "ACTIVE"
+
+    effective = get_effective_expires_at(chat_id)
+    if effective and effective > now:
+        return "ACTIVE"
+
+    paid_until = parse_dt_safe(record.get("paid_until"))
+    if paid_until and paid_until > now:
+        return "ACTIVE"
+    return "EXPIRED"
 
 
 def is_user_active(chat_id: int) -> bool:
@@ -16252,6 +16265,7 @@ def admin_show_user_panel(
     computed_status = record.get("computed_status") or get_user_computed_status(
         target_id
     )
+    unlimited = is_user_unlimited(target_id)
     effective_raw = record.get("effective_expires_at")
     blocked_flag = bool(record.get("blocked") or record.get("is_blocked"))
     blocked_state = "Bəli" if blocked_flag else "Xeyr"
@@ -16265,6 +16279,7 @@ def admin_show_user_panel(
         f"📅 Bitmə tarixi: {format_effective_expiry_for_ui(effective_raw)}\n"
         f"⏳ Qalan gün: {format_remaining_days_for_ui(computed_status, effective_raw)}\n"
         f"🔖 Hesab statusu: {status_text}\n"
+        f"♾️ Limitsiz: {'Bəli' if unlimited else 'Xeyr'}\n"
         f"⛔ Bloklu: {blocked_state}\n"
         f"🆔 Ödəniş kodu: {subscription_payment_code(target_id)}"
     )
@@ -16332,6 +16347,13 @@ def admin_show_user_panel(
                 callback_data=f"admusr|block|{target_id}",
             )
         )
+
+    mk.add(
+        types.InlineKeyboardButton(
+            "❌ Limitsizi ləğv et" if unlimited else "♾️ Limitsiz et",
+            callback_data=f"admusr|unlimit|{target_id}",
+        )
+    )
 
     mk.add(
         types.InlineKeyboardButton(
@@ -16662,7 +16684,9 @@ def cb_subscription_control(c):
 def admin_extend_user_time(
     user_id: int, days: int, note: str = "admin_extend"
 ) -> Optional[datetime]:
-    logger.info("ADMIN EXTEND user_id=%s days=%s note=%s", user_id, days, note)
+    logger.info(
+        "besthome_bot: Admin extend user_id=%s days=%s note=%s", user_id, days, note
+    )
     ensure_subscription_record(user_id)
     sub = get_subscription(user_id) or {}
     base = resolve_extension_base(user_id)
@@ -16735,7 +16759,8 @@ def bulk_extend_user_time(
 
 
 def admin_grant_demo_days(user_id: int, days: int) -> Optional[datetime]:
-    logger.info("ADMIN DEMO GRANT user_id=%s days=%s", user_id, days)
+    logger.info("besthome_bot: Admin demo grant user_id=%s days=%s", user_id, days)
+    unblock_user(user_id)
     ensure_subscription_record(user_id)
     sub = get_subscription(user_id) or {}
     base = resolve_extension_base(user_id)
@@ -16746,6 +16771,36 @@ def admin_grant_demo_days(user_id: int, days: int) -> Optional[datetime]:
             user_id, "demo", new_exp, is_active=1, is_demo=1, note="admin_demo"
         )
     return new_exp
+
+
+def send_demo_update_notification(user_id: int, days: int, new_exp: Optional[datetime], granted: bool):
+    if not new_exp:
+        return
+    date_text = new_exp.strftime("%d.%m.%Y %H:%M")
+    if granted:
+        text = (
+            f"🎁 Sizə {days} günlük demo verildi. Pulsuz istifadə edə bilərsiniz.\n"
+            f"Yeni bitmə tarixi: {date_text}"
+        )
+    else:
+        text = (
+            f"⏳ Demo vaxtınız {days} gün uzadıldı. Yeni bitmə tarixi: {date_text}"
+        )
+    try:
+        bot.send_message(user_id, text)
+        logger.info(
+            "besthome_bot: User notification sent chat_id=%s type=%s days=%s expires=%s",
+            user_id,
+            "grant" if granted else "extend",
+            days,
+            date_text,
+        )
+    except Exception as e:
+        logger.warning(
+            "besthome_bot: Failed to notify user about demo change chat_id=%s error=%s",
+            user_id,
+            e,
+        )
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("admusr|"))
@@ -16772,10 +16827,14 @@ def cb_admin_user_panel_actions(c):
             safe_answer_callback_query(c.id, "⚠️ Gün sayı düzgün deyil.")
             return
         if action == "extend":
-            admin_extend_user_time(uid, days, note=f"admin_extend:{days}")
+            new_exp = admin_extend_user_time(uid, days, note=f"admin_extend:{days}")
+            if new_exp:
+                send_demo_update_notification(uid, days, new_exp, granted=False)
             safe_answer_callback_query(c.id, f"✅ {days} gün uzadıldı.")
         else:
-            admin_grant_demo_days(uid, days)
+            new_exp = admin_grant_demo_days(uid, days)
+            if new_exp:
+                send_demo_update_notification(uid, days, new_exp, granted=True)
             safe_answer_callback_query(c.id, f"✅ {days} gün demo verildi.")
     elif action == "block":
         blocked = block_user(uid)
@@ -16787,18 +16846,28 @@ def cb_admin_user_panel_actions(c):
         safe_answer_callback_query(
             c.id, "✅ Blokdan çıxarıldı." if unblocked else "⚠️ Blokda deyil."
         )
+    elif action == "unlimit":
+        sub = get_subscription(uid) or {}
+        if is_user_unlimited(uid, sub=sub):
+            toggled = disable_user_unlimited(uid)
+            safe_answer_callback_query(
+                c.id, "❌ Limitsiz söndürüldü" if toggled else "⚠️ Limitsiz deyil"
+            )
+        else:
+            set_user_unlimited(uid)
+            safe_answer_callback_query(c.id, "♾️ Limitsiz aktiv edildi")
     elif action == "delete":
         deactivated = deactivate_user(uid)
         safe_answer_callback_query(
             c.id,
-            "✅ İstifadəçi deaktiv edildi" if deactivated else "⚠️ Deaktiv etmək alınmadı",
+            "✅ İstifadəçi silindi" if deactivated else "⚠️ Silmək alınmadı",
         )
     else:
         safe_answer_callback_query(c.id)
         return
 
     admin_show_user_panel(c.message.chat.id, uid, message=c.message)
-    if list_type in {"expired", "pending", "demo"}:
+    if list_type in {"expired", "pending", "demo", "active", "blocked"}:
         page = get_admin_user_page(c.message.chat.id, list_type)
         show_all_users(
             c.message.chat.id,
@@ -17136,25 +17205,30 @@ def deactivate_user(user_id: int) -> bool:
     if not row:
         conn.close()
         return False
-    schema = detect_users_schema()
-    columns = schema.get("columns", set())
-    updates = []
-    params: List[Any] = []
-    if "is_active" in columns:
-        updates.append("is_active=0")
-    if "deleted_at" in columns:
-        updates.append("deleted_at=?")
-        params.append(datetime.utcnow().isoformat(sep=" ", timespec="seconds"))
-    if "last_error" in columns:
-        updates.append("last_error=NULL")
-    if not updates:
+    try:
+        cur.execute("DELETE FROM users WHERE chat_id=?", (user_id,))
+        cur.execute("DELETE FROM subscriptions WHERE chat_id=?", (user_id,))
+        conn.commit()
+    finally:
         conn.close()
-        return False
-    params.append(user_id)
-    cur.execute(f"UPDATE users SET {', '.join(updates)} WHERE chat_id=?", params)
-    conn.commit()
-    conn.close()
-    logger.info("User deletion chat_id=%s", user_id)
+
+    for state_map in (
+        user_state,
+        search_state,
+        customer_request_state,
+        agent_request_lookup_state,
+        admin_customer_request_state,
+        USER_STATE,
+        listing_sessions,
+        user_stats_filter,
+        today_results_cache,
+    ):
+        try:
+            state_map.pop(user_id, None)
+        except Exception:
+            pass
+
+    logger.info("besthome_bot: User permanently deleted chat_id=%s", user_id)
     return True
 
 
@@ -17189,6 +17263,8 @@ def block_user(chat_id: int) -> bool:
     conn.commit()
     conn.close()
 
+    logger.info("besthome_bot: User blocked chat_id=%s", chat_id)
+
     try:
         bot.send_message(chat_id, BLOCKED_MESSAGE_TEXT)
     except Exception:
@@ -17216,12 +17292,15 @@ def unblock_user(chat_id: int) -> bool:
         updates.append("is_blocked=0")
     if "blocked_at" in columns:
         updates.append("blocked_at=NULL")
+    if "is_active" in columns:
+        updates.append("is_active=1")
     if "last_error" in columns:
         updates.append("last_error=NULL")
     params.append(chat_id)
     cur.execute(f"UPDATE users SET {', '.join(updates)} WHERE chat_id=?", params)
     conn.commit()
     conn.close()
+    logger.info("besthome_bot: User unblocked chat_id=%s", chat_id)
     return True
 
 
@@ -17240,19 +17319,80 @@ def restore_user_to_pending(chat_id: int):
     update_user_status(chat_id, STATUS_PENDING)
 
 
-def set_user_unlimited(chat_id: int):
+def is_user_unlimited(chat_id: int, sub: Optional[dict] = None) -> bool:
+    sub = sub or get_subscription(chat_id)
+    if not sub:
+        return False
+    note = (sub.get("last_payment_note") or "").lower()
+    plan = (sub.get("plan") or "").lower()
+    is_active = bool(sub.get("is_active"))
+    if not is_active:
+        return False
+    return plan == "unlimited" or note.startswith("unlimited:on")
+
+
+def set_user_unlimited(chat_id: int) -> str:
+    ensure_subscription_record(chat_id)
+    sub = get_subscription(chat_id) or {}
+    prev_plan = sub.get("plan") or ""
+    prev_exp = parse_dt_safe(sub.get("expires_at"))
+    prev_is_demo = int(sub.get("is_demo") or 0)
+    note = (
+        f"unlimited:on:{prev_plan}:{prev_exp.isoformat() if prev_exp else ''}:{prev_is_demo}"
+    )
     insert_subscription(
         chat_id,
-        "free",
+        "unlimited",
         datetime.utcnow() + timedelta(days=3650),
         is_demo=0,
-        note="admin_free",
+        note=note,
     )
     conn = get_local_conn()
     cur = conn.cursor()
-    cur.execute("UPDATE users SET approved=1, blocked=0 WHERE chat_id=?", (chat_id,))
+    cur.execute(
+        "UPDATE users SET approved=1, blocked=0, is_active=1, last_error=NULL WHERE chat_id=?",
+        (chat_id,),
+    )
     conn.commit()
     conn.close()
+    logger.info("besthome_bot: Unlimited enabled chat_id=%s", chat_id)
+    return note
+
+
+def disable_user_unlimited(chat_id: int) -> bool:
+    ensure_subscription_record(chat_id)
+    sub = get_subscription(chat_id) or {}
+    if not is_user_unlimited(chat_id, sub=sub):
+        return False
+    note = sub.get("last_payment_note") or ""
+    prev_plan = ""
+    prev_exp_raw = ""
+    prev_demo = 0
+    if note.startswith("unlimited:on"):
+        parts = note.split(":", 4)
+        if len(parts) >= 3:
+            prev_plan = parts[2]
+        if len(parts) >= 4:
+            prev_exp_raw = parts[3]
+        if len(parts) >= 5:
+            try:
+                prev_demo = int(parts[4])
+            except Exception:
+                prev_demo = 0
+
+    prev_exp = parse_dt_safe(prev_exp_raw)
+    target_plan = prev_plan or "manual"
+    is_active = 1 if prev_exp else 0
+    set_subscription(
+        chat_id,
+        target_plan,
+        prev_exp,
+        is_active=is_active,
+        is_demo=prev_demo,
+        note="unlimited:off",
+    )
+    logger.info("besthome_bot: Unlimited disabled chat_id=%s", chat_id)
+    return True
 
 
 def switch_user_to_paid_flow(chat_id: int):
