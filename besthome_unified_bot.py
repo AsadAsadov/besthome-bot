@@ -501,6 +501,7 @@ FINANCIAL_REPORTS_MENU = [
 ADMIN_PANEL_PAGE1 = [
     TEXTS_AZ["admin_panel_pending_listings"],
     TEXTS_AZ["admin_panel_stats"],
+    "📊 QR Statistikası",
     TEXTS_AZ["admin_panel_customer_requests"],
     FINANCIAL_REPORTS_BUTTON,
     TEXTS_AZ["admin_panel_agents_notify"],
@@ -527,6 +528,21 @@ ADMIN_PANEL_ACTION_KEYS = {
     text: str(idx) for idx, text in enumerate(ADMIN_PANEL_ACTIONS)
 }
 ADMIN_PANEL_ACTION_LOOKUP = {v: k for k, v in ADMIN_PANEL_ACTION_KEYS.items()}
+
+QR_SOURCE_AREAS = {
+    "mehle": "Məhəllə",
+    "nerimanov": "Nərimanov",
+    "xetai": "Xətai",
+    "28may": "28 May",
+    "genclik": "Gənclik",
+}
+
+QR_STATS_RANGE_LABELS = {
+    "24h": "Son 24 saat",
+    "7d": "Son 7 gün",
+    "30d": "Son 30 gün",
+    "all": "Ümumi",
+}
 
 # Pagination
 PAGE_SIZE = 20
@@ -13562,10 +13578,13 @@ def build_admin_panel_keyboard(chat_id: int, page: int = 1):
     for i in range(0, len(buttons), 2):
         row_buttons = []
         for btn_text in buttons[i : i + 2]:
+            callback_data = f"adm_act:{ADMIN_PANEL_ACTION_KEYS[btn_text]}"
+            if btn_text == "📊 QR Statistikası":
+                callback_data = "admin_qr_stats"
             row_buttons.append(
                 types.InlineKeyboardButton(
                     btn_text,
-                    callback_data=f"adm_act:{ADMIN_PANEL_ACTION_KEYS[btn_text]}",
+                    callback_data=callback_data,
                 )
             )
         mk.row(*row_buttons)
@@ -13616,6 +13635,8 @@ def _handle_admin_panel_action(chat_id: int, action_text: str):
         show_admin_stats(chat_id)
     elif action_text == TEXTS_AZ["admin_panel_customer_requests"]:
         show_customer_requests_overview(chat_id, "day")
+    elif action_text == "📊 QR Statistikası":
+        send_qr_stats_menu(chat_id)
     elif action_text == FINANCIAL_REPORTS_BUTTON:
         send_financial_reports_menu(chat_id)
     elif action_text == TEXTS_AZ["admin_panel_agents_notify"]:
@@ -13654,12 +13675,16 @@ def _handle_admin_panel_action(chat_id: int, action_text: str):
     func=lambda c: c.data.startswith("adm_act:")
     or c.data.startswith("adm_nav:")
     or c.data.startswith("adm_back:")
+    or c.data == "admin_qr_stats"
 )
 @callback_guard
 def cb_admin_panel(c):
     if not is_admin(c.from_user.id):
         return
     chat_id = c.message.chat.id
+    if c.data == "admin_qr_stats":
+        send_qr_stats_menu(chat_id)
+        return
     if c.data.startswith("adm_nav:"):
         try:
             page = int(c.data.split(":", 1)[1])
@@ -13677,6 +13702,134 @@ def cb_admin_panel(c):
         action_text = ADMIN_PANEL_ACTION_LOOKUP.get(action_key)
         if action_text:
             _handle_admin_panel_action(chat_id, action_text)
+
+
+def format_qr_area_label(area_code: Optional[str]) -> str:
+    fallback = str(area_code or "-")
+    return QR_SOURCE_AREAS.get(str(area_code or "").strip().lower(), fallback)
+
+
+def get_qr_stats_start_time(range_key: str) -> Optional[datetime]:
+    now = datetime.now(timezone.utc)
+    if range_key == "24h":
+        return now - timedelta(hours=24)
+    if range_key == "7d":
+        return now - timedelta(days=7)
+    if range_key == "30d":
+        return now - timedelta(days=30)
+    return None
+
+
+def fetch_qr_stats(range_key: str):
+    rows = []
+    total = 0
+    conn = None
+    try:
+        start_time = get_qr_stats_start_time(range_key)
+        conn = get_db()
+        cur = conn.cursor()
+        params: List[Any] = []
+        base_where = "source_type='qr' AND source_area IS NOT NULL"
+        time_filter = ""
+        if start_time:
+            time_filter = " AND datetime(created_at) >= datetime(?)"
+            params.append(start_time.isoformat())
+
+        cur.execute(
+            f"SELECT source_area, COUNT(*) as cnt FROM users WHERE {base_where}{time_filter} "
+            "GROUP BY source_area ORDER BY cnt DESC",
+            params,
+        )
+        rows = cur.fetchall()
+
+        cur.execute(
+            f"SELECT COUNT(*) FROM users WHERE {base_where}{time_filter}",
+            params,
+        )
+        total_row = cur.fetchone()
+        total = int(total_row[0]) if total_row else 0
+    except Exception:
+        logger.exception("Failed to fetch QR stats range=%s", range_key)
+    finally:
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+    return rows, total
+
+
+def build_qr_stats_menu() -> types.InlineKeyboardMarkup:
+    mk = types.InlineKeyboardMarkup()
+    mk.row(
+        types.InlineKeyboardButton("📅 Son 24 saat", callback_data="qr_stats:24h"),
+        types.InlineKeyboardButton("📅 Son 7 gün", callback_data="qr_stats:7d"),
+    )
+    mk.row(
+        types.InlineKeyboardButton("📅 Son 30 gün", callback_data="qr_stats:30d"),
+        types.InlineKeyboardButton("📊 Ümumi", callback_data="qr_stats:all"),
+    )
+    mk.add(
+        types.InlineKeyboardButton(
+            "🏆 Ən çox lead gətirən ərazi", callback_data="qr_stats:top"
+        )
+    )
+    return mk
+
+
+def send_qr_stats_menu(chat_id: int):
+    if not is_admin(chat_id):
+        return
+    mk = build_qr_stats_menu()
+    bot.send_message(chat_id, "📊 QR Statistikası", reply_markup=mk)
+
+
+def send_qr_stats(chat_id: int, range_key: str):
+    if not is_admin(chat_id):
+        return
+    rows, total = fetch_qr_stats(range_key)
+    label = QR_STATS_RANGE_LABELS.get(range_key, QR_STATS_RANGE_LABELS["all"])
+    lines = [f"📊 QR Statistikası ({label})", ""]
+    if rows:
+        for row in rows:
+            area_code = row["source_area"] if "source_area" in row.keys() else row[0]
+            cnt = int(row["cnt"] if "cnt" in row.keys() else row[1])
+            lines.append(f"📍 {format_qr_area_label(area_code)}: {cnt}")
+    else:
+        lines.append("Məlumat tapılmadı.")
+    lines.append("")
+    lines.append(f"👥 Cəmi QR ilə gələnlər: {total}")
+    bot.send_message(chat_id, "\n".join(lines))
+
+
+def send_qr_top_areas(chat_id: int):
+    if not is_admin(chat_id):
+        return
+    rows, _ = fetch_qr_stats("all")
+    lines = ["🏆 Ən çox lead gətirən ərazi", ""]
+    medals = ["🥇", "🥈", "🥉"]
+    if not rows:
+        lines.append("Məlumat tapılmadı.")
+    else:
+        for idx, row in enumerate(rows[:3]):
+            medal = medals[idx] if idx < len(medals) else f"{idx + 1}"
+            area_code = row["source_area"] if "source_area" in row.keys() else row[0]
+            cnt = int(row["cnt"] if "cnt" in row.keys() else row[1])
+            lines.append(f"{medal} {format_qr_area_label(area_code)} — {cnt} istifadəçi")
+    bot.send_message(chat_id, "\n".join(lines))
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("qr_stats:"))
+@callback_guard
+def cb_qr_stats(c):
+    if not is_admin(c.from_user.id):
+        return
+    chat_id = c.message.chat.id
+    action = c.data.split(":", 1)[1]
+    if action == "top":
+        send_qr_top_areas(chat_id)
+    else:
+        send_qr_stats(chat_id, action)
 
 
 def admin_customer_requests_access_step(message):
