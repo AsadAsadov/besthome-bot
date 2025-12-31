@@ -2332,7 +2332,7 @@ def extract_listing_datetime(row: dict) -> Optional[datetime]:
         "Elanin_tarixi",
         "added_at",
     ):
-        v = row.get(key)
+        v = _row_value_safe(row, key)
         if v:
             dt = parse_dt_safe(v)
             if dt:
@@ -2707,9 +2707,11 @@ def show_customer_requests_access_admin(
         text_lines.append("🟡 Aktiv icazə verilmiş istifadəçi yoxdur.")
     else:
         for row in users:
-            status_txt = "🟢 Aktiv" if row.get("enabled") else "🔴 Deaktiv"
-            name = row.get("full_name") or "-"
-            text_lines.append(f"🆔 {row.get('user_id')} | 👤 {name} | {status_txt}")
+            status_txt = "🟢 Aktiv" if _row_value_safe(row, "enabled") else "🔴 Deaktiv"
+            name = _row_value_safe(row, "full_name") or "-"
+            text_lines.append(
+                f"🆔 {_row_value_safe(row, 'user_id')} | 👤 {name} | {status_txt}"
+            )
     text = "\n".join(text_lines)
 
     mk = types.InlineKeyboardMarkup()
@@ -2719,10 +2721,10 @@ def show_customer_requests_access_admin(
         )
     )
     for row in users:
-        user_id = row.get("user_id")
+        user_id = _row_value_safe(row, "user_id")
         if not user_id:
             continue
-        if row.get("enabled"):
+        if _row_value_safe(row, "enabled"):
             mk.row(
                 types.InlineKeyboardButton(
                     "🔴 Söndür", callback_data=f"cust_req_access_disable:{user_id}"
@@ -2763,7 +2765,7 @@ def get_first_start_flag(chat_id: int) -> bool:
     conn.close()
     if not row:
         return True
-    value = row[0] if not isinstance(row, dict) else row.get("is_first_start")
+    value = _row_value_safe(row, "is_first_start", row[0] if len(row) > 0 else None)
     if value is None:
         return False
     return bool(value)
@@ -5334,7 +5336,12 @@ def register_or_update_user_if_needed(message, start_arg: str):
         is_first_start = (
             bool(row["is_first_start"]) if row["is_first_start"] is not None else False
         )
-        demo_end_raw = row.get("demo_end_at") or row.get("demo_expires_at")
+        demo_end_raw = None
+        if row:
+            if "demo_end_at" in row and row["demo_end_at"]:
+                demo_end_raw = row["demo_end_at"]
+            elif "demo_expires_at" in row and row["demo_expires_at"]:
+                demo_end_raw = row["demo_expires_at"]
         demo_expiry = parse_dt_safe(demo_end_raw)
         if demo_expiry and demo_expiry > datetime.utcnow():
             remaining = demo_expiry - datetime.utcnow()
@@ -5344,7 +5351,7 @@ def register_or_update_user_if_needed(message, start_arg: str):
                 "🎁 Demo aktivdir. \n"
                 f"Bitmə tarixi: {demo_expiry.strftime('%d.%m.%Y %H:%M')} (qalıb {remaining_days} gün {remaining_hours} saat)"
             )
-        elif row.get("demo_used"):
+        elif "demo_used" in row and row["demo_used"]:
             demo_info_text = "🎁 Demo müddətiniz bitib. Ödəniş menyusundan yeniləyə bilərsiniz."
 
     if is_first_time:
@@ -5520,7 +5527,7 @@ def check_request_rate_limit(chat_id: int) -> Optional[int]:
     if not row:
         return None
     last_dt = parse_dt_safe(
-        row[0] if not isinstance(row, dict) else row.get("created_at")
+        _row_value_safe(row, "created_at", row[0] if len(row) > 0 else None)
     )
     if not last_dt:
         return None
@@ -5539,7 +5546,7 @@ def persist_customer_request(chat_id: int, data: dict) -> Optional[int]:
         try:
             cur.execute("PRAGMA table_info(customer_requests)")
             return any(
-                (row[1] if not isinstance(row, dict) else row.get("name"))
+                (row[1] if not isinstance(row, dict) else _row_value_safe(row, "name"))
                 == "created_at"
                 for row in cur.fetchall()
             )
@@ -5587,21 +5594,21 @@ def persist_customer_request(chat_id: int, data: dict) -> Optional[int]:
 
 
 def format_customer_request_card(row: dict) -> str:
-    req_type = row.get("request_type")
+    req_type = _row_value_safe(row, "request_type")
     req_txt = "Alış" if req_type == "buy" else "Kirayə"
-    created_raw = row.get("created_at")
+    created_raw = _row_value_safe(row, "created_at")
     created_dt = parse_dt_safe(created_raw)
     date_txt = created_dt.strftime("%d.%m.%Y") if created_dt else "-"
 
     lines = [
         "━━━━━━━━━━━━━━━━━━",
         "👤 Müştəri istəyi",
-        f"📍 Rayon: {row.get('rayon') or '-'}",
+        f"📍 Rayon: {_row_value_safe(row, 'rayon') or '-'}",
         f"🏠 Tip: {req_txt}",
-        f"🚪 Otaq: {row.get('rooms') or '-'}",
-        f"💰 Büdcə: {row.get('budget') or '-'}",
-        f"📝 Qeyd: {row.get('notes') or '-'}",
-        f"📞 Əlaqə: {row.get('phone') or '-'}",
+        f"🚪 Otaq: {_row_value_safe(row, 'rooms') or '-'}",
+        f"💰 Büdcə: {_row_value_safe(row, 'budget') or '-'}",
+        f"📝 Qeyd: {_row_value_safe(row, 'notes') or '-'}",
+        f"📞 Əlaqə: {_row_value_safe(row, 'phone') or '-'}",
         f"📅 Tarix: {date_txt}",
         "━━━━━━━━━━━━━━━━━━",
     ]
@@ -5737,20 +5744,22 @@ def ensure_customer_request_action_allowed(admin_chat_id: int, req_id: str) -> b
 
 
 def format_agent_request_card(row: dict) -> str:
-    req_type = row.get("request_type")
+    req_type = _row_value_safe(row, "request_type")
     req_txt = "Alış" if req_type == "buy" else "Kirayə"
-    created_raw = row.get("created_at") or row.get("request_created_at")
+    created_raw = _row_value_safe(row, "created_at") or _row_value_safe(
+        row, "request_created_at"
+    )
     created_dt = parse_dt_safe(created_raw)
     date_txt = created_dt.strftime("%d.%m.%Y") if created_dt else "-"
 
     lines = [
         "👥 Müştəri istəyi",
-        f"📍 Rayon: {row.get('rayon') or '-'}",
+        f"📍 Rayon: {_row_value_safe(row, 'rayon') or '-'}",
         f"🏠 Tip: {req_txt}",
-        f"🚪 Otaq: {row.get('rooms') or '-'}",
-        f"💰 Büdcə: {row.get('budget') or '-'}",
-        f"📝 Qeyd: {row.get('notes') or '-'}",
-        f"📞 Əlaqə: {row.get('phone') or '-'}",
+        f"🚪 Otaq: {_row_value_safe(row, 'rooms') or '-'}",
+        f"💰 Büdcə: {_row_value_safe(row, 'budget') or '-'}",
+        f"📝 Qeyd: {_row_value_safe(row, 'notes') or '-'}",
+        f"📞 Əlaqə: {_row_value_safe(row, 'phone') or '-'}",
         f"📅 Tarix: {date_txt}",
     ]
     return "\n".join(lines)
@@ -5968,7 +5977,7 @@ def add_agent_notification(agent_chat_id: int, request_id: int) -> bool:
 def notify_agents_for_request(req_row: Optional[dict]):
     if not req_row:
         return
-    rayon = (req_row.get("rayon") or "").strip()
+    rayon = (_row_value_safe(req_row, "rayon") or "").strip()
     if not rayon:
         return
     conn = get_local_conn()
@@ -5988,7 +5997,7 @@ def notify_agents_for_request(req_row: Optional[dict]):
     for agent_id in agent_rows:
         if not has_customer_requests_access(agent_id):
             continue
-        if add_agent_notification(agent_id, req_row.get("id")):
+        if add_agent_notification(agent_id, _row_value_safe(req_row, "id")):
             try:
                 bot.send_message(
                     agent_id,
@@ -6031,7 +6040,7 @@ def fetch_active_customer_request_rules() -> List[dict]:
 def customer_request_matches_rule(req_row: dict, rule: dict) -> bool:
     if not req_row or not rule:
         return False
-    req_type = req_row.get("request_type")
+    req_type = _row_value_safe(req_row, "request_type")
     rule_type = rule.get("request_type")
     if rule_type and req_type != rule_type:
         return False
@@ -6039,7 +6048,7 @@ def customer_request_matches_rule(req_row: dict, rule: dict) -> bool:
     rule_rayons = [
         r.strip() for r in (rule.get("rayons") or "").split(",") if r.strip()
     ]
-    req_rayon = (req_row.get("rayon") or "").strip().lower()
+    req_rayon = (_row_value_safe(req_row, "rayon") or "").strip().lower()
     if rule_rayons:
         if not req_rayon:
             return False
@@ -6047,7 +6056,7 @@ def customer_request_matches_rule(req_row: dict, rule: dict) -> bool:
         if not match_any:
             return False
 
-    price_val = parse_request_price(req_row.get("budget"))
+    price_val = parse_request_price(_row_value_safe(req_row, "budget"))
     min_val = rule.get("price_min")
     max_val = rule.get("price_max")
     if min_val is not None or max_val is not None:
@@ -6060,7 +6069,7 @@ def customer_request_matches_rule(req_row: dict, rule: dict) -> bool:
 
     rule_rooms = (rule.get("rooms") or "").strip()
     if rule_rooms:
-        req_rooms = parse_int_from_text(req_row.get("rooms"))
+        req_rooms = parse_int_from_text(_row_value_safe(req_row, "rooms"))
         if req_rooms is None:
             return False
         if "+" in rule_rooms:
@@ -6074,7 +6083,7 @@ def customer_request_matches_rule(req_row: dict, rule: dict) -> bool:
 
     keyword = (rule.get("keyword") or "").strip().lower()
     if keyword:
-        notes = (req_row.get("notes") or "").lower()
+        notes = (_row_value_safe(req_row, "notes") or "").lower()
         if keyword not in notes:
             return False
 
@@ -6098,10 +6107,10 @@ def add_customer_request_alert(user_id: int, rule_id: int, request_id: int) -> b
 
 
 def format_customer_request_alert_text(req_row: dict) -> str:
-    req_type = format_request_rule_type(req_row.get("request_type"))
-    rayon = req_row.get("rayon") or "-"
-    budget = req_row.get("budget") or "-"
-    rooms = req_row.get("rooms") or "-"
+    req_type = format_request_rule_type(_row_value_safe(req_row, "request_type"))
+    rayon = _row_value_safe(req_row, "rayon") or "-"
+    budget = _row_value_safe(req_row, "budget") or "-"
+    rooms = _row_value_safe(req_row, "rooms") or "-"
     return (
         "🆕 Yeni müştəri istəyi tapıldı:\n"
         f"📍 {rayon} | {req_type}\n"
@@ -6122,12 +6131,15 @@ def notify_users_for_customer_request(req_row: Optional[dict]):
             continue
         if not customer_request_matches_rule(req_row, rule):
             continue
-        if not add_customer_request_alert(user_id, rule.get("id"), req_row.get("id")):
+        if not add_customer_request_alert(
+            user_id, rule.get("id"), _row_value_safe(req_row, "id")
+        ):
             continue
         mk = types.InlineKeyboardMarkup()
         mk.row(
             types.InlineKeyboardButton(
-                "👁 Müştəriyə bax", callback_data=f"cr_alert_view:{req_row.get('id')}"
+                "👁 Müştəriyə bax",
+                callback_data=f"cr_alert_view:{_row_value_safe(req_row, 'id')}",
             ),
             types.InlineKeyboardButton(
                 "🛑 Bu qaydanı dayandır",
@@ -6137,7 +6149,7 @@ def notify_users_for_customer_request(req_row: Optional[dict]):
         mk.add(
             types.InlineKeyboardButton(
                 "🗑 Bildirişi sil",
-                callback_data=f"cr_alert_delete:{req_row.get('id')}:{rule.get('id')}",
+                callback_data=f"cr_alert_delete:{_row_value_safe(req_row, 'id')}:{rule.get('id')}",
             )
         )
         try:
@@ -6173,7 +6185,7 @@ def get_keyword_alert_last_checked(key: str) -> Optional[datetime]:
     conn.close()
     if not row:
         return None
-    last_raw = row[0] if not isinstance(row, dict) else row.get("last_checked_at")
+    last_raw = _row_value_safe(row, "last_checked_at", row[0] if len(row) > 0 else None)
     if not last_raw:
         return None
     try:
@@ -6245,11 +6257,11 @@ def build_listing_unique_key(ev: dict, source: str) -> Optional[str]:
 
 def build_request_text_blob(req_row: dict) -> str:
     parts = [
-        req_row.get("request_type"),
-        req_row.get("rayon"),
-        req_row.get("rooms"),
-        req_row.get("budget"),
-        req_row.get("notes"),
+        _row_value_safe(req_row, "request_type"),
+        _row_value_safe(req_row, "rayon"),
+        _row_value_safe(req_row, "rooms"),
+        _row_value_safe(req_row, "budget"),
+        _row_value_safe(req_row, "notes"),
     ]
     return normalize_text(" ".join([str(p) for p in parts if p]))
 
@@ -6430,8 +6442,8 @@ def process_keyword_alerts_for_request(req_row: dict):
     if not alerts:
         return
     request_text = build_request_text_blob(req_row)
-    request_rayon = req_row.get("rayon") or ""
-    req_id = req_row.get("id")
+    request_rayon = _row_value_safe(req_row, "rayon") or ""
+    req_id = _row_value_safe(req_row, "id")
     try:
         req_id = int(req_id)
     except Exception:
@@ -6506,10 +6518,10 @@ def process_keyword_alerts_for_existing_requests(alert_id: int):
         if not keyword_matches_text(keyword_raw, request_text):
             continue
         if not keyword_region_matches(
-            req_row.get("rayon") or "", alert.get("regions") or ""
+            _row_value_safe(req_row, "rayon") or "", alert.get("regions") or ""
         ):
             continue
-        req_id = req_row.get("id")
+        req_id = _row_value_safe(req_row, "id")
         try:
             req_id = int(req_id)
         except Exception:
@@ -8618,7 +8630,7 @@ def return_to_main_menu(chat_id: int):
 
 
 def format_saved_search_entry(row: dict) -> str:
-    op = row.get("operation")
+    op = _row_value_safe(row, "operation")
     if op == "sale":
         op_txt = "Satılır"
     elif op == "rent":
@@ -8628,12 +8640,12 @@ def format_saved_search_entry(row: dict) -> str:
 
     parts = [f"💼 {op_txt}"]
 
-    rooms = row.get("rooms")
+    rooms = _row_value_safe(row, "rooms")
     if rooms:
         parts.append(f"🚪 {rooms} otaq")
 
-    price_min = row.get("price_min")
-    price_max = row.get("price_max")
+    price_min = _row_value_safe(row, "price_min")
+    price_max = _row_value_safe(row, "price_max")
     if price_min is not None or price_max is not None:
         if price_min and price_max:
             parts.append(f"💰 {price_min}-{price_max}")
@@ -8642,12 +8654,12 @@ def format_saved_search_entry(row: dict) -> str:
         elif price_max:
             parts.append(f"💰 0-{price_max}")
 
-    rayon = row.get("rayon")
+    rayon = _row_value_safe(row, "rayon")
     if rayon:
         rayons = [r.strip() for r in str(rayon).split(",") if r.strip()]
         parts.append(f"📍 {', '.join(rayons)}")
 
-    prop_type = row.get("prop_type")
+    prop_type = _row_value_safe(row, "prop_type")
     if prop_type:
         parts.append(f"🏠 {prop_type}")
 
@@ -9005,8 +9017,8 @@ def send_criteria_list(chat_id: int, message=None):
 
     for row in rows:
         row = row or {}
-        cid = row.get("id")
-        status_flag = row.get("is_active", 1)
+        cid = _row_value_safe(row, "id")
+        status_flag = _row_value_safe(row, "is_active", 1)
         status_txt = "🟢 Aktiv" if status_flag else "⚪️ Deaktiv"
         descr = format_saved_search_entry(row)
         mk.add(
@@ -9232,7 +9244,7 @@ def toggle_keyword_alert(user_id: int, alert_id: int) -> bool:
     if not row:
         conn.close()
         return False
-    is_active = row[0] if not isinstance(row, dict) else row.get("is_active")
+    is_active = _row_value_safe(row, "is_active", row[0] if len(row) > 0 else None)
     new_val = 0 if str(is_active) in {"1", "True", "true"} else 1
     cur.execute(
         "UPDATE keyword_alerts SET is_active=? WHERE id=? AND user_id=?",
@@ -9257,11 +9269,11 @@ def delete_keyword_alert(user_id: int, alert_id: int) -> bool:
 
 
 def format_keyword_alert_entry(row: dict) -> str:
-    keyword = row.get("keywords") or "-"
-    regions = row.get("regions") or "Hamısı"
+    keyword = _row_value_safe(row, "keywords") or "-"
+    regions = _row_value_safe(row, "regions") or "Hamısı"
     status_txt = (
         "🟢 Aktiv"
-        if str(row.get("is_active", 1)) in {"1", "True", "true"}
+        if str(_row_value_safe(row, "is_active", 1)) in {"1", "True", "true"}
         else "⚪️ Deaktiv"
     )
     return f"{status_txt} | 🔎 {keyword} | 📍 {regions}"
@@ -9331,7 +9343,7 @@ def show_keyword_alert_list(chat_id: int, page: int = 1, message=None):
         pass
 
     for row in rows:
-        alert_id = row.get("id")
+        alert_id = _row_value_safe(row, "id")
         entry = format_keyword_alert_entry(row)
         mk_row = types.InlineKeyboardMarkup()
         mk_row.row(
@@ -9512,15 +9524,15 @@ def show_keyword_alert_hits(chat_id: int, period: str, page: int = 1, message=No
     view_buttons = []
     lines = []
     for idx, row in enumerate(rows, start=1):
-        target_type = row.get("target_type")
-        target_id = row.get("target_id")
-        keywords = row.get("keywords") or "-"
+        target_type = _row_value_safe(row, "target_type")
+        target_id = _row_value_safe(row, "target_id")
+        keywords = _row_value_safe(row, "keywords") or "-"
         target_label = "Elan" if target_type == "listing" else "Sorğu"
         lines.append(f"{idx}. {target_label} #{target_id} | 🔎 {keywords}")
         view_buttons.append(
             types.InlineKeyboardButton(
                 f"👁 {target_id}",
-                callback_data=f"kw_hit_view:{target_type}:{row.get('source') or 'main'}:{target_id}",
+                callback_data=f"kw_hit_view:{target_type}:{_row_value_safe(row, 'source') or 'main'}:{target_id}",
             )
         )
     if view_buttons:
@@ -14966,7 +14978,7 @@ def show_user_archived_requests(chat_id: int, page: int = 1, message=None):
         mk_card.add(
             types.InlineKeyboardButton(
                 "♻️ Arxivdən çıxar",
-                callback_data=f"cust_req_unarch:{row.get('id')}",
+                callback_data=f"cust_req_unarch:{_row_value_safe(row, 'id')}",
             )
         )
         try:
@@ -15202,11 +15214,11 @@ def fetch_customer_request_alerts(user_id: int, period: str, page: int = 1):
 
 
 def format_customer_request_alert_line(idx: int, row: dict) -> str:
-    req_type = format_request_type(row.get("request_type"))
-    rayon = row.get("rayon") or "-"
-    rooms = row.get("rooms") or "-"
-    budget = row.get("budget") or "-"
-    req_id = row.get("request_id") or row.get("id") or "-"
+    req_type = format_request_type(_row_value_safe(row, "request_type"))
+    rayon = _row_value_safe(row, "rayon") or "-"
+    rooms = _row_value_safe(row, "rooms") or "-"
+    budget = _row_value_safe(row, "budget") or "-"
+    req_id = _row_value_safe(row, "request_id") or _row_value_safe(row, "id") or "-"
     return (
         f"{idx}. 🆔 {req_id} | {req_type} | 📍 {rayon} | " f"🚪 {rooms} | 💰 {budget}"
     )
@@ -15273,8 +15285,8 @@ def show_customer_request_alerts_inbox(
     view_buttons = []
     for idx, row in enumerate(rows, start=1):
         header += format_customer_request_alert_line(idx, row) + "\n"
-        req_id = row.get("request_id") or row.get("id")
-        rule_id = row.get("rule_id")
+        req_id = _row_value_safe(row, "request_id") or _row_value_safe(row, "id")
+        rule_id = _row_value_safe(row, "rule_id")
         if req_id is not None:
             view_buttons.append(
                 types.InlineKeyboardButton(
@@ -19539,7 +19551,7 @@ def cb_customer_request_alert_view(c):
         except Exception:
             rule_id = None
     req_row = fetch_customer_request_by_id(req_id)
-    if not req_row or req_row.get("status") == "deleted":
+    if not req_row or _row_value_safe(req_row, "status") == "deleted":
         bot.send_message(chat_id, "⚠️ Sorğu tapılmadı.")
         return
     extra_buttons = [
@@ -19770,7 +19782,7 @@ def cb_agent_interest(c):
             pass
         return
     req_row = fetch_customer_request_by_id(req_id)
-    if not req_row or req_row.get("status") not in {None, "active"}:
+    if not req_row or _row_value_safe(req_row, "status") not in {None, "active"}:
         try:
             bot.answer_callback_query(c.id, "⚠️ Sorğu tapılmadı və ya aktiv deyil")
         except Exception:
@@ -19785,7 +19797,8 @@ def cb_agent_interest(c):
             bot.send_message(chat_id, "👥 Yeni müştəri siyahıya əlavə edildi:")
             mk_card = types.InlineKeyboardMarkup()
             wa_url = make_whatsapp_url(
-                req_row.get("phone"), "Salam, müştəri sorğunuz ilə maraqlanıram."
+                _row_value_safe(req_row, "phone"),
+                "Salam, müştəri sorğunuz ilə maraqlanıram.",
             )
             if wa_url:
                 mk_card.add(types.InlineKeyboardButton("💬 WhatsApp yaz", url=wa_url))
@@ -20844,9 +20857,9 @@ def compute_besthome_overview_stats():
 
     for row in rows:
         row["__source"] = "main"
-        approved_raw = row.get("approved")
+        approved_raw = _row_value_safe(row, "approved")
         if approved_raw is None:
-            approved_raw = row.get("is_approved")
+            approved_raw = _row_value_safe(row, "is_approved")
         if approved_raw is not None:
             if str(approved_raw).lower() in {
                 "0",
@@ -20865,7 +20878,9 @@ def compute_besthome_overview_stats():
             stats["last_24h"] += 1
         if ev_dt >= today_start:
             stats["today_total"] += 1
-            op = normalize_operation_value(row.get("operation") or row.get("Emeliyyat"))
+            op = normalize_operation_value(
+                _row_value_safe(row, "operation") or _row_value_safe(row, "Emeliyyat")
+            )
             if op == "sale":
                 stats["today_sale"] += 1
             elif op == "rent":
@@ -21274,9 +21289,13 @@ def create_flask_app():
                 blob = normalize_text(
                     " ".join(
                         [
-                            str(row.get("summary") or ""),
-                            str(row.get("rayon") or ""),
-                            str(row.get("agent_name") or row.get("name") or ""),
+                            str(_row_value_safe(row, "summary") or ""),
+                            str(_row_value_safe(row, "rayon") or ""),
+                            str(
+                                _row_value_safe(row, "agent_name")
+                                or _row_value_safe(row, "name")
+                                or ""
+                            ),
                         ]
                     )
                 )
@@ -21284,9 +21303,9 @@ def create_flask_app():
                     continue
                 if district and district not in blob:
                     continue
-                if op and normalize_operation_value(row.get("operation")) != op:
+                if op and normalize_operation_value(_row_value_safe(row, "operation")) != op:
                     continue
-                if phone and phone not in str(row.get("phone") or ""):
+                if phone and phone not in str(_row_value_safe(row, "phone") or ""):
                     continue
                 filtered.append(row)
 
