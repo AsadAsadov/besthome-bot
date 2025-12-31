@@ -205,6 +205,23 @@ today_results_cache: Dict[int, Dict[str, Any]] = {}
 logger = logging.getLogger("besthome_bot")
 
 
+@bot.message_handler(commands=["start"])
+def handle_start(message):
+    # IMPORTANT: this handler must NOT call ensure_allowed
+    chat_id = message.chat.id
+
+    # parse start parameter safely
+    start_arg = message.get_args().strip().lower()
+
+    logger.info("START HANDLER HIT for user %s", chat_id)
+
+    # existing start logic here (do not remove)
+    register_or_update_user_if_needed(message, start_arg)
+
+    # ALWAYS show main menu
+    send_main_menu(chat_id)
+
+
 def _pbkdf2_hash_password(password: str, iterations: int = 120_000) -> str:
     salt = os.urandom(16).hex()
     digest = hashlib.pbkdf2_hmac(
@@ -5201,13 +5218,12 @@ def send_listing_card(
     bot.send_message(chat_id, text, reply_markup=mk)
 
 
-@bot.message_handler(commands=["start"])
-def start_cmd(message):
+def register_or_update_user_if_needed(message, start_arg: str):
     chat_id = message.chat.id
     username = message.from_user.username or ""
     first_name = message.from_user.first_name or ""
     full_name = message.from_user.full_name or ""
-    start_arg = (message.get_args() or "").strip().lower()
+    start_arg = (start_arg or "").strip().lower()
     if start_arg in ALLOWED_START_AREAS:
         source_type = "qr"
         source_area: Optional[str] = start_arg
@@ -5373,7 +5389,6 @@ def start_cmd(message):
     if demo_info_text:
         bot.send_message(chat_id, demo_info_text)
 
-    send_main_menu(chat_id, "📋 Əsas menyudan seçim et:", force=True)
     logger.info("/start executed successfully for user %s", chat_id)
 
 
@@ -6824,6 +6839,8 @@ def complaint_category_handler(message):
 )
 def complaint_message_handler(message):
     chat_id = message.chat.id
+    if message.text and message.text.startswith("/"):
+        return
     text = message.text
     if text == COMPLAINT_BACK:
         complaint_flow_state[chat_id] = {"step": "category"}
@@ -6902,6 +6919,8 @@ def complaint_reply_callback(c):
 )
 def admin_reply_to_user(message):
     chat_id = message.chat.id
+    if message.text and message.text.startswith("/"):
+        return
     if not is_admin(chat_id):
         admin_reply_state.pop(chat_id, None)
         return
@@ -16183,6 +16202,8 @@ def cb_admin_update_db(c):
 )
 def handle_admin_db_upload(message):
     chat_id = message.chat.id
+    if message.text and message.text.startswith("/"):
+        return
     if not message.from_user or not is_admin(chat_id):
         return
 
