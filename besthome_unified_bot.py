@@ -5376,8 +5376,7 @@ def register_or_update_user_if_needed(message, start_arg: str):
         bot.send_message(
             chat_id,
             "👋 Xoş gəldiniz!\n\n"
-            "Bu bot vasitəsilə satılan və kirayə verilən evləri\n"
-            "filtr, açar söz və əlaqə nömrəsi ilə rahat axtara bilərsiniz.\n\n"
+            "Bu bot vasitəsilə satılan və kirayə verilən evləri filtr, açar söz və əlaqə nömrəsi ilə rahat axtara bilərsiniz.\n"
             "⏳ Davam etmək üçün admin təsdiqini gözləyin.\n"
             "Təsdiq tamamlanan kimi bot avtomatik aktiv olacaq.",
             disable_web_page_preview=True,
