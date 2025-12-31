@@ -3505,7 +3505,7 @@ def apply_promo_code(chat_id: int, code_raw: str):
         )
         return False, block_msg, status.get("expires_at")
     if has_used_promo(chat_id, code):
-        return False, "? Bu promo kodu art?q istifad? etmisiniz", None
+        return False, " Bu promo kodu artıq istifadə etmisiniz", None
 
     sub = get_subscription(chat_id) or {}
     record = get_user_record(chat_id) or {}
@@ -7532,7 +7532,7 @@ def cb_pay_admin(c):
     elif action == "rej":
         try:
             bot.send_message(
-                uid, "? ?d?ni? t?sdiql?nm?di. Z?hm?t olmasa adminl? ?laq? saxlay?n."
+                uid, " ödəniş təsdiqlənmədi. Zəhmət olmasa adminlə əlaqə saxlayın. @esedovesed"
             )
         except Exception:
             pass
@@ -18881,7 +18881,7 @@ def cb_user_demo_action(c):
     if expires:
         try:
             bot.send_message(
-                uid, f"?? Admin t?r?find?n {days} g?nl?k demo aktiv edildi!"
+                uid, f"?? Admin tərəfindən {days} günlük demo aktiv edildi!"
             )
         except Exception:
             pass
@@ -18926,7 +18926,7 @@ def cb_user_block_action(c):
     uid = int(parts[1])
     blocked = block_user(uid)
     safe_answer_callback_query(
-        c.id, "? Blokland?" if blocked else "?? D?yi?iklik olmad?"
+        c.id, " Bloklandı" if blocked else " Dəyişiklik olmadə"
     )
     show_pending_users(c.message.chat.id, message=c.message)
 
