@@ -5399,8 +5399,9 @@ def register_or_update_user_if_needed(message, start_arg: str):
             )
         else:
             demo_info_text = (
-                "🎉 Xoş gəldiniz.\n"
-                "Sizə avtomatik olaraq 3 gün PULSUZ demo aktiv edildi."
+                "Sizə 3 gün PULSUZ demo ayrıldı.\n"
+                "🔒 Demo admin təsdiqindən sonra aktiv olacaq.\n\n"
+                "📌 Təsdiqdən sonra botu tam şəkildə istifadə edə biləcəksiniz."
             )
     if not demo_info_text:
         demo_info_text = (
