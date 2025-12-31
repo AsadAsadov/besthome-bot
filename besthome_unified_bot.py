@@ -207,19 +207,29 @@ logger = logging.getLogger("besthome_bot")
 
 @bot.message_handler(commands=["start"])
 def handle_start(message):
-    # IMPORTANT: this handler must NOT call ensure_allowed
     chat_id = message.chat.id
 
-    # parse start parameter safely
-    start_arg = message.get_args().strip().lower()
+    text = message.text or ""
+    parts = text.split(maxsplit=1)
+    start_arg = parts[1].strip().lower() if len(parts) > 1 else ""
 
-    logger.info("START HANDLER HIT for user %s", chat_id)
+    logger.info("START HANDLER HIT user=%s arg=%s", chat_id, start_arg)
 
+    try:
+        handle_start_attribution_and_demo(message, start_arg)
+    except Exception as e:
+        logger.exception("Start logic failed")
+        bot.send_message(
+            chat_id,
+            "⚠️ Sistem yenilənir, zəhmət olmasa 1 dəqiqə sonra yenidən yoxlayın.",
+        )
+
+    send_main_menu(chat_id)
+
+
+def handle_start_attribution_and_demo(message, start_arg: str):
     # existing start logic here (do not remove)
     register_or_update_user_if_needed(message, start_arg)
-
-    # ALWAYS show main menu
-    send_main_menu(chat_id)
 
 
 def _pbkdf2_hash_password(password: str, iterations: int = 120_000) -> str:
@@ -5394,6 +5404,9 @@ def register_or_update_user_if_needed(message, start_arg: str):
 
 @bot.message_handler(func=lambda m: m.text == "🤝 Dostunu dəvət et")
 def share_referral(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     chat_id = message.chat.id
     if is_admin(chat_id):
         main_menu(chat_id)
@@ -6557,6 +6570,9 @@ def show_request_type_menu(chat_id: int):
 
 @bot.message_handler(func=lambda m: m.text == "📝 Ev axtarıram")
 def start_customer_request_flow(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     chat_id = message.chat.id
     if not ensure_allowed(message):
         return
@@ -6569,6 +6585,9 @@ def start_customer_request_flow(message):
 
 @bot.message_handler(func=lambda m: m.text == "⬅️ Geri (Əsas menyu)")
 def customer_request_back(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     reset_customer_request(message.chat.id)
@@ -6579,6 +6598,9 @@ def customer_request_back(message):
     func=lambda m: m.text in ["🏠 Almaq istəyirəm", "🏢 Kirayə götürmək istəyirəm"]
 )
 def handle_request_type_selection(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     chat_id = message.chat.id
     if not ensure_allowed(message):
         return
@@ -6607,6 +6629,9 @@ def handle_request_type_selection(message):
 
 @bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "rayon")
 def handle_request_rayon(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     chat_id = message.chat.id
     if not ensure_allowed(message):
         return
@@ -6629,6 +6654,9 @@ def handle_request_rayon(message):
 
 @bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "rooms")
 def handle_request_rooms(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     chat_id = message.chat.id
     if not ensure_allowed(message):
         return
@@ -6648,6 +6676,9 @@ def handle_request_rooms(message):
 
 @bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "budget")
 def handle_request_budget(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     chat_id = message.chat.id
     if not ensure_allowed(message):
         return
@@ -6672,6 +6703,9 @@ def handle_request_budget(message):
 
 @bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "notes")
 def handle_request_notes(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     chat_id = message.chat.id
     if not ensure_allowed(message):
         return
@@ -6688,6 +6722,9 @@ def handle_request_notes(message):
 
 @bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "phone")
 def handle_request_phone(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     chat_id = message.chat.id
     if not ensure_allowed(message):
         return
@@ -6787,6 +6824,9 @@ def notify_admin_complaint(message, category: str, user_text: str):
 
 @bot.message_handler(func=lambda m: m.text == "📩 Şikayət və təkliflər")
 def complaint_entry(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not is_complaint_access_allowed(message.chat.id):
         return
     start_complaint_flow(message.chat.id)
@@ -6808,6 +6848,9 @@ def cb_open_complaint(c):
     func=lambda m: complaint_flow_state.get(m.chat.id, {}).get("step") == "category"
 )
 def complaint_category_handler(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     chat_id = message.chat.id
     choice = message.text
     if choice == COMPLAINT_BACK:
@@ -6949,6 +6992,9 @@ def admin_reply_to_user(message):
 
 @bot.message_handler(func=lambda m: m.text == "👤 Hesabım")
 def show_account_status(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message, allow_blocked=True):
         return
     chat_id = message.chat.id
@@ -7120,6 +7166,9 @@ def send_market_pulse_overview(chat_id: int):
 
 @bot.message_handler(func=lambda m: m.text == "📊 Statistika")
 def show_global_statistics(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message, allow_blocked=True):
         return
     chat_id = message.chat.id
@@ -7148,6 +7197,9 @@ def handle_user_stats_callback(c):
 
 @bot.message_handler(func=lambda m: m.text == "ℹ️ Haqqında")
 def about(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     text = (
         "🏠 BestHome Əmlak Botu\n\n"
         "BestHome — Azərbaycanda satılan və kirayə verilən daşınmaz əmlak elanlarını rahat və sürətli tapmaq üçün hazırlanmış ağıllı Telegram botudur.\n\n"
@@ -7182,6 +7234,9 @@ def about(message):
 
 @bot.message_handler(func=lambda m: m.text == "💳 Ödəniş")
 def payment_menu_entry(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     send_payment_menu(message.chat.id)
 
 
@@ -7487,6 +7542,9 @@ def handle_common_nav(message):
 
 @bot.message_handler(func=lambda m: m.text == "📝 Yeni elan əlavə et")
 def start_new_listing(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -7509,6 +7567,9 @@ def start_new_listing(message):
 
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "role")
 def step_role(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -7530,6 +7591,9 @@ def step_role(message):
 
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "operation")
 def step_operation(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -7550,6 +7614,9 @@ def step_operation(message):
 
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "prop_type")
 def step_prop_type(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -7578,6 +7645,9 @@ def step_prop_type(message):
 
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "rooms")
 def step_rooms(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -7620,6 +7690,9 @@ def step_rooms(message):
 
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "rayon")
 def step_rayon(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -7669,6 +7742,9 @@ def step_rayon(message):
 
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "metro")
 def step_metro(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -7683,6 +7759,9 @@ def step_metro(message):
 
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "area")
 def step_area(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -7697,6 +7776,9 @@ def step_area(message):
 
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "price")
 def step_price(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -7711,6 +7793,9 @@ def step_price(message):
 
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "currency")
 def step_currency(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -7729,6 +7814,9 @@ def step_currency(message):
 
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "phone")
 def step_phone(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -7743,6 +7831,9 @@ def step_phone(message):
 
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "contact_name")
 def step_contact_name(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -7757,6 +7848,9 @@ def step_contact_name(message):
 
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "summary")
 def step_summary(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -7844,6 +7938,9 @@ def add_listing_new(data: dict) -> int:
 
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "link")
 def step_link(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -7901,6 +7998,9 @@ def step_link(message):
 
 @bot.message_handler(func=lambda m: m.text in ["📋 Elanlarım", "📂 Elanlarım"])
 def my_listings(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -7942,6 +8042,9 @@ def my_listings(message):
 
 @bot.message_handler(func=lambda m: m.text == "⭐ Favorilərim")
 def show_favorites(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -8028,6 +8131,9 @@ def cb_remove_favorite(c):
 
 @bot.message_handler(func=lambda m: m.text == "🔥 Ən çox baxılan elanlar")
 def show_top_viewed(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not is_admin(message.chat.id):
         bot.send_message(message.chat.id, "❌ Bu bölmə yalnız admin üçündür.")
         return
@@ -8041,6 +8147,9 @@ def show_top_viewed(message):
 
 @bot.message_handler(func=lambda m: m.text == "🔎 Axtarış sistemi")
 def search_system_menu(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     send_search_menu(message.chat.id)
@@ -8048,6 +8157,9 @@ def search_system_menu(message):
 
 @bot.message_handler(func=lambda m: m.text == "⬅️ Geri")
 def return_to_main_menu(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -8282,6 +8394,9 @@ def start_structured_search_from_menu(chat_id: int, op_code: str):
 
 @bot.message_handler(func=lambda m: m.text in ["🏠 Satılır", "🏢 Kirayə verilir"])
 def structured_search_from_menu(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -8294,6 +8409,9 @@ def structured_search_from_menu(message):
 
 @bot.message_handler(func=lambda m: m.text == "🔍 Açar sözlə axtar")
 def keyword_search_from_menu(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -8311,6 +8429,9 @@ def keyword_search_from_menu(message):
 
 @bot.message_handler(func=lambda m: m.text == "📞 Nömrə ilə axtar")
 def phone_search_from_menu(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -8323,6 +8444,9 @@ def phone_search_from_menu(message):
 
 @bot.message_handler(func=lambda m: m.text == "📌 Müştəri istəkləri")
 def customer_requests_from_menu(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -9474,6 +9598,9 @@ def delete_saved_search_for_user(chat_id: int, criteria_id: int):
     func=lambda m: not is_admin(m.chat.id) and m.text == ADMIN_PANEL_BACK_MAIN
 )
 def public_back_to_main(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     return_to_main_menu(message.chat.id)
@@ -9481,6 +9608,9 @@ def public_back_to_main(message):
 
 @bot.message_handler(func=lambda m: m.text == "🔔 Bildirişlərim")
 def show_saved_notifications(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -15754,6 +15884,9 @@ def admin_start_message(c):
 
 @bot.message_handler(func=lambda m: m.chat.id in admin_message_state)
 def admin_send_text(m):
+    if m.text and m.text.startswith('/'):
+        return
+
     if not is_admin(m.chat.id):
         return
     target_user_id = admin_message_state.pop(m.chat.id)
@@ -18431,6 +18564,9 @@ def cb_admin_bulk_cancel(c):
 
 @bot.message_handler(func=lambda m: get_user_state(m.chat.id) == "ADMIN_BULK_EXTEND")
 def admin_bulk_custom_input(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     chat_id = message.chat.id
     if not is_admin(chat_id):
         return
@@ -18878,6 +19014,9 @@ def handle_bot_refresh(message):
 
 @bot.message_handler(func=lambda m: m.text == "🔄 Botu yenilə")
 def refresh_button_message(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     handle_bot_refresh(message)
 
 
@@ -18907,6 +19046,9 @@ def cb_refresh_bot(c):
 
 @bot.message_handler(func=lambda m: m.text == "🧑‍💼 Vasitəçilər")
 def agents_button(message):
+    if message.text and message.text.startswith('/'):
+        return
+
     if not ensure_allowed(message):
         return
     # Vasitəçi elanlarını açıq axtarmaq üçün sadə açar sözlə axtarış
