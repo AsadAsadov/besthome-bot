@@ -5376,11 +5376,10 @@ def register_or_update_user_if_needed(message, start_arg: str):
         bot.send_message(
             chat_id,
             "👋 Xoş gəldiniz!\n\n"
-            "📢 Ən son *alqı-satqı və kirayə elanlarını* "
-            "ilk görmək üçün Telegram kanalımıza qoşulmağı tövsiyə edirik:\n\n"
-            "👉 https://t.me/alqi_satqi_kiraye\n\n"
-            "✅ Botdan istifadə etməyə davam edə bilərsiniz.",
-            parse_mode="Markdown",
+            "Bu bot vasitəsilə satılan və kirayə verilən evləri\n"
+            "filtr, açar söz və əlaqə nömrəsi ilə rahat axtara bilərsiniz.\n\n"
+            "⏳ Davam etmək üçün admin təsdiqini gözləyin.\n"
+            "Təsdiq tamamlanan kimi bot avtomatik aktiv olacaq.",
             disable_web_page_preview=True,
         )
         set_first_start_false_for_user(chat_id)
@@ -5390,8 +5389,13 @@ def register_or_update_user_if_needed(message, start_arg: str):
     if is_first_time:
         if source_type == "qr":
             demo_info_text = (
-                "🎉 QR vasitəsilə qoşuldunuz.\n"
-                "Sizə avtomatik olaraq 7 gün PULSUZ demo aktiv edildi."
+                "🎉 QR vasitəsilə qoşuldunuz.\n\n"
+                "Sizə avtomatik olaraq 7 gün PULSUZ demo aktiv edildi.\n\n"
+                "⏳ Hazırda hesabınız qısa yoxlama mərhələsindədir.\n"
+                "Bu, botun təhlükəsiz və stabil işləməsi üçündür.\n\n"
+                "✅ Admin təsdiqi tamamlanan kimi bütün funksiyalar avtomatik açılacaq.\n"
+                "📌 Bu proses adətən çox çəkmir.\n\n"
+                "Gözlədiyiniz üçün təşəkkür edirik 🙏"
             )
         else:
             demo_info_text = (
@@ -5400,7 +5404,14 @@ def register_or_update_user_if_needed(message, start_arg: str):
             )
     if not demo_info_text:
         demo_info_text = (
-            "🎁 Demo müddətiniz mövcud deyil. Ödəniş menyusundan tam akses əldə edə bilərsiniz."
+            "⏳ Pulsuz sınaq müddətiniz başa çatıb.\n\n"
+            "🔓 Botdan tam şəkildə istifadə etmək üçün\n"
+            "📌 Ödəniş bölməsindən uyğun paketi seçə bilərsiniz.\n\n"
+            "ℹ️ Ödəniş etdikdən sonra:\n"
+            "– bütün axtarışlar\n"
+            "– elanlara baxış\n"
+            "– əlavə funksiyalar aktiv olacaq.\n\n"
+            "Dəstək lazımdırsa, biz buradayıq 👍"
         )
 
     if demo_info_text:
