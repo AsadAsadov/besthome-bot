@@ -13269,7 +13269,15 @@ def cb_structured(c):
             st.setdefault("filters", {})["max_price"] = None
             st.setdefault("filters", {}).pop("price", None)
             structured_push_history(chat_id)
-            render_room_step(chat_id, c.message)
+            prop = st.get("filters", {}).get("prop")
+            if prop == "t":
+                perform_structured_search(
+                    chat_id,
+                    offset=0,
+                    edit_msg=(c.message.chat.id, c.message.message_id),
+                )
+            else:
+                render_room_step(chat_id, c.message)
     elif action == "prm":
         st.setdefault("filters", {})["min_price"] = None
         st.setdefault("filters", {})["max_price"] = None
@@ -13283,7 +13291,15 @@ def cb_structured(c):
     elif action == "rm":
         st.setdefault("filters", {})["rooms"] = parts[2]
         structured_push_history(chat_id)
-        render_floor_step(chat_id, c.message)
+        prop = st.get("filters", {}).get("prop")
+        if prop in {"t", "q"}:
+            perform_structured_search(
+                chat_id,
+                offset=0,
+                edit_msg=(c.message.chat.id, c.message.message_id),
+            )
+        else:
+            render_floor_step(chat_id, c.message)
     elif action == "fl":
         st.setdefault("filters", {})["floor_range"] = FLOOR_PRESETS.get(parts[2])
         perform_structured_search(
@@ -13416,7 +13432,11 @@ def handle_price_max_input(message):
     st["step"] = "price"
     structured_push_history(chat_id)
     bot.send_message(chat_id, "✅ Qiymət aralığı seçildi.")
-    render_room_step(chat_id)
+    prop = st.get("filters", {}).get("prop")
+    if prop == "t":
+        perform_structured_search(chat_id, offset=0, edit_msg=None)
+    else:
+        render_room_step(chat_id)
 
 
 def perform_structured_search(chat_id, offset=0, edit_msg=None):
