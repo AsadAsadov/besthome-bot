@@ -584,7 +584,6 @@ ADMIN_PANEL_PAGE1 = [
     TEXTS_AZ["admin_panel_pending_listings"],
     TEXTS_AZ["admin_panel_stats"],
     "📊 QR Statistikası",
-    TEXTS_AZ["admin_panel_customer_requests"],
     FINANCIAL_REPORTS_BUTTON,
     TEXTS_AZ["admin_panel_agents_notify"],
     TEXTS_AZ["admin_panel_user_search"],
@@ -597,8 +596,6 @@ ADMIN_PANEL_PAGE2 = [
     TEXTS_AZ["admin_panel_topviews"],
     TEXTS_AZ["admin_panel_db_update"],
     TEXTS_AZ["admin_panel_direct_message"],
-    TEXTS_AZ["admin_panel_customer_requests_access"],
-    TEXTS_AZ["admin_panel_archived_requests"],
 ]
 ADMIN_PANEL_NAV_NEXT = TEXTS_AZ["admin_panel_nav_next"]
 ADMIN_PANEL_NAV_PREV = TEXTS_AZ["admin_panel_nav_prev"]
@@ -5046,8 +5043,6 @@ def build_main_menu(
         rows.append(["💳 Ödəniş", "🤝 Dostunu dəvət et"])
 
     complaint_row = ["📩 Şikayət və təkliflər"]
-    if has_customer_access or is_admin_user:
-        complaint_row.append("📌 Müştəri istəkləri")
     rows.append(complaint_row)
 
     for row in rows:
@@ -5089,7 +5084,7 @@ def build_search_menu_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("🏠 Satılır", "🏢 Kirayə verilir")
     kb.row("🔍 Açar sözlə axtar", "📞 Nömrə ilə axtar")
-    kb.row("📝 Ev axtarıram", "📝 Yeni elan əlavə et")
+    kb.row("📝 Yeni elan əlavə et")
     kb.row("📂 Elanlarım", "⭐ Favorilərim")
     kb.row("🔔 Bildirişlərim", "⬅️ Geri")
     return kb
@@ -6636,6 +6631,7 @@ def show_request_type_menu(chat_id: int):
 
 @bot.message_handler(func=lambda m: m.text == "📝 Ev axtarıram")
 def start_customer_request_flow(message):
+    return
     if message.text and message.text.startswith('/'):
         return
 
@@ -8510,6 +8506,7 @@ def phone_search_from_menu(message):
 
 @bot.message_handler(func=lambda m: m.text == "📌 Müştəri istəkləri")
 def customer_requests_from_menu(message):
+    return
     if message.text and message.text.startswith('/'):
         return
 
@@ -10092,6 +10089,7 @@ def cb_notifications_keyword_hits(c):
 @bot.callback_query_handler(func=lambda c: c.data == "notif_cust_req")
 @callback_guard
 def cb_notifications_customer_requests(c):
+    return
     if not ensure_allowed_cb(c):
         return
     chat_id = c.message.chat.id
@@ -13906,6 +13904,12 @@ def open_admin_panel(message):
 
 
 def _handle_admin_panel_action(chat_id: int, action_text: str):
+    if action_text in {
+        TEXTS_AZ["admin_panel_customer_requests"],
+        TEXTS_AZ["admin_panel_customer_requests_access"],
+        TEXTS_AZ["admin_panel_archived_requests"],
+    }:
+        return
     if admin_update_state.get(chat_id) == "awaiting_db_link":
         return
 
@@ -15767,6 +15771,7 @@ def admin_open_user_profile(c):
 )
 @callback_guard
 def toggle_customer_requests(c):
+    return
     if not is_admin(c.from_user.id):
         return
     parts = c.data.split(":", 1)
@@ -15796,6 +15801,7 @@ def toggle_customer_requests(c):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cust_req_access:"))
 @callback_guard
 def cb_customer_requests_access(c):
+    return
     if not is_admin(c.from_user.id):
         return
     parts = c.data.split(":")
@@ -15824,6 +15830,7 @@ def cb_customer_requests_access(c):
 @bot.callback_query_handler(func=lambda c: c.data == "cust_req_access_add")
 @callback_guard
 def cb_customer_requests_access_add(c):
+    return
     if not is_admin(c.from_user.id):
         return
     msg = bot.send_message(
@@ -15841,6 +15848,7 @@ def cb_customer_requests_access_add(c):
 )
 @callback_guard
 def cb_customer_requests_access_disable(c):
+    return
     if not is_admin(c.from_user.id):
         return
     try:
@@ -19282,6 +19290,7 @@ def build_agent_request_rayon_markup():
 @bot.callback_query_handler(func=lambda c: c.data == "agent_requests")
 @callback_guard
 def cb_agent_requests(c):
+    return
     if not ensure_allowed_cb(c):
         return
     chat_id = c.message.chat.id
@@ -19303,6 +19312,7 @@ def cb_agent_requests(c):
 @bot.callback_query_handler(func=lambda c: c.data == "cust_req_ops")
 @callback_guard
 def cb_customer_requests_ops(c):
+    return
     if not ensure_allowed_cb(c):
         return
     chat_id = c.message.chat.id
@@ -19318,6 +19328,7 @@ def cb_customer_requests_ops(c):
 @bot.callback_query_handler(func=lambda c: c.data == "cust_req_back")
 @callback_guard
 def cb_customer_requests_back(c):
+    return
     if not ensure_allowed_cb(c):
         return
     return_to_main_menu(c.message.chat.id)
@@ -19330,6 +19341,7 @@ def cb_customer_requests_back(c):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cust_req_op:"))
 @callback_guard
 def cb_customer_requests_op(c):
+    return
     if not ensure_allowed_cb(c):
         return
     chat_id = c.message.chat.id
@@ -19348,6 +19360,7 @@ def cb_customer_requests_op(c):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cr_rule_rayon_"))
 @callback_guard
 def cb_customer_request_rule_rayon(c):
+    return
     if not ensure_allowed_cb(c):
         return
     chat_id = c.message.chat.id
@@ -19566,6 +19579,7 @@ def cb_customer_request_unarchive(c):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cust_req_archived:"))
 @callback_guard
 def cb_customer_request_archived(c):
+    return
     if not ensure_allowed_cb(c):
         return
     chat_id = c.message.chat.id
