@@ -21121,6 +21121,13 @@ def create_flask_app():
 
         return _wrap_api("health", _handler)
 
+    @app.route("/download/local_data.db", methods=["GET"])
+    def download_local_db():
+        file_path = "/opt/render/project/src/local_data.db"
+        if os.path.exists(file_path):
+            return send_file(file_path, as_attachment=True)
+        return "File not found", 404
+
     @app.route("/api/stats/overview", methods=["GET"])
     def api_stats_overview():
         def _handler():
