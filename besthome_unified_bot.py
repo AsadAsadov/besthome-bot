@@ -13848,11 +13848,15 @@ def build_admin_panel_keyboard(chat_id: int, page: int = 1):
     nav_buttons = []
     if page == 1:
         nav_buttons.append(
-            types.InlineKeyboardButton(ADMIN_PANEL_NAV_NEXT, callback_data="adm_nav:2")
+            types.InlineKeyboardButton(
+                ADMIN_PANEL_NAV_NEXT, callback_data="admin_page_2"
+            )
         )
     else:
         nav_buttons.append(
-            types.InlineKeyboardButton(ADMIN_PANEL_NAV_PREV, callback_data="adm_nav:1")
+            types.InlineKeyboardButton(
+                ADMIN_PANEL_NAV_PREV, callback_data="admin_page_1"
+            )
         )
     if nav_buttons:
         mk.row(*nav_buttons)
@@ -13930,7 +13934,6 @@ def _handle_admin_panel_action(chat_id: int, action_text: str):
 
 @bot.callback_query_handler(
     func=lambda c: c.data.startswith("adm_act:")
-    or c.data.startswith("adm_nav:")
     or c.data.startswith("adm_back:")
     or c.data == "admin_qr_stats"
 )
@@ -13942,13 +13945,6 @@ def cb_admin_panel(c):
     if c.data == "admin_qr_stats":
         send_qr_stats_menu(chat_id)
         return
-    if c.data.startswith("adm_nav:"):
-        try:
-            page = int(c.data.split(":", 1)[1])
-        except Exception:
-            page = 1
-        send_admin_panel(chat_id, page=page)
-        return
 
     if c.data == "adm_back:main":
         return_to_main_menu(chat_id)
@@ -13959,6 +13955,27 @@ def cb_admin_panel(c):
         action_text = ADMIN_PANEL_ACTION_LOOKUP.get(action_key)
         if action_text:
             _handle_admin_panel_action(chat_id, action_text)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("admin_page_"))
+@callback_guard
+def admin_panel_pagination(call):
+    if not is_admin(call.from_user.id):
+        return
+
+    if call.data == "admin_page_1":
+        keyboard = build_admin_panel_keyboard(call.message.chat.id, page=1)
+    elif call.data == "admin_page_2":
+        keyboard = build_admin_panel_keyboard(call.message.chat.id, page=2)
+    else:
+        return
+
+    bot.edit_message_text(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        text=TEXTS_AZ["admin_panel_title"],
+        reply_markup=keyboard,
+    )
 
 
 def format_qr_area_label(area_code: Optional[str]) -> str:
