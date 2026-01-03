@@ -581,7 +581,6 @@ FINANCIAL_REPORTS_MENU = [
     FINANCIAL_REPORTS_BACK,
 ]
 ADMIN_PANEL_PAGE1 = [
-    TEXTS_AZ["admin_panel_pending_listings"],
     TEXTS_AZ["admin_panel_stats"],
     "📊 QR Statistikası",
     FINANCIAL_REPORTS_BUTTON,
@@ -5084,8 +5083,7 @@ def build_search_menu_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("🏠 Satılır", "🏢 Kirayə verilir")
     kb.row("🔍 Açar sözlə axtar", "📞 Nömrə ilə axtar")
-    kb.row("📝 Yeni elan əlavə et")
-    kb.row("📂 Elanlarım", "⭐ Favorilərim")
+    kb.row("⭐ Favorilərim")
     kb.row("🔔 Bildirişlərim", "⬅️ Geri")
     return kb
 
@@ -7604,6 +7602,7 @@ def handle_common_nav(message):
 
 @bot.message_handler(func=lambda m: m.text == "📝 Yeni elan əlavə et")
 def start_new_listing(message):
+    return
     if message.text and message.text.startswith('/'):
         return
 
@@ -8060,6 +8059,7 @@ def step_link(message):
 
 @bot.message_handler(func=lambda m: m.text in ["📋 Elanlarım", "📂 Elanlarım"])
 def my_listings(message):
+    return
     if message.text and message.text.startswith('/'):
         return
 
@@ -18822,6 +18822,7 @@ def activate_user_for_days(user_id: int, days: int):
 
 
 def show_pending_listings(chat_id):
+    return
     conn = get_local_conn()
     cur = conn.cursor()
     cur.execute(
