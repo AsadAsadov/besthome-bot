@@ -5188,6 +5188,38 @@ def build_whatsapp_message(ev: dict) -> str:
     return body
 
 
+def _strip_contact_details(text: str, ev: dict) -> str:
+    phone_raw = ev.get("phone") or ev.get("Elaqe_nomresi")
+    owner_name = (
+        ev.get("owner_name")
+        or ev.get("owner")
+        or ev.get("elan_sahibi")
+        or ev.get("sahib")
+    )
+
+    cleaned = text or ""
+
+    sensitive_values = []
+    if phone_raw:
+        sensitive_values.append(str(phone_raw))
+        digits = "".join(ch for ch in str(phone_raw) if ch.isdigit())
+        if len(digits) >= 7:
+            digit_pattern = "\\s*".join(list(digits))
+            try:
+                cleaned = re.sub(digit_pattern, "", cleaned)
+            except re.error:
+                pass
+    if owner_name:
+        sensitive_values.append(str(owner_name))
+
+    for val in sensitive_values:
+        if val:
+            cleaned = cleaned.replace(str(val), "")
+
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
 def build_listing_text(ev: dict, source: str, progress_text: Optional[str] = None) -> str:
     date_val = (
         ev.get("date_read") or ev.get("date_added") or ev.get("created_at") or "-"
@@ -5200,7 +5232,8 @@ def build_listing_text(ev: dict, source: str, progress_text: Optional[str] = Non
     rayon = ev.get("rayon") or ev.get("Rayon_Qesebe") or ""
     metro = ev.get("metro") or ev.get("Metro") or ""
     addr = ev.get("address") or ev.get("Unvan") or ""
-    summary = ev.get("summary") or ev.get("Umumi_melumat") or ""
+    raw_summary = ev.get("summary") or ev.get("Umumi_melumat") or ""
+    summary = _strip_contact_details(raw_summary, ev) or "-"
     listing_id = ev.get("id") or ev.get("ID") or ev.get("Elan_kodu")
     listing_code = f"🆔 Elan kodu: #{listing_id}" if listing_id else "🆔 Elan kodu: -"
 
@@ -5233,7 +5266,6 @@ def build_listing_text(ev: dict, source: str, progress_text: Optional[str] = Non
 
     text = (
         f"📅 {date_val}\n"
-        f"{listing_code}\n"
         f"🏠 {badge_txt}{title} | {rooms}\n"
         f"💸 {op} | 💰 {price} {cur}\n"
         f"📍 {location or '-'}\n"
@@ -5266,6 +5298,9 @@ def build_listing_text(ev: dict, source: str, progress_text: Optional[str] = Non
 
     if progress_text:
         text += f"\n\n{progress_text}"
+    text += f"\n\n{listing_code}"
+    if not text.strip():
+        return "ℹ️ Elan məlumatı mövcud deyil"
     return text
 
 
@@ -12586,8 +12621,20 @@ def fetch_page_results(chat_id: int, mode: str, params: dict, page: int):
         )
     if mode == "keyword_notif":
         items = keyword_notification_state.get(chat_id, {}).get("items", [])
-        total = len(items)
-        return items[offset : offset + PAGE_SIZE], total
+        seen_ids: Set[str] = set()
+        deduped = []
+        for item in items:
+            item_id = item.get("id") or item.get("ID") or item.get("Elan_kodu")
+            if item_id is None:
+                deduped.append(item)
+                continue
+            key = str(item_id)
+            if key in seen_ids:
+                continue
+            seen_ids.add(key)
+            deduped.append(item)
+        total = len(deduped)
+        return deduped[offset : offset + PAGE_SIZE], total
     return [], 0
 
 
@@ -12623,8 +12670,20 @@ def fetch_all_results(chat_id: int, mode: str, params: dict):
         return items, total
     if mode == "keyword_notif":
         items = keyword_notification_state.get(chat_id, {}).get("items", [])
-        total = len(items)
-        return items, total
+        seen_ids: Set[str] = set()
+        deduped = []
+        for item in items:
+            item_id = item.get("id") or item.get("ID") or item.get("Elan_kodu")
+            if item_id is None:
+                deduped.append(item)
+                continue
+            key = str(item_id)
+            if key in seen_ids:
+                continue
+            seen_ids.add(key)
+            deduped.append(item)
+        total = len(deduped)
+        return deduped, total
     return [], 0
 
 
