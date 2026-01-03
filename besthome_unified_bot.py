@@ -5257,8 +5257,8 @@ def register_or_update_user_if_needed(message, start_arg: str):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT chat_id, approved, is_admin, last_version, is_first_start, source_type,
-               source_area, demo_days, demo_end_at, demo_expires_at, demo_used
+        SELECT chat_id, approved, blocked, is_admin, last_version, is_first_start, source_type,
+               source_area, demo_days, demo_end_at, demo_expires_at, demo_used, paid_until
         FROM users
         WHERE chat_id=?
         """,
@@ -5354,6 +5354,25 @@ def register_or_update_user_if_needed(message, start_arg: str):
         elif "demo_used" in row and row["demo_used"]:
             demo_info_text = "🎁 Demo müddətiniz bitib. Ödəniş menyusundan yeniləyə bilərsiniz."
 
+    approved = bool(row["approved"]) if row and "approved" in row else False
+    blocked = bool(row["blocked"]) if row and "blocked" in row else False
+    paid_until_raw = None
+    if row and "paid_until" in row.keys():
+        paid_until_raw = row["paid_until"]
+    paid_until_dt = parse_dt_safe(paid_until_raw)
+
+    demo_end_raw_active = None
+    if row:
+        if "demo_end_at" in row.keys() and row["demo_end_at"]:
+            demo_end_raw_active = row["demo_end_at"]
+        elif "demo_expires_at" in row.keys() and row["demo_expires_at"]:
+            demo_end_raw_active = row["demo_expires_at"]
+    demo_end_dt = parse_dt_safe(demo_end_raw_active)
+    now = datetime.utcnow()
+    active_until_candidates = [dt for dt in (paid_until_dt, demo_end_dt) if dt]
+    active_until = max(active_until_candidates) if active_until_candidates else None
+    user_active = approved and not blocked and active_until and active_until > now
+
     if is_first_time:
         send_payment_menu(chat_id)
 
@@ -5402,7 +5421,7 @@ def register_or_update_user_if_needed(message, start_arg: str):
                 "🔒 Demo admin təsdiqindən sonra aktiv olacaq.\n\n"
                 "📌 Təsdiqdən sonra botu tam şəkildə istifadə edə biləcəksiniz."
             )
-    if not demo_info_text:
+    if not demo_info_text and not user_active:
         demo_info_text = (
             "⏳ Pulsuz sınaq müddətiniz başa çatıb.\n\n"
             "🔓 Botdan tam şəkildə istifadə etmək üçün\n"
