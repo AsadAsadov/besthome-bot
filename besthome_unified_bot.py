@@ -4263,29 +4263,53 @@ def normalize_listing_item(item: dict):
     }
 
 
+def build_listing_action_keyboard(
+    favorite_label: Optional[str],
+    favorite_callback: Optional[str],
+    listing_link: Optional[str],
+    whatsapp_url: Optional[str],
+    call_url: Optional[str],
+) -> types.InlineKeyboardMarkup:
+    mk = types.InlineKeyboardMarkup()
+    row1 = []
+    if whatsapp_url:
+        row1.append(types.InlineKeyboardButton("💬 WhatsApp-da yaz", url=whatsapp_url))
+    if call_url:
+        row1.append(types.InlineKeyboardButton("📞 Zəng et", url=call_url))
+    if row1:
+        mk.row(*row1)
+
+    row2 = []
+    if favorite_label and favorite_callback:
+        row2.append(
+            types.InlineKeyboardButton(favorite_label, callback_data=favorite_callback)
+        )
+    if listing_link:
+        row2.append(types.InlineKeyboardButton("🌐 Elana bax", url=listing_link))
+    if row2:
+        mk.row(*row2)
+
+    return mk
+
+
 def build_listing_navigation_keyboard(
     is_favorite: bool,
     listing_link: Optional[str] = None,
     whatsapp_url: Optional[str] = None,
+    call_url: Optional[str] = None,
 ) -> types.InlineKeyboardMarkup:
-    mk = types.InlineKeyboardMarkup()
     fav_label = "❤️ Favori" if is_favorite else "🤍 Favori"
+    mk = build_listing_action_keyboard(
+        fav_label, "fav:toggle", listing_link, whatsapp_url, call_url
+    )
     mk.row(
         types.InlineKeyboardButton("⬅️ Əvvəlki", callback_data="nav:prev"),
-        types.InlineKeyboardButton(fav_label, callback_data="fav:toggle"),
         types.InlineKeyboardButton("➡️ Növbəti", callback_data="nav:next"),
     )
     mk.row(
         types.InlineKeyboardButton("⏭ +5", callback_data="nav:+5"),
         types.InlineKeyboardButton("⏮ -5", callback_data="nav:-5"),
     )
-    action_buttons = []
-    if listing_link:
-        action_buttons.append(types.InlineKeyboardButton("📄 Elana bax", url=listing_link))
-    if whatsapp_url:
-        action_buttons.append(types.InlineKeyboardButton("💬 WhatsApp-da yaz", url=whatsapp_url))
-    if action_buttons:
-        mk.row(*action_buttons)
     mk.add(types.InlineKeyboardButton("🏠 Əsas menyu", callback_data="nav:home"))
     return mk
 
@@ -5112,6 +5136,22 @@ def make_whatsapp_url(
     return f"https://wa.me/{p}?text={quote(text, safe='')}"
 
 
+def make_call_url(phone: Optional[str]) -> Optional[str]:
+    if not phone:
+        return None
+    cleaned = "".join(ch for ch in str(phone) if ch.isdigit() or ch == "+")
+    if cleaned.startswith("00"):
+        cleaned = "+" + cleaned[2:]
+    elif cleaned and cleaned[0].isdigit():
+        if cleaned.startswith("0"):
+            cleaned = "+994" + cleaned[1:]
+        elif not cleaned.startswith("+"):
+            cleaned = "+" + cleaned
+    if len(cleaned) < 9:
+        return None
+    return f"tel:{cleaned}"
+
+
 def build_whatsapp_message(ev: dict) -> str:
     op_raw = (ev.get("operation") or ev.get("Emeliyyat") or "").lower()
     is_rent = "kir" in op_raw or "rent" in op_raw
@@ -5160,9 +5200,9 @@ def build_listing_text(ev: dict, source: str, progress_text: Optional[str] = Non
     rayon = ev.get("rayon") or ev.get("Rayon_Qesebe") or ""
     metro = ev.get("metro") or ev.get("Metro") or ""
     addr = ev.get("address") or ev.get("Unvan") or ""
-    phone = ev.get("phone") or ev.get("Elaqe_nomresi") or "-"
-    cname = ev.get("contact_name") or ev.get("Ad") or "-"
     summary = ev.get("summary") or ev.get("Umumi_melumat") or ""
+    listing_id = ev.get("id") or ev.get("ID") or ev.get("Elan_kodu")
+    listing_code = f"🆔 Elan kodu: #{listing_id}" if listing_id else "🆔 Elan kodu: -"
 
     location = addr or rayon
     if metro:
@@ -5193,10 +5233,10 @@ def build_listing_text(ev: dict, source: str, progress_text: Optional[str] = Non
 
     text = (
         f"📅 {date_val}\n"
+        f"{listing_code}\n"
         f"🏠 {badge_txt}{title} | {rooms}\n"
         f"💸 {op} | 💰 {price} {cur}\n"
         f"📍 {location or '-'}\n"
-        f"📞 {phone} ({cname})\n"
         f"🧾 {summary}"
     )
 
@@ -5250,29 +5290,23 @@ def send_listing_card(
         if listing_pk:
             record_listing_view(source, listing_pk, viewer_id)
 
-    mk = types.InlineKeyboardMarkup()
-
-    if with_fav_button and ev.get("id"):
-        mk.add(
-            types.InlineKeyboardButton(
-                "⭐ Favoriyə əlavə et",
-                callback_data=f"fav|{source}|{ev['id']}",
-            )
-        )
-
     phone = ev.get("phone") or ev.get("Elaqe_nomresi")
     wa_message = build_whatsapp_message(ev)
     wa_url = make_whatsapp_url(phone, wa_message)
-    if wa_url:
-        mk.add(types.InlineKeyboardButton("💬 WhatsApp-da yaz", url=wa_url))
+    call_url = make_call_url(phone)
+    link = ev.get("link") or ev.get("source_link")
+
+    favorite_label = "⭐ Favoriyə əlavə et" if with_fav_button else None
+    favorite_callback = (
+        f"fav|{source}|{ev['id']}" if with_fav_button and ev.get("id") else None
+    )
+    mk = build_listing_action_keyboard(
+        favorite_label, favorite_callback, link, wa_url, call_url
+    )
 
     if extra_buttons:
         for btn in extra_buttons:
             mk.add(btn)
-
-    link = ev.get("link") or ev.get("source_link")
-    if link:
-        mk.add(types.InlineKeyboardButton("🌐 Elana bax", url=link))
 
     text = build_listing_text(ev, source)
     bot.send_message(chat_id, text, reply_markup=mk)
@@ -6372,13 +6406,27 @@ def store_keyword_notification_match(
     if not listing_key:
         return
 
-    ctx = scan_state.setdefault(user_id, {"items": [], "seen": set(), "index": {}})
+    ctx = scan_state.setdefault(
+        user_id, {"items": [], "seen": set(), "index": {}, "id_index": {}}
+    )
+    listing_id_raw = listing.get("id") or listing.get("ID") or listing.get("Elan_kodu")
+    listing_id_key = str(listing_id_raw).strip() if listing_id_raw else None
+
+    if listing_id_key and listing_id_key in ctx.get("id_index", {}):
+        existing = ctx["id_index"].get(listing_id_key)
+        if existing is not None:
+            kw = set(existing.get("__matched_keywords", []))
+            kw.update(matched_keywords or [])
+            existing["__matched_keywords"] = sorted(kw)
+        return
     if listing_key in ctx["seen"]:
         existing = ctx["index"].get(listing_key)
         if existing is not None:
             kw = set(existing.get("__matched_keywords", []))
             kw.update(matched_keywords or [])
             existing["__matched_keywords"] = sorted(kw)
+            if listing_id_key:
+                ctx["id_index"][listing_id_key] = existing
         return
 
     listing_copy = dict(listing or {})
@@ -6387,6 +6435,8 @@ def store_keyword_notification_match(
     ctx["seen"].add(listing_key)
     ctx["items"].append(listing_copy)
     ctx["index"][listing_key] = listing_copy
+    if listing_id_key:
+        ctx["id_index"][listing_id_key] = listing_copy
 
 
 def process_keyword_alerts_for_listing(
@@ -6483,108 +6533,11 @@ def send_keyword_notification_summaries(scan_state: Dict[int, Dict[str, Any]]):
 
 
 def process_keyword_alerts_for_request(req_row: dict):
-    if not req_row:
-        return
-    alerts = fetch_active_keyword_alerts()
-    if not alerts:
-        return
-    request_text = build_request_text_blob(req_row)
-    request_rayon = _row_value_safe(req_row, "rayon") or ""
-    req_id = _row_value_safe(req_row, "id")
-    try:
-        req_id = int(req_id)
-    except Exception:
-        return
-
-    for alert in alerts:
-        user_id = alert.get("user_id")
-        if not user_id or not has_customer_requests_access(user_id):
-            continue
-        if not is_user_allowed(user_id):
-            continue
-        keyword_raw = (alert.get("keywords") or "").strip()
-        if not keyword_raw:
-            continue
-        if not keyword_matches_text(keyword_raw, request_text):
-            continue
-        if not keyword_region_matches(request_rayon, alert.get("regions") or ""):
-            continue
-        if not record_keyword_alert_hit(
-            alert.get("id"), user_id, "request", req_id, source=""
-        ):
-            continue
-        try:
-            bot.send_message(
-                user_id,
-                f'🔔 Açar söz bildirişi: "{keyword_raw}"',
-            )
-            send_public_request_card(user_id, req_row)
-        except Exception:
-            continue
+    return
 
 
 def process_keyword_alerts_for_existing_requests(alert_id: int):
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT * FROM keyword_alerts
-        WHERE id=? AND is_active=1
-        """,
-        (alert_id,),
-    )
-    alert = cur.fetchone()
-    if not alert:
-        conn.close()
-        return
-    alert = dict(alert)
-    user_id = alert.get("user_id")
-    if (
-        not user_id
-        or not has_customer_requests_access(user_id)
-        or not is_user_allowed(user_id)
-    ):
-        conn.close()
-        return
-    cur.execute(
-        """
-        SELECT * FROM customer_requests
-        WHERE status='active'
-        ORDER BY datetime(created_at) DESC
-        """
-    )
-    requests = [dict(r) for r in cur.fetchall()]
-    conn.close()
-    if not requests:
-        return
-    keyword_raw = (alert.get("keywords") or "").strip()
-    if not keyword_raw:
-        return
-    for req_row in requests:
-        request_text = build_request_text_blob(req_row)
-        if not keyword_matches_text(keyword_raw, request_text):
-            continue
-        if not keyword_region_matches(
-            _row_value_safe(req_row, "rayon") or "", alert.get("regions") or ""
-        ):
-            continue
-        req_id = _row_value_safe(req_row, "id")
-        try:
-            req_id = int(req_id)
-        except Exception:
-            continue
-        if not record_keyword_alert_hit(
-            alert.get("id"), user_id, "request", req_id, source=""
-        ):
-            continue
-        try:
-            bot.send_message(
-                user_id,
-                f"🔔 Açar söz bildirişi: \"{alert.get('keywords')}\"",
-            )
-            send_public_request_card(user_id, req_row)
-        except Exception:
-            continue
+    return
 
 
 def process_keyword_alerts_for_new_listings():
@@ -8725,12 +8678,6 @@ def show_notifications_menu(chat_id: int, message=None):
         types.InlineKeyboardButton("📅 Bu həftə", callback_data="notif_period:week"),
         types.InlineKeyboardButton("📅 Bu ay", callback_data="notif_period:month"),
     )
-    if has_customer_requests_access(chat_id):
-        mk.add(
-            types.InlineKeyboardButton(
-                "👥 Müştəri istəkləri", callback_data="notif_cust_req"
-            )
-        )
     mk.add(
         types.InlineKeyboardButton(
             "🔔 Açar söz bildirişləri", callback_data="notif_kw_hits"
@@ -8762,7 +8709,9 @@ def format_notification_listing_line(idx: int, listing: dict) -> str:
     op = listing.get("operation") or listing.get("Emeliyyat") or "-"
     price = format_price(listing.get("price") or listing.get("Qiymet"))
     rayon = listing.get("rayon") or listing.get("Rayon_Qesebe") or "-"
-    return f"{idx}. #{listing_id} | {title} | {rooms} | {op} | {price} | {rayon}"
+    return (
+        f"{idx}. 🆔 Elan kodu: #{listing_id} | {title} | {rooms} | {op} | {price} | {rayon}"
+    )
 
 
 def fetch_notification_listings_page(
@@ -8810,12 +8759,6 @@ def show_notifications_inbox(chat_id: int, period: str, page: int = 1, message=N
                 "🔔 Açar söz bildirişləri", callback_data="notif_kw_hits"
             )
         )
-        if has_customer_requests_access(chat_id):
-            mk_empty.add(
-                types.InlineKeyboardButton(
-                    "👥 Müştəri istəkləri", callback_data="notif_cust_req"
-                )
-            )
         mk_empty.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="notif_menu"))
         try:
             if message:
@@ -8910,6 +8853,8 @@ def show_notifications_inbox(chat_id: int, period: str, page: int = 1, message=N
 
 
 def show_agent_notifications_inbox(chat_id: int, page: int = 1, message=None):
+    bot.send_message(chat_id, "🔔 Sorğu bildirişləri deaktiv edilib.")
+    return
     page = max(1, int(page or 1))
     conn = get_local_conn()
     cur = conn.cursor()
@@ -9481,7 +9426,7 @@ def fetch_keyword_alert_hits_page(user_id: int, period: str, page: int = 1):
     conn = get_local_conn()
     cur = conn.cursor()
     params = [user_id]
-    where = "kah.user_id=?"
+    where = "kah.user_id=? AND kah.target_type='listing'"
     period_clause, period_params = build_period_filter(
         period, "kah.created_at", allow_older=True
     )
@@ -9576,10 +9521,11 @@ def show_keyword_alert_hits(chat_id: int, period: str, page: int = 1, message=No
     lines = []
     for idx, row in enumerate(rows, start=1):
         target_type = _row_value_safe(row, "target_type")
+        if target_type != "listing":
+            continue
         target_id = _row_value_safe(row, "target_id")
         keywords = _row_value_safe(row, "keywords") or "-"
-        target_label = "Elan" if target_type == "listing" else "Sorğu"
-        lines.append(f"{idx}. {target_label} #{target_id} | 🔎 {keywords}")
+        lines.append(f"{idx}. Elan #{target_id} | 🔎 {keywords}")
         view_buttons.append(
             types.InlineKeyboardButton(
                 f"👁 {target_id}",
@@ -9878,6 +9824,13 @@ def cb_keyword_hit_view(c):
         target_id = int(parts[3])
     except Exception:
         return
+    if target_type != "listing":
+        bot.send_message(c.message.chat.id, "🔔 Bu bildiriş növü yalnız elanlar üçündür.")
+        try:
+            bot.answer_callback_query(c.id)
+        except Exception:
+            pass
+        return
     back_callback = (
         "notif_menu"
         if keyword_hits_context.get(c.message.chat.id, {}).get("back") == "notif_menu"
@@ -10145,20 +10098,7 @@ def cb_notifications_view_listing(c):
 def cb_agent_notifications(c):
     if not ensure_allowed_cb(c):
         return
-    chat_id = c.message.chat.id
-    if not has_customer_requests_access(chat_id):
-        try:
-            bot.answer_callback_query(
-                c.id, "❌ Bu funksiya sizin üçün aktiv deyil", show_alert=True
-            )
-        except Exception:
-            pass
-        return
-    try:
-        page = int(c.data.split(":", 1)[1])
-    except Exception:
-        page = 1
-    show_agent_notifications_inbox(chat_id, page=page, message=c.message)
+    bot.send_message(c.message.chat.id, "🔔 Sorğu bildirişləri deaktiv edilib.")
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -12741,7 +12681,10 @@ def render_listing_for_user(
     wa_message = build_whatsapp_message(listing)
     wa_phone = listing.get("phone") or listing.get("Elaqe_nomresi")
     wa_url = make_whatsapp_url(wa_phone, wa_message)
-    markup = build_listing_navigation_keyboard(is_fav, listing_link, wa_url)
+    call_url = make_call_url(wa_phone)
+    markup = build_listing_navigation_keyboard(
+        is_fav, listing_link, wa_url, call_url
+    )
     try:
         markup_signature = json.dumps(markup.to_dic(), sort_keys=True)
     except Exception:
@@ -19857,11 +19800,6 @@ def show_agent_my_customers(
     ]
     mk.row(*nav_buttons)
     mk.add(types.InlineKeyboardButton("🎯 Rayon seç", callback_data="agent_requests"))
-    mk.add(
-        types.InlineKeyboardButton(
-            "👥 Müştəri istəkləri", callback_data="agent_notif:1"
-        )
-    )
 
     try:
         if message:
