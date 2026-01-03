@@ -13943,15 +13943,20 @@ def fetch_qr_stats(range_key: str):
         conn = get_db()
         cur = conn.cursor()
         params: List[Any] = []
-        base_where = "source_type='qr' AND source_area IS NOT NULL"
+        base_where = "source_type='qr_or_start' AND source_area IS NOT NULL"
         time_filter = ""
         if start_time:
             time_filter = " AND datetime(created_at) >= datetime(?)"
             params.append(start_time.isoformat())
 
         cur.execute(
-            f"SELECT source_area, COUNT(*) as cnt FROM users WHERE {base_where}{time_filter} "
-            "GROUP BY source_area ORDER BY cnt DESC",
+            f"""
+            SELECT user_id, username, source_area, created_at
+            FROM users
+            WHERE {base_where}{time_filter}
+            ORDER BY datetime(created_at) DESC
+            LIMIT 50
+            """,
             params,
         )
         rows = cur.fetchall()
@@ -13971,6 +13976,29 @@ def fetch_qr_stats(range_key: str):
         except Exception:
             pass
     return rows, total
+
+
+def fetch_qr_top_areas():
+    rows = []
+    conn = None
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        base_where = "source_type='qr_or_start' AND source_area IS NOT NULL"
+        cur.execute(
+            f"SELECT source_area, COUNT(*) as cnt FROM users WHERE {base_where} "
+            "GROUP BY source_area ORDER BY cnt DESC"
+        )
+        rows = cur.fetchall()
+    except Exception:
+        logger.exception("Failed to fetch QR top areas")
+    finally:
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+    return rows
 
 
 def build_qr_stats_menu() -> types.InlineKeyboardMarkup:
@@ -14004,22 +14032,41 @@ def send_qr_stats(chat_id: int, range_key: str):
     rows, total = fetch_qr_stats(range_key)
     label = QR_STATS_RANGE_LABELS.get(range_key, QR_STATS_RANGE_LABELS["all"])
     lines = [f"📊 QR Statistikası ({label})", ""]
-    if rows:
-        for row in rows:
-            area_code = row["source_area"] if "source_area" in row.keys() else row[0]
-            cnt = int(row["cnt"] if "cnt" in row.keys() else row[1])
-            lines.append(f"📍 {format_qr_area_label(area_code)}: {cnt}")
-    else:
+    if not rows:
         lines.append("Məlumat tapılmadı.")
-    lines.append("")
-    lines.append(f"👥 Cəmi QR ilə gələnlər: {total}")
+    else:
+        area_groups: Dict[str, List[Any]] = {}
+        for row in rows:
+            area_code = row["source_area"] if "source_area" in row.keys() else row[2]
+            area_groups.setdefault(area_code, []).append(row)
+
+        for area_code, area_rows in area_groups.items():
+            lines.append(f"📍 Mənbə: {format_qr_area_label(area_code)}")
+            lines.append("")
+            lines.append("👤 İstifadəçilər:")
+            for idx, r in enumerate(area_rows, start=1):
+                user_id = r["user_id"] if "user_id" in r.keys() else r[0]
+                username = r["username"] if "username" in r.keys() else r[1]
+                username_display = f"@{username}" if username else "username yoxdur"
+                created_value = r["created_at"] if "created_at" in r.keys() else r[3]
+                join_time = str(created_value)
+                try:
+                    join_dt = datetime.fromisoformat(str(created_value))
+                    join_time = join_dt.strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    pass
+                lines.append(f"{idx}) ID: {user_id}")
+                lines.append(f"   👤 {username_display}")
+                lines.append(f"   🕒 {join_time}")
+                lines.append("")
+    lines.append(f"👥 Cəmi QR ilə qoşulanlar: {total}")
     bot.send_message(chat_id, "\n".join(lines))
 
 
 def send_qr_top_areas(chat_id: int):
     if not is_admin(chat_id):
         return
-    rows, _ = fetch_qr_stats("all")
+    rows = fetch_qr_top_areas()
     lines = ["🏆 Ən çox lead gətirən ərazi", ""]
     medals = ["🥇", "🥈", "🥉"]
     if not rows:
