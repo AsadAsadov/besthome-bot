@@ -3801,6 +3801,20 @@ def compute_total_pages(total_count: int) -> int:
 
 
 def get_last_24h_window():
+    try:
+        conn = sqlite3.connect(":memory:")
+        cur = conn.cursor()
+        cur.execute("SELECT datetime('now','-1 day'), datetime('now')")
+        row = cur.fetchone()
+        conn.close()
+        if row and row[0] and row[1]:
+            start = datetime.fromisoformat(str(row[0]))
+            now = datetime.fromisoformat(str(row[1]))
+            logger.info("Last 24h stats computed using database time window")
+            return start, now
+    except Exception:
+        logger.exception("Failed to fetch SQLite time window, falling back to UTC")
+
     now = datetime.utcnow()
     start = now - timedelta(hours=24)
     logger.info("Last 24h stats computed using rolling window (now-24h)")
@@ -4037,19 +4051,12 @@ def build_last_24h_clause(
 ):
     if not column:
         return "", []
-    start, end = window if window else get_last_24h_window()
-    return (
-        " AND ((typeof({col})='integer' AND {col} >= ? AND {col} < ?) "
-        "OR (datetime({col}) >= datetime(?) AND datetime({col}) < datetime(?)))".format(
-            col=column
-        ),
-        [
-            int(start.timestamp()),
-            int(end.timestamp()),
-            format_sqlite_datetime(start),
-            format_sqlite_datetime(end),
-        ],
-    )
+    clause = (
+        " AND ((typeof({col})='integer' "
+        "AND {col} >= strftime('%s','now','-1 day') AND {col} < strftime('%s','now')) "
+        "OR (datetime({col}) >= datetime('now','-1 day') AND datetime({col}) < datetime('now')))"
+    ).format(col=column)
+    return clause, []
 
 
 def build_today_clause(
@@ -8402,10 +8409,15 @@ def handle_today_callbacks(c):
 
     if action == "op":
         st["op"] = value
+        if value == "all":
+            st["prop"] = "all"
+            st["rayon"] = "all"
         send_today_stats_message(chat_id, st)
         prompt_today_property(chat_id)
     elif action == "tp":
         st["prop"] = value
+        if value == "all":
+            st["rayon"] = "all"
         send_today_stats_message(chat_id, st)
         prompt_today_rayon(chat_id)
     elif action == "rn":
@@ -10757,6 +10769,21 @@ def decode_price_range(code: str):
     return None, None
 
 
+def resolve_operation_filter(op_code: Optional[str], mode: str) -> Optional[str]:
+    if not op_code or op_code == "all":
+        return None
+
+    if op_code == "sat":
+        op_norm = "sale"
+    elif op_code == "kir":
+        op_norm = "rent"
+    else:
+        op_norm = normalize_operation_value(op_code) or op_code
+
+    source = "main" if mode == "main" else "local"
+    return detect_db_operation_value(op_norm, source)
+
+
 def build_filters_sql(
     op_code, prop_code, rayon_group, min_price=None, max_price=None, mode="main"
 ):
@@ -10764,13 +10791,10 @@ def build_filters_sql(
     params = []
 
     # Əməliyyat
-    op_kws = OP_CODES.get(op_code)
-    if op_kws:
-        conds = []
-        for kw in op_kws:
-            conds.append("LOWER(operation) LIKE ?")
-            params.append(f"%{kw}%")
-        sql += " AND (" + " OR ".join(conds) + ")"
+    op_value = resolve_operation_filter(op_code, mode)
+    if op_value:
+        sql += " AND operation = ?"
+        params.append(op_value)
 
     # Əmlak tipi
     _, prop_values = get_property_type_filter_values(prop_code)
@@ -13232,7 +13256,11 @@ def cb_structured(c):
         send_structured_start(chat_id, c.message)
 
     if action == "op":
-        st.setdefault("filters", {})["op"] = parts[2]
+        st["history"] = []
+        st["awaiting_floor_range"] = False
+        st["awaiting_price_min"] = False
+        st["awaiting_price_max"] = False
+        st["filters"] = {"op": parts[2]}
         structured_push_history(chat_id)
         render_date_range_step(chat_id, c.message)
     elif action == "dt":
@@ -13242,11 +13270,25 @@ def cb_structured(c):
         structured_push_history(chat_id)
         render_prop_step(chat_id, c.message)
     elif action == "tp":
-        st.setdefault("filters", {})["prop"] = parts[2]
+        filters = st.setdefault("filters", {})
+        for key in (
+            "prop",
+            "region",
+            "rayon",
+            "price",
+            "min_price",
+            "max_price",
+            "rooms",
+            "floor_range",
+        ):
+            filters.pop(key, None)
+        filters["prop"] = parts[2]
         structured_push_history(chat_id)
         render_region_step(chat_id, c.message)
     elif action == "rg":
-        st.setdefault("filters", {})["region"] = parts[2]
+        filters = st.setdefault("filters", {})
+        filters["region"] = parts[2]
+        filters.pop("rayon", None)
         structured_push_history(chat_id)
         render_rayon_step(chat_id, c.message)
     elif action == "rn":
@@ -13289,7 +13331,12 @@ def cb_structured(c):
             reply_markup=build_back_reply_keyboard(),
         )
     elif action == "rm":
-        st.setdefault("filters", {})["rooms"] = parts[2]
+        filters = st.setdefault("filters", {})
+        filters.pop("floor_range", None)
+        if parts[2] == "r0":
+            filters.pop("rooms", None)
+        else:
+            filters["rooms"] = parts[2]
         structured_push_history(chat_id)
         prop = st.get("filters", {}).get("prop")
         if prop in {"t", "q"}:
@@ -13301,7 +13348,12 @@ def cb_structured(c):
         else:
             render_floor_step(chat_id, c.message)
     elif action == "fl":
-        st.setdefault("filters", {})["floor_range"] = FLOOR_PRESETS.get(parts[2])
+        filters = st.setdefault("filters", {})
+        floor_val = FLOOR_PRESETS.get(parts[2])
+        if floor_val is None:
+            filters.pop("floor_range", None)
+        else:
+            filters["floor_range"] = floor_val
         perform_structured_search(
             chat_id,
             offset=0,
