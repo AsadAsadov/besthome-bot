@@ -4275,14 +4275,11 @@ def build_listing_action_keyboard(
     favorite_callback: Optional[str],
     listing_link: Optional[str],
     whatsapp_url: Optional[str],
-    call_url: Optional[str],
 ) -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup()
     row1 = []
     if whatsapp_url:
         row1.append(types.InlineKeyboardButton("💬 WhatsApp-da yaz", url=whatsapp_url))
-    if call_url:
-        row1.append(types.InlineKeyboardButton("📞 Zəng et", url=call_url))
     if row1:
         mk.row(*row1)
 
@@ -4303,11 +4300,10 @@ def build_listing_navigation_keyboard(
     is_favorite: bool,
     listing_link: Optional[str] = None,
     whatsapp_url: Optional[str] = None,
-    call_url: Optional[str] = None,
 ) -> types.InlineKeyboardMarkup:
     fav_label = "❤️ Favori" if is_favorite else "🤍 Favori"
     mk = build_listing_action_keyboard(
-        fav_label, "fav:toggle", listing_link, whatsapp_url, call_url
+        fav_label, "fav:toggle", listing_link, whatsapp_url
     )
     mk.row(
         types.InlineKeyboardButton("⬅️ Əvvəlki", callback_data="nav:prev"),
@@ -5143,22 +5139,6 @@ def make_whatsapp_url(
     return f"https://wa.me/{p}?text={quote(text, safe='')}"
 
 
-def make_call_url(phone: Optional[str]) -> Optional[str]:
-    if not phone:
-        return None
-    cleaned = "".join(ch for ch in str(phone) if ch.isdigit() or ch == "+")
-    if cleaned.startswith("00"):
-        cleaned = "+" + cleaned[2:]
-    elif cleaned and cleaned[0].isdigit():
-        if cleaned.startswith("0"):
-            cleaned = "+994" + cleaned[1:]
-        elif not cleaned.startswith("+"):
-            cleaned = "+" + cleaned
-    if len(cleaned) < 9:
-        return None
-    return f"tel:{cleaned}"
-
-
 def build_whatsapp_message(ev: dict) -> str:
     op_raw = (ev.get("operation") or ev.get("Emeliyyat") or "").lower()
     is_rent = "kir" in op_raw or "rent" in op_raw
@@ -5335,7 +5315,6 @@ def send_listing_card(
     phone = ev.get("phone") or ev.get("Elaqe_nomresi")
     wa_message = build_whatsapp_message(ev)
     wa_url = make_whatsapp_url(phone, wa_message)
-    call_url = make_call_url(phone)
     link = ev.get("link") or ev.get("source_link")
 
     favorite_label = "⭐ Favoriyə əlavə et" if with_fav_button else None
@@ -5343,7 +5322,7 @@ def send_listing_card(
         f"fav|{source}|{ev['id']}" if with_fav_button and ev.get("id") else None
     )
     mk = build_listing_action_keyboard(
-        favorite_label, favorite_callback, link, wa_url, call_url
+        favorite_label, favorite_callback, link, wa_url
     )
 
     if extra_buttons:
@@ -12764,9 +12743,8 @@ def render_listing_for_user(
     wa_message = build_whatsapp_message(listing)
     wa_phone = listing.get("phone") or listing.get("Elaqe_nomresi")
     wa_url = make_whatsapp_url(wa_phone, wa_message)
-    call_url = make_call_url(wa_phone)
     markup = build_listing_navigation_keyboard(
-        is_fav, listing_link, wa_url, call_url
+        is_fav, listing_link, wa_url
     )
     try:
         markup_signature = json.dumps(markup.to_dic(), sort_keys=True)
