@@ -209,6 +209,24 @@ logger = logging.getLogger("besthome_bot")
 def handle_start(message):
     chat_id = message.chat.id
 
+    def fetch_user_row():
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT approved, blocked, demo_end_at, demo_expires_at, paid_until
+            FROM users
+            WHERE chat_id=?
+            """,
+            (chat_id,),
+        )
+        row = cur.fetchone()
+        conn.close()
+        return row
+
+    user_row = fetch_user_row()
+    now = datetime.now(timezone.utc)
+
     text = message.text or ""
     parts = text.split(maxsplit=1)
     start_arg = parts[1].strip().lower() if len(parts) > 1 else ""
@@ -222,6 +240,43 @@ def handle_start(message):
         bot.send_message(
             chat_id,
             "⚠️ Sistem yenilənir, zəhmət olmasa 1 dəqiqə sonra yenidən yoxlayın.",
+        )
+
+    user_row = fetch_user_row()
+
+    def to_utc(dt: Optional[datetime]) -> Optional[datetime]:
+        if not dt:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    blocked = bool(user_row["blocked"]) if user_row and "blocked" in user_row.keys() else False
+    paid_until_raw = user_row["paid_until"] if user_row and "paid_until" in user_row.keys() else None
+    demo_end_raw = None
+    if user_row:
+        if "demo_end_at" in user_row.keys() and user_row["demo_end_at"]:
+            demo_end_raw = user_row["demo_end_at"]
+        elif "demo_expires_at" in user_row.keys() and user_row["demo_expires_at"]:
+            demo_end_raw = user_row["demo_expires_at"]
+
+    paid_until_dt = to_utc(parse_dt_safe(paid_until_raw))
+    demo_end_dt = to_utc(parse_dt_safe(demo_end_raw))
+
+    user_active = (
+        (not blocked)
+        and (
+            (paid_until_dt is not None and paid_until_dt > now)
+            or (demo_end_dt is not None and demo_end_dt > now)
+        )
+    )
+
+    if not user_active:
+        bot.send_message(
+            chat_id,
+            "⏳ Pulsuz sınaq müddətiniz başa çatıb.\n"
+            "🔒 Botdan tam şəkildə istifadə etmək üçün\n"
+            "📌 Ödəniş bölməsindən uyğun paketi seçə bilərsiniz.",
         )
 
     send_main_menu(chat_id)
@@ -5354,25 +5409,6 @@ def register_or_update_user_if_needed(message, start_arg: str):
         elif "demo_used" in row and row["demo_used"]:
             demo_info_text = "🎁 Demo müddətiniz bitib. Ödəniş menyusundan yeniləyə bilərsiniz."
 
-    approved = bool(row["approved"]) if row and "approved" in row else False
-    blocked = bool(row["blocked"]) if row and "blocked" in row else False
-    paid_until_raw = None
-    if row and "paid_until" in row.keys():
-        paid_until_raw = row["paid_until"]
-    paid_until_dt = parse_dt_safe(paid_until_raw)
-
-    demo_end_raw_active = None
-    if row:
-        if "demo_end_at" in row.keys() and row["demo_end_at"]:
-            demo_end_raw_active = row["demo_end_at"]
-        elif "demo_expires_at" in row.keys() and row["demo_expires_at"]:
-            demo_end_raw_active = row["demo_expires_at"]
-    demo_end_dt = parse_dt_safe(demo_end_raw_active)
-    now = datetime.utcnow()
-    active_until_candidates = [dt for dt in (paid_until_dt, demo_end_dt) if dt]
-    active_until = max(active_until_candidates) if active_until_candidates else None
-    user_active = approved and not blocked and active_until and active_until > now
-
     if is_first_time:
         send_payment_menu(chat_id)
 
@@ -5421,18 +5457,6 @@ def register_or_update_user_if_needed(message, start_arg: str):
                 "🔒 Demo admin təsdiqindən sonra aktiv olacaq.\n\n"
                 "📌 Təsdiqdən sonra botu tam şəkildə istifadə edə biləcəksiniz."
             )
-    if not demo_info_text and not user_active:
-        demo_info_text = (
-            "⏳ Pulsuz sınaq müddətiniz başa çatıb.\n\n"
-            "🔓 Botdan tam şəkildə istifadə etmək üçün\n"
-            "📌 Ödəniş bölməsindən uyğun paketi seçə bilərsiniz.\n\n"
-            "ℹ️ Ödəniş etdikdən sonra:\n"
-            "– bütün axtarışlar\n"
-            "– elanlara baxış\n"
-            "– əlavə funksiyalar aktiv olacaq.\n\n"
-            "Dəstək lazımdırsa, biz buradayıq 👍"
-        )
-
     if demo_info_text:
         bot.send_message(chat_id, demo_info_text)
 
