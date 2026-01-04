@@ -7652,7 +7652,11 @@ def cb_payplan(c):
         return
     set_payment_note(chat_id, f"plan:{plan_key}")
 
-    mk = types.InlineKeyboardMarkup()
+    mk = types.InlineKeyboardMarkup(row_width=2)
+    mk.row(
+        types.InlineKeyboardButton("💬 Telegram-da yaz", url="https://t.me/esedovesed"),
+        types.InlineKeyboardButton("💚 WhatsApp-da yaz", url="https://wa.me/994708468585"),
+    )
     mk.add(
         types.InlineKeyboardButton(
             "✅ Ödəniş etdim", callback_data=f"paydone|{plan_key}"
@@ -7660,13 +7664,20 @@ def cb_payplan(c):
     )
 
     pay_text = (
-        "💳 Ödəniş üçün:\n"
-        "Telegram: @esedovesed\n"
-        "WhatsApp: 0708468585\n\n"
-        "🆔 Ödəniş kodunuz:\n"
-        f"{subscription_payment_code(chat_id)}"
+        "💳 **Ödəniş üçün bizimlə əlaqə saxlayın:**\n\n"
+        "Aşağıdakı düymələrdən biri ilə birbaşa yazın 👇\n\n"
+        "🆔 **Ödəniş kodunuz:** `{}`".format(subscription_payment_code(chat_id))
     )
-    bot.send_message(chat_id, pay_text, reply_markup=mk)
+    bot.send_message(chat_id, pay_text, reply_markup=mk, parse_mode="Markdown")
+
+    bonus_text = (
+        "🎁 **Bonus imkan!**\n"
+        "Gündə **1 dəfə** əsas menyudakı  \n"
+        "🎁 **Şansını sına** düyməsindən istifadə edərək  \n"
+        "**pulsuz günlər qazana bilərsiniz!**\n\n"
+        "⏳ (24 saatda 1 dəfə)"
+    )
+    bot.send_message(chat_id, bonus_text, parse_mode="Markdown")
     try:
         bot.answer_callback_query(c.id)
     except Exception:
