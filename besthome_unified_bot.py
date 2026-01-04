@@ -5291,51 +5291,53 @@ def build_main_menu(
     show_bonus_button: bool = False,
 ) -> types.ReplyKeyboardMarkup:
     kb = types.ReplyKeyboardMarkup(
-        resize_keyboard=True, one_time_keyboard=False, is_persistent=True
+        resize_keyboard=True, one_time_keyboard=False, is_persistent=True, row_width=2
     )
+
+    buttons: List[Union[str, types.KeyboardButton]] = []
+
     if WEB_APP_URL:
-        kb.row(
+        buttons.append(
             types.KeyboardButton(
                 "🌐 Web Panel", web_app=types.WebAppInfo(url=WEB_APP_URL)
             )
         )
 
-    rows: List[List[str]] = [
-        ["🔎 Axtarış sistemi", "🕒 Son 24 saat"],
-        ["👤 Hesabım", "📊 Statistika"],
-    ]
+    buttons.extend(
+        [
+            "🔎 Axtarış sistemi",
+            "🕒 Son 24 saat",
+            "👤 Hesabım",
+            "📊 Statistika",
+        ]
+    )
 
     if show_bonus_button:
-        rows.append(["🎁 Şansını sına"])
+        buttons.append("🎁 Şansını sına")
+
+    buttons.append("💳 Ödəniş")
 
     if is_admin_user:
-        rows.append(["💳 Ödəniş", "ℹ️ Haqqında"])
+        buttons.append("ℹ️ Haqqında")
     else:
-        rows.append(["💳 Ödəniş", "🤝 Dostunu dəvət et"])
+        buttons.extend(["🤝 Dostunu dəvət et", "ℹ️ Haqqında"])
 
-    complaint_row = ["📩 Şikayət və təkliflər"]
-    rows.append(complaint_row)
-
-    for row in rows:
-        kb.row(*row)
+    buttons.append("📩 Şikayət və təkliflər")
 
     if is_admin_user:
-        kb.row(TEXTS_AZ["admin_panel_button"], MENU_REFRESH_BUTTON)
-    else:
-        kb.row("ℹ️ Haqqında", MENU_REFRESH_BUTTON)
+        buttons.append(TEXTS_AZ["admin_panel_button"])
+
+    buttons.append(MENU_REFRESH_BUTTON)
+
+    for i in range(0, len(buttons), 2):
+        kb.row(*buttons[i : i + 2])
+
     return kb
 
 
 def should_show_bonus_button(chat_id: int) -> bool:
     record = get_user_record(chat_id)
-    if not record:
-        return False
-    if record.get("blocked") or record.get("is_blocked"):
-        return False
-    if record.get("approved") != 1:
-        return False
-    status_val = (record.get("status") or "").lower()
-    if status_val == "deleted" or record.get("deleted_at"):
+    if record and (record.get("blocked") or record.get("is_blocked")):
         return False
     return True
 
@@ -8477,21 +8479,9 @@ def handle_bonus_spin_request(message):
 
     chat_id = message.chat.id
     record = get_user_record(chat_id)
-    if not record or not should_show_bonus_button(chat_id):
-        bot.send_message(chat_id, "❌ Bu funksiya hazırda aktiv deyil.")
-        return
-
-    entitlement_type, entitlement_expiry = resolve_user_entitlement(chat_id)
     now = datetime.utcnow()
-    if not entitlement_type or not entitlement_expiry or entitlement_expiry <= now:
-        bot.send_message(chat_id, "⚠️ Aktiv demo və ya abunəlik tapılmadı.")
-        return
-
-    if entitlement_type == "paid" and (record.get("bonus_allowed") or 0) != 1:
-        bot.send_message(
-            chat_id,
-            "❌ Bu funksiya ödənişli istifadəçilər üçün admin icazəsi ilə aktiv olur.",
-        )
+    if record and (record.get("blocked") or record.get("is_blocked")):
+        send_blocked_prompt(chat_id)
         return
 
     last_spin_dt = parse_last_spin_at(record)
@@ -8506,9 +8496,10 @@ def handle_bonus_spin_request(message):
         )
         return
 
+    entitlement_type, _ = resolve_user_entitlement(chat_id)
     bonus_days = pick_bonus_days()
     set_last_spin_at(chat_id, now)
-    record_bonus_spin(chat_id, record.get("username"), bonus_days)
+    record_bonus_spin(chat_id, record.get("username") if record else None, bonus_days)
 
     if bonus_days > 0:
         apply_bonus_days(chat_id, bonus_days, entitlement_type)
