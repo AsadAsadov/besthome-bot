@@ -7653,19 +7653,26 @@ def cb_payplan(c):
         "selected_price": plan.get("price"),
     }
     payment_code = subscription_payment_code(chat_id)
-    prefill_message = (
-        f"Salam, {plan.get('days')} gün üçün ödəniş etmək istəyirəm.\n"
-        f"Ödəniş kodum: {payment_code}"
+    mk = types.InlineKeyboardMarkup(row_width=1)
+    mk.add(
+        types.InlineKeyboardButton(
+            "📲 WhatsApp-da yaz",
+            url=(
+                "https://wa.me/994708468585?text="
+                "Salam%20BestHome,%20{plan_name}%20paketi%20almaq%20isteyirem.%20"
+                "Odenis%20kodu:%20BH-{payment_code}"
+            ).format(plan_name=quote(plan.get("title", "")), payment_code=chat_id),
+        )
     )
-    encoded_message = quote(prefill_message)
-    mk = types.InlineKeyboardMarkup(row_width=2)
-    mk.row(
+    mk.add(
         types.InlineKeyboardButton(
-            "💬 WhatsApp-da yaz", url=f"https://wa.me/994708468585?text={encoded_message}"
-        ),
-        types.InlineKeyboardButton(
-            "✈️ Telegram-da yaz", url=f"https://t.me/esedovesed?text={encoded_message}"
-        ),
+            "✈️ Telegram-da yaz",
+            url=(
+                "https://t.me/esedovesed?text="
+                "Salam%20BestHome,%20{plan_name}%20paketi%20almaq%20isteyirem.%20"
+                "Odenis%20kodu:%20BH-{payment_code}"
+            ).format(plan_name=quote(plan.get("title", "")), payment_code=chat_id),
+        )
     )
     mk.add(
         types.InlineKeyboardButton(
@@ -7674,15 +7681,18 @@ def cb_payplan(c):
     )
 
     pay_text = (
-        "🎁 Bonus imkan!\n"
-        "Gündə 1 dəfə əsas menyudakı\n"
-        "🎁 Şansını sına düyməsindən istifadə edərək\n"
-        "pulsuz günlər qazana bilərsiniz.\n\n"
-        "⏳ 24 saatda 1 dəfə\n\n"
-        "————————————\n\n"
-        "💳 Ödəniş üçün bizimlə əlaqə saxlayın:\n"
-        "Aşağıdakı düymələrdən biri ilə birbaşa yazın 👇\n\n"
-        f"🆔 Ödəniş kodunuz: {payment_code}"
+        "🎁 BONUS İMKAN\n\n"
+        "Hər 24 saatda 1 dəfə\n"
+        "əsas menyudakı 🎁 Şansını sına\n"
+        "düyməsindən istifadə edərək\n"
+        "pulsuz gün qazana bilərsiniz.\n\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        "💳 ÖDƏNİŞ\n\n"
+        "Planı seçin və\n"
+        "aşağıdakı düymələrdən biri ilə\n"
+        "birbaşa yazın 👇\n\n"
+        "🆔 Ödəniş kodu:\n"
+        f"{payment_code}"
     )
     bot.send_message(chat_id, pay_text, reply_markup=mk)
     try:
@@ -16477,13 +16487,6 @@ def show_user_profile(chat_id: int, user_id: int):
             "🔒 Şansı bağla", callback_data=f"admusr|bonusoff|{user_id}"
         ),
     )
-    markup.add(
-        types.InlineKeyboardButton(
-            "🔁 Bugünkü şansı sıfırla",
-            callback_data=f"admusr|bonusreset|{user_id}",
-        )
-    )
-
     bot.send_message(
         chat_id,
         profile_text,
@@ -17509,49 +17512,9 @@ def admin_show_user_panel(
     mk = types.InlineKeyboardMarkup()
     mk.add(
         types.InlineKeyboardButton(
-            "➕ 3 gün uzat",
-            callback_data=f"admusr|extend|{target_id}|3",
-        ),
-        types.InlineKeyboardButton(
-            "➕ 5 gün uzat",
-            callback_data=f"admusr|extend|{target_id}|5",
-        ),
-    )
-    mk.add(
-        types.InlineKeyboardButton(
-            "➕ 7 gün uzat",
-            callback_data=f"admusr|extend|{target_id}|7",
-        ),
-        types.InlineKeyboardButton(
-            "➕ 15 gün uzat",
-            callback_data=f"admusr|extend|{target_id}|15",
-        ),
-    )
-    mk.add(
-        types.InlineKeyboardButton(
-            "➕ 30 gün uzat",
-            callback_data=f"admusr|extend|{target_id}|30",
+            "➕ Gün əlavə et",
+            callback_data=f"admusr|extend_custom|{target_id}",
         )
-    )
-    mk.add(
-        types.InlineKeyboardButton(
-            "🎁 3 gün demo",
-            callback_data=f"admusr|demo|{target_id}|3",
-        ),
-        types.InlineKeyboardButton(
-            "🎁 5 gün demo",
-            callback_data=f"admusr|demo|{target_id}|5",
-        ),
-    )
-    mk.add(
-        types.InlineKeyboardButton(
-            "🎁 7 gün demo",
-            callback_data=f"admusr|demo|{target_id}|7",
-        ),
-        types.InlineKeyboardButton(
-            "🎁 15 gün demo",
-            callback_data=f"admusr|demo|{target_id}|15",
-        ),
     )
     if record.get("blocked"):
         mk.add(
@@ -17576,13 +17539,6 @@ def admin_show_user_panel(
             "🔒 Şansı bağla", callback_data=f"admusr|bonusoff|{target_id}"
         ),
     )
-    mk.add(
-        types.InlineKeyboardButton(
-            "🔁 Bugünkü şansı sıfırla",
-            callback_data=f"admusr|bonusreset|{target_id}",
-        )
-    )
-
     mk.add(
         types.InlineKeyboardButton(
             "❌ Limitsizi ləğv et" if unlimited else "♾️ Limitsiz et",
@@ -18050,6 +18006,19 @@ def cb_admin_user_panel_actions(c):
         return
     list_type = admin_user_last_list.get(c.message.chat.id)
 
+    if action == "extend_custom":
+        page = get_admin_user_page(c.message.chat.id, list_type or "active")
+        admin_pending_action[c.message.chat.id] = {
+            "type": "user_extend",
+            "user_id": uid,
+            "list_type": list_type,
+            "page": page,
+        }
+        set_user_state(c.message.chat.id, "ADMIN_USER_EXTEND")
+        bot.send_message(c.message.chat.id, "Neçə gün əlavə etmək istəyirsiniz?")
+        safe_answer_callback_query(c.id)
+        return
+
     if action in {"extend", "demo"} and len(parts) > 3:
         try:
             days = int(parts[3])
@@ -18099,9 +18068,6 @@ def cb_admin_user_panel_actions(c):
         safe_answer_callback_query(
             c.id, "🔒 Şans bağlandı" if updated else "⚠️ Yenilənmə alınmadı"
         )
-    elif action == "bonusreset":
-        reset_bonus_spin(uid)
-        safe_answer_callback_query(c.id, "🔁 Son fırlatma sıfırlandı")
     elif action == "unlimit":
         sub = get_subscription(uid) or {}
         if is_user_unlimited(uid, sub=sub):
@@ -19119,29 +19085,31 @@ def cb_admin_select_none(c):
 
 def _send_bulk_action_menu(chat_id: int, list_status: str, page: int):
     mk = types.InlineKeyboardMarkup()
-    mk.add(
+    mk.row(
         types.InlineKeyboardButton(
-            "➕ +30 gün", callback_data=f"adm_bulk_do:30:{list_status}:{page}"
+            "+30 gün", callback_data=f"adm_bulk_do:30:{list_status}:{page}"
         ),
         types.InlineKeyboardButton(
-            "➕ +90 gün", callback_data=f"adm_bulk_do:90:{list_status}:{page}"
+            "+90 gün", callback_data=f"adm_bulk_do:90:{list_status}:{page}"
+        ),
+    )
+    mk.row(
+        types.InlineKeyboardButton(
+            "➕ Gün əlavə et",
+            callback_data=f"adm_bulk_custom:{list_status}:{page}",
         ),
         types.InlineKeyboardButton(
             "🎁 Şans ver",
             callback_data=f"adm_bulk_do:chance_enable:{list_status}:{page}",
         ),
+    )
+    mk.row(
         types.InlineKeyboardButton(
             "🔒 Şansı bağla",
             callback_data=f"adm_bulk_do:chance_disable:{list_status}:{page}",
         ),
     )
-    mk.add(
-        types.InlineKeyboardButton(
-            "➕ Xüsusi gün sayı",
-            callback_data=f"adm_bulk_custom:{list_status}:{page}",
-        )
-    )
-    mk.add(
+    mk.row(
         types.InlineKeyboardButton(
             "❌ Ləğv et", callback_data=f"adm_bulk_cancel:{list_status}:{page}"
         )
@@ -19351,6 +19319,47 @@ def admin_bulk_custom_input(message):
     admin_bulk_action_state.pop(chat_id, None)
     set_user_state(chat_id, "ADMIN_USERS")
     _perform_bulk_extend(chat_id, days, list_status, page)
+
+
+@bot.message_handler(func=lambda m: get_user_state(m.chat.id) == "ADMIN_USER_EXTEND")
+def admin_user_custom_extend_input(message):
+    if message.text and message.text.startswith('/'):
+        return
+
+    chat_id = message.chat.id
+    if not is_admin(chat_id):
+        return
+
+    try:
+        days = int((message.text or "0").strip())
+    except Exception:
+        bot.send_message(chat_id, "⚠️ Zəhmət olmasa düzgün gün sayı yazın.")
+        return
+
+    state = admin_pending_action.pop(chat_id, {}) or {}
+    target_id = state.get("user_id")
+    if not target_id:
+        bot.send_message(chat_id, "⚠️ İstifadəçi tapılmadı.")
+        set_user_state(chat_id, "ADMIN_USERS")
+        return
+
+    list_type = state.get("list_type") or admin_user_last_list.get(chat_id)
+    page = state.get("page") or get_admin_user_page(chat_id, list_type or "active")
+
+    new_exp = admin_extend_user_time(target_id, days, note=f"admin_extend:{days}")
+    if new_exp:
+        send_demo_update_notification(target_id, days, new_exp, granted=False)
+    bot.send_message(chat_id, f"✅ {days} gün əlavə edildi.")
+    set_user_state(chat_id, "ADMIN_USERS")
+    admin_show_user_panel(chat_id, target_id)
+    if list_type in {"expired", "pending", "demo", "active", "blocked"}:
+        show_all_users(
+            chat_id,
+            status=list_type,
+            page=page,
+            message=None,
+            force_new=False,
+        )
 
 
 def get_admin_user_page(chat_id: int, list_type: str) -> int:
