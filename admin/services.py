@@ -294,25 +294,31 @@ def _ensure_chance_columns(conn: sqlite3.Connection) -> None:
             except Exception:
                 continue
 
-    if "chance_enabled" not in columns:
+    if "chance_used_today" not in columns:
         try:
-            conn.execute("ALTER TABLE users ADD COLUMN chance_enabled INTEGER DEFAULT 0")
+            conn.execute("ALTER TABLE users ADD COLUMN chance_used_today INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
-            logger.exception("Failed to add chance_enabled column")
+            logger.exception("Failed to add chance_used_today column")
 
-    if "chance_last_used" not in columns:
+    if "chance_extra_clicks" not in columns:
         try:
-            conn.execute("ALTER TABLE users ADD COLUMN chance_last_used DATETIME")
+            conn.execute("ALTER TABLE users ADD COLUMN chance_extra_clicks INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
-            logger.exception("Failed to add chance_last_used column")
+            logger.exception("Failed to add chance_extra_clicks column")
+
+    if "chance_last_used_at" not in columns:
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN chance_last_used_at DATETIME")
+        except sqlite3.OperationalError:
+            logger.exception("Failed to add chance_last_used_at column")
 
     conn.commit()
 
 
-def grant_chance_bulk(db: AdminDatabase, chat_ids: Sequence[int]) -> Tuple[int, List[int]]:
+def grant_chance_bulk(db: AdminDatabase, chat_ids: Sequence[int]) -> Tuple[int, Dict[int, int]]:
     normalized_ids = [uid for uid in chat_ids if isinstance(uid, int) and uid > 0]
     if not normalized_ids:
-        return 0, []
+        return 0, {}
 
     placeholders = ",".join(["?"] * len(normalized_ids))
     conn = db.local_conn()
@@ -323,20 +329,30 @@ def grant_chance_bulk(db: AdminDatabase, chat_ids: Sequence[int]) -> Tuple[int, 
         )
         existing_ids = [int(row["chat_id"]) for row in cur.fetchall() if row["chat_id"]]
         if not existing_ids:
-            return 0, []
+            return 0, {}
 
         placeholders_existing = ",".join(["?"] * len(existing_ids))
-        cur = conn.execute(
-            f"UPDATE users SET chance_enabled=1, chance_last_used=NULL WHERE chat_id IN ({placeholders_existing})",
+        conn.execute(
+            f"UPDATE users SET chance_extra_clicks=COALESCE(chance_extra_clicks, 0)+1 WHERE chat_id IN ({placeholders_existing})",
             existing_ids,
         )
         conn.commit()
-        return cur.rowcount, existing_ids
+        totals: Dict[int, int] = {}
+        cur = conn.execute(
+            f"SELECT chat_id, COALESCE(chance_extra_clicks, 0) AS extra FROM users WHERE chat_id IN ({placeholders_existing})",
+            existing_ids,
+        )
+        for row in cur.fetchall():
+            try:
+                totals[int(row["chat_id"])] = 1 + int(row["extra"])
+            except Exception:
+                continue
+        return len(totals), totals
     finally:
         conn.close()
 
 
-def send_chance_enabled_notifications(chat_ids: Sequence[int], text: str) -> int:
+def send_chance_enabled_notifications(chance_totals: Dict[int, int]) -> int:
     token = os.environ.get("BOT_TOKEN")
     if not token:
         logger.warning("BOT_TOKEN is not set; skipping chance notifications")
@@ -344,11 +360,18 @@ def send_chance_enabled_notifications(chat_ids: Sequence[int], text: str) -> int
 
     sent = 0
     api_url = f"https://api.telegram.org/bot{token}/sendMessage"
-    for chat_id in chat_ids:
+    for chat_id, total in chance_totals.items():
         try:
             resp = requests.post(
                 api_url,
-                json={"chat_id": chat_id, "text": text},
+                json={
+                    "chat_id": chat_id,
+                    "text": (
+                        "🎁 Sizə əlavə şans verildi!\n"
+                        f"Bu gün **{total} dəfə** şansınızı sınaya bilərsiniz 🍀"
+                    ),
+                    "parse_mode": "Markdown",
+                },
                 timeout=5,
             )
             if resp.ok and (resp.json().get("ok") is True):
