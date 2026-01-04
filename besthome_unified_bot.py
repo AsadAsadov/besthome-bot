@@ -203,6 +203,7 @@ LISTING_SESSION_TTL_SECONDS = 4 * 3600
 listing_sessions: Dict[int, Dict[str, Any]] = {}
 user_stats_filter: Dict[int, str] = {}
 today_results_cache: Dict[int, Dict[str, Any]] = {}
+payment_plan_selection: Dict[int, Dict[str, Any]] = {}
 
 logger = logging.getLogger("besthome_bot")
 
@@ -593,7 +594,7 @@ FINANCIAL_REPORTS_MENU = [
     TEXTS_AZ["financial_reports_monthly"],
     FINANCIAL_REPORTS_BACK,
 ]
-ADMIN_PANEL_PAGE1 = [
+ADMIN_PANEL_BUTTONS = [
     TEXTS_AZ["admin_panel_stats"],
     "📊 QR Statistikası",
     FINANCIAL_REPORTS_BUTTON,
@@ -601,20 +602,15 @@ ADMIN_PANEL_PAGE1 = [
     TEXTS_AZ["admin_panel_agents_notify"],
     TEXTS_AZ["admin_panel_user_search"],
     TEXTS_AZ["admin_panel_users"],
-]
-ADMIN_PANEL_PAGE2 = [
     TEXTS_AZ["admin_panel_promos"],
-    TEXTS_AZ["admin_panel_reset_limits"],
     TEXTS_AZ["admin_panel_send_update"],
     TEXTS_AZ["admin_panel_topviews"],
     TEXTS_AZ["admin_panel_db_update"],
     TEXTS_AZ["admin_panel_direct_message"],
 ]
-ADMIN_PANEL_NAV_NEXT = TEXTS_AZ["admin_panel_nav_next"]
-ADMIN_PANEL_NAV_PREV = TEXTS_AZ["admin_panel_nav_prev"]
 ADMIN_PANEL_BACK_MAIN = TEXTS_AZ["admin_panel_back_main"]
 admin_panel_page_state = {}
-ADMIN_PANEL_ACTIONS = ADMIN_PANEL_PAGE1 + ADMIN_PANEL_PAGE2
+ADMIN_PANEL_ACTIONS = list(ADMIN_PANEL_BUTTONS)
 ADMIN_PANEL_ACTION_SET = set(ADMIN_PANEL_ACTIONS)
 ADMIN_PANEL_ACTION_KEYS = {
     text: str(idx) for idx, text in enumerate(ADMIN_PANEL_ACTIONS)
@@ -7651,11 +7647,25 @@ def cb_payplan(c):
     if not plan:
         return
     set_payment_note(chat_id, f"plan:{plan_key}")
-
+    payment_plan_selection[chat_id] = {
+        "selected_plan": plan_key,
+        "selected_days": plan.get("days"),
+        "selected_price": plan.get("price"),
+    }
+    payment_code = subscription_payment_code(chat_id)
+    prefill_message = (
+        f"Salam, {plan.get('days')} gün üçün ödəniş etmək istəyirəm.\n"
+        f"Ödəniş kodum: {payment_code}"
+    )
+    encoded_message = quote(prefill_message)
     mk = types.InlineKeyboardMarkup(row_width=2)
     mk.row(
-        types.InlineKeyboardButton("💬 Telegram-da yaz", url="https://t.me/esedovesed"),
-        types.InlineKeyboardButton("💚 WhatsApp-da yaz", url="https://wa.me/994708468585"),
+        types.InlineKeyboardButton(
+            "💬 WhatsApp-da yaz", url=f"https://wa.me/994708468585?text={encoded_message}"
+        ),
+        types.InlineKeyboardButton(
+            "✈️ Telegram-da yaz", url=f"https://t.me/esedovesed?text={encoded_message}"
+        ),
     )
     mk.add(
         types.InlineKeyboardButton(
@@ -7664,20 +7674,17 @@ def cb_payplan(c):
     )
 
     pay_text = (
-        "💳 **Ödəniş üçün bizimlə əlaqə saxlayın:**\n\n"
+        "🎁 Bonus imkan!\n"
+        "Gündə 1 dəfə əsas menyudakı\n"
+        "🎁 Şansını sına düyməsindən istifadə edərək\n"
+        "pulsuz günlər qazana bilərsiniz.\n\n"
+        "⏳ 24 saatda 1 dəfə\n\n"
+        "————————————\n\n"
+        "💳 Ödəniş üçün bizimlə əlaqə saxlayın:\n"
         "Aşağıdakı düymələrdən biri ilə birbaşa yazın 👇\n\n"
-        "🆔 **Ödəniş kodunuz:** `{}`".format(subscription_payment_code(chat_id))
+        f"🆔 Ödəniş kodunuz: {payment_code}"
     )
-    bot.send_message(chat_id, pay_text, reply_markup=mk, parse_mode="Markdown")
-
-    bonus_text = (
-        "🎁 **Bonus imkan!**\n"
-        "Gündə **1 dəfə** əsas menyudakı  \n"
-        "🎁 **Şansını sına** düyməsindən istifadə edərək  \n"
-        "**pulsuz günlər qazana bilərsiniz!**\n\n"
-        "⏳ (24 saatda 1 dəfə)"
-    )
-    bot.send_message(chat_id, bonus_text, parse_mode="Markdown")
+    bot.send_message(chat_id, pay_text, reply_markup=mk)
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -14243,7 +14250,7 @@ def send_agent_card(chat_id, ev):
 
 
 def build_admin_panel_keyboard(chat_id: int, page: int = 1):
-    buttons = ADMIN_PANEL_PAGE1 if page == 1 else ADMIN_PANEL_PAGE2
+    buttons = ADMIN_PANEL_BUTTONS
     mk = types.InlineKeyboardMarkup()
     for i in range(0, len(buttons), 2):
         row_buttons = []
@@ -14258,25 +14265,10 @@ def build_admin_panel_keyboard(chat_id: int, page: int = 1):
                 )
             )
         mk.row(*row_buttons)
-    nav_buttons = []
-    if page == 1:
-        nav_buttons.append(
-            types.InlineKeyboardButton(
-                ADMIN_PANEL_NAV_NEXT, callback_data="admin_page_2"
-            )
-        )
-    else:
-        nav_buttons.append(
-            types.InlineKeyboardButton(
-                ADMIN_PANEL_NAV_PREV, callback_data="admin_page_1"
-            )
-        )
-    if nav_buttons:
-        mk.row(*nav_buttons)
     mk.add(
         types.InlineKeyboardButton(ADMIN_PANEL_BACK_MAIN, callback_data="adm_back:main")
     )
-    admin_panel_page_state[chat_id] = page
+    admin_panel_page_state[chat_id] = 1
     return mk
 
 
@@ -14329,13 +14321,6 @@ def _handle_admin_panel_action(chat_id: int, action_text: str):
         bot.register_next_step_handler(msg, admin_search_by_id_step)
     elif action_text == TEXTS_AZ["admin_panel_promos"]:
         show_admin_promo_menu(chat_id)
-    elif action_text == TEXTS_AZ["admin_panel_reset_limits"]:
-        conn = get_local_conn()
-        cur = conn.cursor()
-        cur.execute("DELETE FROM search_limits")
-        conn.commit()
-        conn.close()
-        bot.send_message(chat_id, "♻️ Bütün istifadəçi limitləri sıfırlandı.")
     elif action_text == TEXTS_AZ["admin_panel_users"]:
         show_users_menu(chat_id)
     elif action_text == TEXTS_AZ["admin_panel_send_update"]:
@@ -14376,27 +14361,6 @@ def cb_admin_panel(c):
         action_text = ADMIN_PANEL_ACTION_LOOKUP.get(action_key)
         if action_text:
             _handle_admin_panel_action(chat_id, action_text)
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("admin_page_"))
-@callback_guard
-def admin_panel_pagination(call):
-    if not is_admin(call.from_user.id):
-        return
-
-    if call.data == "admin_page_1":
-        keyboard = build_admin_panel_keyboard(call.message.chat.id, page=1)
-    elif call.data == "admin_page_2":
-        keyboard = build_admin_panel_keyboard(call.message.chat.id, page=2)
-    else:
-        return
-
-    bot.edit_message_text(
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        text=TEXTS_AZ["admin_panel_title"],
-        reply_markup=keyboard,
-    )
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("bonusprob:"))
@@ -19162,6 +19126,14 @@ def _send_bulk_action_menu(chat_id: int, list_status: str, page: int):
         types.InlineKeyboardButton(
             "➕ +90 gün", callback_data=f"adm_bulk_do:90:{list_status}:{page}"
         ),
+        types.InlineKeyboardButton(
+            "🎁 Şans ver",
+            callback_data=f"adm_bulk_do:chance_enable:{list_status}:{page}",
+        ),
+        types.InlineKeyboardButton(
+            "🔒 Şansı bağla",
+            callback_data=f"adm_bulk_do:chance_disable:{list_status}:{page}",
+        ),
     )
     mk.add(
         types.InlineKeyboardButton(
@@ -19227,6 +19199,70 @@ def _perform_bulk_extend(chat_id: int, days: int, list_status: str, page: int):
     )
 
 
+def _ensure_chance_columns_exists(conn: sqlite3.Connection) -> None:
+    columns = set()
+    for row in conn.execute("PRAGMA table_info(users)"):
+        try:
+            columns.add(row[1])
+        except Exception:
+            try:
+                columns.add(row.get("name"))
+            except Exception:
+                continue
+
+    if "chance_enabled" not in columns:
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN chance_enabled INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+    if "chance_last_used" not in columns:
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN chance_last_used DATETIME")
+        except sqlite3.OperationalError:
+            pass
+    conn.commit()
+
+
+def _perform_bulk_chance_toggle(
+    chat_id: int, list_status: str, page: int, enable: bool
+):
+    selected_ids = list(admin_selected_users.get(chat_id, set()))
+    if not selected_ids:
+        bot.send_message(chat_id, "⚠️ Əvvəlcə istifadəçiləri seçin")
+        return
+
+    conn = get_local_conn()
+    cur = conn.cursor()
+    _ensure_chance_columns_exists(conn)
+    placeholders = ",".join(["?"] * len(selected_ids))
+    query = (
+        f"UPDATE users SET chance_enabled=1, chance_last_used=NULL WHERE chat_id IN ({placeholders})"
+        if enable
+        else f"UPDATE users SET chance_enabled=0 WHERE chat_id IN ({placeholders})"
+    )
+    cur.execute(query, selected_ids)
+    conn.commit()
+    updated = cur.rowcount
+    conn.close()
+
+    clear_selected_users(chat_id)
+    if enable:
+        for uid in selected_ids:
+            try:
+                bot.send_message(
+                    uid,
+                    "🎁 Sizə “Şansını sına” funksiyası aktiv edildi!\nBu gün daxil olaraq şansınızı yoxlaya bilərsiniz 🍀",
+                )
+            except Exception:
+                continue
+        bot.send_message(chat_id, f"✅ {updated} istifadəçi üçün 'Şansını sına' aktiv edildi")
+    else:
+        bot.send_message(chat_id, f"✅ {updated} istifadəçi üçün 'Şansını sına' bağlandı")
+
+    update_admin_users_state(chat_id, filter_value=list_status, page=page)
+    show_all_users(chat_id, status=list_status, page=page, message=None, force_new=False)
+
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_bulk_do:"))
 @callback_guard
 def cb_admin_bulk_apply(c):
@@ -19235,9 +19271,17 @@ def cb_admin_bulk_apply(c):
     if not is_admin(chat_id):
         return
     try:
-        _, days_raw, list_status, page_raw = c.data.split(":")
-        days = int(days_raw)
+        _, action_raw, list_status, page_raw = c.data.split(":")
         page = int(page_raw)
+    except Exception:
+        return
+    if action_raw in {"chance_enable", "chance_disable"}:
+        _perform_bulk_chance_toggle(
+            chat_id, list_status, page, enable=(action_raw == "chance_enable")
+        )
+        return
+    try:
+        days = int(action_raw)
     except Exception:
         return
     _perform_bulk_extend(chat_id, days, list_status, page)
