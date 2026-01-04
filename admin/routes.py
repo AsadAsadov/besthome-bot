@@ -16,9 +16,11 @@ from .services import (
     compute_dashboard_counts,
     delete_keyword,
     extend_users_bulk,
+    grant_chance_bulk,
     list_users_paginated,
     list_keyword_alerts,
     log_admin_action,
+    send_chance_enabled_notifications,
     toggle_keyword,
     update_block_state,
 )
@@ -199,6 +201,18 @@ def users_bulk_action():
     elif action == "unblock":
         updated = update_block_state(db, chat_ids, False)
         message = f"{updated} istifadəçi blokdan çıxarıldı" if updated else "Heç kim blokdan çıxarılmadı"
+    elif action == "grant_chance":
+        updated, affected_ids = grant_chance_bulk(db, chat_ids)
+        message = (
+            f"{updated} istifadəçi üçün 'Şansını sına' aktiv edildi"
+            if updated
+            else "Yenilənəcək istifadəçi tapılmadı"
+        )
+        if affected_ids:
+            send_chance_enabled_notifications(
+                affected_ids,
+                "🎁 Sizə “Şansını sına” funksiyası aktiv edildi!\nBu gün daxil olaraq şansınızı yoxlaya bilərsiniz 🍀",
+            )
     else:
         return jsonify({"ok": False, "message": "Naməlum əməliyyat"}), 400
 
