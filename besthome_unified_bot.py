@@ -395,6 +395,7 @@ admin_pending_action: Dict[int, Dict[str, Any]] = {}
 user_callback_locks: Dict[int, threading.Lock] = defaultdict(threading.Lock)
 admin_user_last_list: Dict[int, str] = {}
 admin_navigation_state: Dict[int, Dict[str, Any]] = {}
+bonus_probability_edit_state: Dict[int, bool] = {}
 BLOCKED_MESSAGE_TEXT = "Hesabınız müvəqqəti olaraq dayandırıldı."
 BLOCKED_PROMPT_TEXT = (
     "Hesabınız aktiv deyil. Davam etmək üçün ödəniş edin və ya 3 gün demo istifadə edin."
@@ -408,6 +409,15 @@ STATUS_REJECTED = "rejected"
 ACTIVE_STATUSES = {STATUS_ACTIVE_PAID, STATUS_ACTIVE_DEMO, STATUS_ACTIVE_FREE}
 
 DEMO_DAYS = 3
+BONUS_SPIN_COOLDOWN_HOURS = 24
+BONUS_DEFAULT_PROBABILITIES = {
+    0: 30,
+    1: 30,
+    2: 20,
+    3: 10,
+    5: 7,
+    7: 3,
+}
 TEXTS_AZ = {
     "admin_panel_button": "📊 Admin Panel",
     "admin_panel_title": "🛠 Admin Panel:",
@@ -418,6 +428,7 @@ TEXTS_AZ = {
     "admin_panel_stats": "📊 Statistikalar",
     "admin_panel_customer_requests": "📌 Müştəri istəkləri",
     "admin_panel_financial_reports": "💰 Maliyyə hesabatları",
+    "admin_panel_bonus_stats": "📊 Şans Statistikası",
     "admin_panel_agents_notify": "📢 Vasitəçilərə bildiriş",
     "admin_panel_user_search": "🆔 İstifadəçi ID ilə axtar",
     "admin_panel_users": "👥 İstifadəçilər",
@@ -584,6 +595,7 @@ ADMIN_PANEL_PAGE1 = [
     TEXTS_AZ["admin_panel_stats"],
     "📊 QR Statistikası",
     FINANCIAL_REPORTS_BUTTON,
+    TEXTS_AZ["admin_panel_bonus_stats"],
     TEXTS_AZ["admin_panel_agents_notify"],
     TEXTS_AZ["admin_panel_user_search"],
     TEXTS_AZ["admin_panel_users"],
@@ -1638,7 +1650,9 @@ def init_local_db():
             source_area TEXT,
             attribution_created_at TEXT,
             created_at TEXT,
-            demo_days INTEGER
+            demo_days INTEGER,
+            bonus_allowed INTEGER DEFAULT 0,
+            last_spin_at TEXT
         )
         """
     )
@@ -1672,6 +1686,8 @@ def init_local_db():
         "ALTER TABLE users ADD COLUMN attribution_created_at TEXT",
         "ALTER TABLE users ADD COLUMN created_at TEXT",
         "ALTER TABLE users ADD COLUMN demo_days INTEGER",
+        "ALTER TABLE users ADD COLUMN bonus_allowed INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN last_spin_at TEXT",
         "ALTER TABLE users ADD COLUMN is_blocked INTEGER DEFAULT 0",
         "ALTER TABLE users ADD COLUMN last_error TEXT",
         "ALTER TABLE users ADD COLUMN is_active INTEGER DEFAULT 1",
@@ -1681,6 +1697,32 @@ def init_local_db():
             cur.execute(alter_stmt)
         except sqlite3.OperationalError:
             pass
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bonus_probabilities (
+            days INTEGER PRIMARY KEY,
+            weight INTEGER NOT NULL
+        )
+        """
+    )
+    for days, weight in BONUS_DEFAULT_PROBABILITIES.items():
+        cur.execute(
+            "INSERT OR IGNORE INTO bonus_probabilities (days, weight) VALUES (?, ?)",
+            (days, weight),
+        )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bonus_spin_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            days_won INTEGER NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
 
     # Abunəliklər
     cur.execute(
@@ -2574,7 +2616,7 @@ def get_user_record(chat_id: int) -> Optional[dict]:
                u.is_blocked, u.promo_active, u.promo_expires_at, u.referred_by,
                u.referral_bonus_used, u.referral_milestone_used, u.demo_used,
                u.demo_expires_at, u.blocked_at, u.last_error, u.is_active, u.deleted_at,
-               uw.computed_status, uw.effective_expires_at
+               uw.computed_status, uw.effective_expires_at, u.bonus_allowed, u.last_spin_at
         FROM users u
         LEFT JOIN users_with_status uw ON uw.chat_id = u.chat_id
         WHERE u.chat_id=?
@@ -3013,6 +3055,204 @@ def get_user_demo_status(chat_id: int) -> dict:
         "demo_used": record.get("demo_used", 0),
         "demo_expires_at": record.get("demo_end_at") or record.get("demo_expires_at"),
     }
+
+
+def ensure_bonus_tables(cur: sqlite3.Cursor):
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bonus_probabilities (
+            days INTEGER PRIMARY KEY,
+            weight INTEGER NOT NULL
+        )
+        """
+    )
+    for days, weight in BONUS_DEFAULT_PROBABILITIES.items():
+        cur.execute(
+            "INSERT OR IGNORE INTO bonus_probabilities (days, weight) VALUES (?, ?)",
+            (days, weight),
+        )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bonus_spin_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            days_won INTEGER NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+
+def get_bonus_probabilities() -> Dict[int, int]:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    ensure_bonus_tables(cur)
+    cur.execute("SELECT days, weight FROM bonus_probabilities ORDER BY days")
+    rows = cur.fetchall()
+    conn.close()
+    if not rows:
+        return dict(BONUS_DEFAULT_PROBABILITIES)
+    weights: Dict[int, int] = {}
+    for row in rows:
+        try:
+            day = int(row[0])
+            weight = int(row[1])
+        except Exception:
+            continue
+        weights[day] = weight
+    return weights or dict(BONUS_DEFAULT_PROBABILITIES)
+
+
+def update_bonus_probabilities(new_weights: Dict[int, int]) -> Dict[int, int]:
+    normalized: Dict[int, int] = {}
+    for day, default_weight in BONUS_DEFAULT_PROBABILITIES.items():
+        if day in new_weights:
+            try:
+                normalized[day] = max(0, int(new_weights[day]))
+            except Exception:
+                normalized[day] = default_weight
+        else:
+            normalized[day] = default_weight
+    conn = get_local_conn()
+    cur = conn.cursor()
+    ensure_bonus_tables(cur)
+    cur.execute("DELETE FROM bonus_probabilities")
+    cur.executemany(
+        "INSERT INTO bonus_probabilities (days, weight) VALUES (?, ?)",
+        list(normalized.items()),
+    )
+    conn.commit()
+    conn.close()
+    return normalized
+
+
+def record_bonus_spin(user_id: int, username: Optional[str], days_won: int):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    ensure_bonus_tables(cur)
+    cur.execute(
+        """
+        INSERT INTO bonus_spin_logs (user_id, username, days_won, created_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (user_id, username or None, days_won, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def fetch_bonus_stats() -> dict:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    ensure_bonus_tables(cur)
+    today = date.today().isoformat()
+    cur.execute(
+        "SELECT COUNT(*) FROM bonus_spin_logs WHERE date(created_at)=?", (today,)
+    )
+    today_spins_row = cur.fetchone()
+    cur.execute("SELECT COUNT(*) FROM bonus_spin_logs")
+    total_spins_row = cur.fetchone()
+    cur.execute("SELECT COALESCE(SUM(days_won), 0) FROM bonus_spin_logs")
+    total_days_row = cur.fetchone()
+    cur.execute(
+        """
+        SELECT user_id, username, days_won, created_at
+        FROM bonus_spin_logs
+        ORDER BY datetime(created_at) DESC
+        LIMIT 20
+        """
+    )
+    recent = cur.fetchall()
+    conn.close()
+    return {
+        "today_spins": int(today_spins_row[0]) if today_spins_row else 0,
+        "total_spins": int(total_spins_row[0]) if total_spins_row else 0,
+        "total_days": int(total_days_row[0]) if total_days_row else 0,
+        "recent": recent,
+    }
+
+
+def set_bonus_allowed(user_id: int, allowed: bool) -> bool:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET bonus_allowed=? WHERE chat_id=?",
+        (1 if allowed else 0, user_id),
+    )
+    conn.commit()
+    updated = cur.rowcount > 0
+    conn.close()
+    return updated
+
+
+def reset_bonus_spin(user_id: int):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET last_spin_at=NULL WHERE chat_id=?", (user_id,))
+    conn.commit()
+    conn.close()
+
+
+def set_last_spin_at(user_id: int, ts: datetime):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET last_spin_at=? WHERE chat_id=?", (ts.isoformat(), user_id))
+    conn.commit()
+    conn.close()
+
+
+def parse_last_spin_at(record: Optional[dict]) -> Optional[datetime]:
+    if not record:
+        return None
+    return parse_dt_safe(record.get("last_spin_at"))
+
+
+def resolve_user_entitlement(chat_id: int) -> Tuple[Optional[str], Optional[datetime]]:
+    record = get_user_record(chat_id)
+    if not record:
+        return None, None
+    entitlements: List[Tuple[str, datetime]] = []
+
+    def _add_ent(kind: str, raw_dt: Optional[str]):
+        dt = parse_dt_safe(raw_dt)
+        if dt:
+            entitlements.append((kind, dt))
+
+    _add_ent("demo", record.get("demo_end_at") or record.get("demo_expires_at"))
+    sub = get_subscription(chat_id)
+    if sub:
+        _add_ent("demo" if sub.get("is_demo") else "paid", sub.get("expires_at"))
+    _add_ent("paid", record.get("paid_until"))
+
+    if not entitlements:
+        return None, None
+
+    entitlements.sort(key=lambda x: x[1], reverse=True)
+    return entitlements[0]
+
+
+def apply_bonus_days(user_id: int, bonus_days: int, entitlement_type: Optional[str]):
+    ensure_subscription_record(user_id)
+    if entitlement_type == "demo":
+        base = resolve_extension_base(user_id)
+        new_exp = base + timedelta(days=bonus_days)
+        update_user_demo_end(user_id, new_exp, approve=True)
+        set_subscription(
+            user_id, "bonus_demo", new_exp, is_active=1, is_demo=1, note="bonus_spin"
+        )
+        return new_exp
+    return extend_subscription_with_bonus(user_id, bonus_days, "bonus_spin")
+
+
+def pick_bonus_days() -> int:
+    probabilities = get_bonus_probabilities()
+    options = list(probabilities.keys())
+    weights = [max(0, int(probabilities[o])) for o in options]
+    if not any(weights):
+        options = list(BONUS_DEFAULT_PROBABILITIES.keys())
+        weights = list(BONUS_DEFAULT_PROBABILITIES.values())
+    return random.choices(options, weights=weights, k=1)[0]
 
 
 def update_user_demo_end(chat_id: int, demo_end_at: Optional[datetime], approve: bool):
@@ -5046,7 +5286,9 @@ def send_with_reply_keyboard(
 
 
 def build_main_menu(
-    is_admin_user: bool, has_customer_access: bool = False
+    is_admin_user: bool,
+    has_customer_access: bool = False,
+    show_bonus_button: bool = False,
 ) -> types.ReplyKeyboardMarkup:
     kb = types.ReplyKeyboardMarkup(
         resize_keyboard=True, one_time_keyboard=False, is_persistent=True
@@ -5062,6 +5304,9 @@ def build_main_menu(
         ["🔎 Axtarış sistemi", "🕒 Son 24 saat"],
         ["👤 Hesabım", "📊 Statistika"],
     ]
+
+    if show_bonus_button:
+        rows.append(["🎁 Şansını sına"])
 
     if is_admin_user:
         rows.append(["💳 Ödəniş", "ℹ️ Haqqında"])
@@ -5081,6 +5326,20 @@ def build_main_menu(
     return kb
 
 
+def should_show_bonus_button(chat_id: int) -> bool:
+    record = get_user_record(chat_id)
+    if not record:
+        return False
+    if record.get("blocked") or record.get("is_blocked"):
+        return False
+    if record.get("approved") != 1:
+        return False
+    status_val = (record.get("status") or "").lower()
+    if status_val == "deleted" or record.get("deleted_at"):
+        return False
+    return True
+
+
 def send_main_menu(
     chat_id: int,
     text: Optional[str] = None,
@@ -5096,7 +5355,11 @@ def send_main_menu(
         )
         return
     set_ui_context(chat_id, UI_CONTEXT_MAIN)
-    kb = build_main_menu(is_admin(chat_id), has_customer_requests_access(chat_id))
+    kb = build_main_menu(
+        is_admin(chat_id),
+        has_customer_requests_access(chat_id),
+        should_show_bonus_button(chat_id),
+    )
     send_with_reply_keyboard(
         chat_id,
         text or "🏠 Əsas menyu:",
@@ -6893,7 +7156,11 @@ def complaint_category_handler(message):
         send_with_reply_keyboard(
             chat_id,
             "✅ Şikayət göndərmə ləğv edildi.",
-            build_main_menu(is_admin(chat_id), has_customer_requests_access(chat_id)),
+            build_main_menu(
+                is_admin(chat_id),
+                has_customer_requests_access(chat_id),
+                should_show_bonus_button(chat_id),
+            ),
         )
         return
     if choice not in COMPLAINT_CATEGORIES:
@@ -6938,7 +7205,11 @@ def complaint_message_handler(message):
     send_with_reply_keyboard(
         chat_id,
         "✅ Mesajınız qəbul edildi.\nTəşəkkür edirik! 🙏",
-        build_main_menu(is_admin(chat_id), has_customer_requests_access(chat_id)),
+        build_main_menu(
+            is_admin(chat_id),
+            has_customer_requests_access(chat_id),
+            should_show_bonus_button(chat_id),
+        ),
     )
 
 
@@ -7452,7 +7723,11 @@ def cb_demo_activate(c):
     send_with_reply_keyboard(
         chat_id,
         "🏠 Əsas menyu açıqdır.",
-        build_main_menu(is_admin(chat_id), has_customer_requests_access(chat_id)),
+        build_main_menu(
+            is_admin(chat_id),
+            has_customer_requests_access(chat_id),
+            should_show_bonus_button(chat_id),
+        ),
     )
     try:
         bot.answer_callback_query(c.id)
@@ -7568,7 +7843,11 @@ def handle_common_nav(message):
         send_with_reply_keyboard(
             chat_id,
             "❌ Əməliyyat ləğv edildi.",
-            build_main_menu(is_admin(chat_id), has_customer_requests_access(chat_id)),
+            build_main_menu(
+                is_admin(chat_id),
+                has_customer_requests_access(chat_id),
+                should_show_bonus_button(chat_id),
+            ),
         )
         return True
     return False
@@ -8189,6 +8468,63 @@ def search_system_menu(message):
     if not ensure_allowed(message):
         return
     send_search_menu(message.chat.id)
+
+
+@bot.message_handler(func=lambda m: m.text == "🎁 Şansını sına")
+def handle_bonus_spin_request(message):
+    if message.text and message.text.startswith('/'):
+        return
+
+    chat_id = message.chat.id
+    record = get_user_record(chat_id)
+    if not record or not should_show_bonus_button(chat_id):
+        bot.send_message(chat_id, "❌ Bu funksiya hazırda aktiv deyil.")
+        return
+
+    entitlement_type, entitlement_expiry = resolve_user_entitlement(chat_id)
+    now = datetime.utcnow()
+    if not entitlement_type or not entitlement_expiry or entitlement_expiry <= now:
+        bot.send_message(chat_id, "⚠️ Aktiv demo və ya abunəlik tapılmadı.")
+        return
+
+    if entitlement_type == "paid" and (record.get("bonus_allowed") or 0) != 1:
+        bot.send_message(
+            chat_id,
+            "❌ Bu funksiya ödənişli istifadəçilər üçün admin icazəsi ilə aktiv olur.",
+        )
+        return
+
+    last_spin_dt = parse_last_spin_at(record)
+    if last_spin_dt and now - last_spin_dt < timedelta(hours=BONUS_SPIN_COOLDOWN_HOURS):
+        bot.send_message(
+            chat_id,
+            (
+                "⏳ Şans sistemi\n"
+                "Bu funksiyadan gündə yalnız 1 dəfə istifadə edə bilərsiniz.\n"
+                "Sabah yenidən cəhd edin."
+            ),
+        )
+        return
+
+    bonus_days = pick_bonus_days()
+    set_last_spin_at(chat_id, now)
+    record_bonus_spin(chat_id, record.get("username"), bonus_days)
+
+    if bonus_days > 0:
+        apply_bonus_days(chat_id, bonus_days, entitlement_type)
+        bot.send_message(
+            chat_id,
+            (
+                "🎉 Təbriklər!\n"
+                f"Siz +{bonus_days} gün bonus qazandınız.\n"
+                "Botdan istifadə müddətiniz uzadıldı."
+            ),
+        )
+    else:
+        bot.send_message(
+            chat_id,
+            "😄 Bu dəfə alınmadı\nAmma sabah yenidən şansını sınaya bilərsən!",
+        )
 
 
 @bot.message_handler(func=lambda m: m.text == "⬅️ Geri")
@@ -10368,7 +10704,11 @@ def finalize_notification_rule(chat_id: int):
     send_with_reply_keyboard(
         chat_id,
         "🏠 Əsas menyu açıqdır.",
-        build_main_menu(is_admin(chat_id), has_customer_requests_access(chat_id)),
+        build_main_menu(
+            is_admin(chat_id),
+            has_customer_requests_access(chat_id),
+            should_show_bonus_button(chat_id),
+        ),
     )
 
 
@@ -13950,6 +14290,8 @@ def _handle_admin_panel_action(chat_id: int, action_text: str):
     elif action_text == TEXTS_AZ["admin_panel_stats"]:
         admin_stats_period[chat_id] = "day"
         show_admin_stats(chat_id)
+    elif action_text == TEXTS_AZ["admin_panel_bonus_stats"]:
+        show_bonus_stats(chat_id)
     elif action_text == TEXTS_AZ["admin_panel_customer_requests"]:
         show_customer_requests_overview(chat_id, "day")
     elif action_text == "📊 QR Statistikası":
@@ -14032,6 +14374,61 @@ def admin_panel_pagination(call):
         text=TEXTS_AZ["admin_panel_title"],
         reply_markup=keyboard,
     )
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("bonusprob:"))
+@callback_guard
+def cb_bonus_probability_controls(c):
+    if not is_admin(c.from_user.id):
+        return
+    action = c.data.split(":", 1)[1] if ":" in c.data else ""
+    if action == "edit":
+        bonus_probability_edit_state[c.message.chat.id] = True
+        bot.send_message(
+            c.message.chat.id,
+            "Yeni ehtimalları bu formatda göndərin: 0=30,1=30,2=20,3=10,5=7,7=3",
+        )
+    elif action == "refresh":
+        show_bonus_stats(c.message.chat.id)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.message_handler(func=lambda m: bonus_probability_edit_state.get(m.chat.id))
+def handle_bonus_probability_edit(message):
+    if not is_admin(message.chat.id):
+        return
+
+    text = (message.text or "").replace("%", "")
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    new_weights: Dict[int, int] = {}
+    for part in parts:
+        if "=" not in part:
+            continue
+        left, right = part.split("=", 1)
+        try:
+            day_val = int(left.strip())
+            weight_val = int(right.strip())
+        except Exception:
+            continue
+        if day_val in BONUS_DEFAULT_PROBABILITIES:
+            new_weights[day_val] = weight_val
+
+    bonus_probability_edit_state.pop(message.chat.id, None)
+
+    if not new_weights:
+        bot.send_message(
+            message.chat.id,
+            "⚠️ Düzgün format: 0=30,1=30,2=20,3=10,5=7,7=3",
+        )
+        show_bonus_stats(message.chat.id)
+        return
+
+    update_bonus_probabilities(new_weights)
+    bot.send_message(message.chat.id, "✅ Ehtimallar yeniləndi.")
+    show_bonus_stats(message.chat.id)
 
 
 def format_qr_area_label(area_code: Optional[str]) -> str:
@@ -16008,6 +16405,11 @@ def show_user_profile(chat_id: int, user_id: int):
     username = record.get("username")
     computed_status = record.get("computed_status") or get_user_computed_status(user_id)
     effective_raw = record.get("effective_expires_at")
+    bonus_allowed_flag = bool(record.get("bonus_allowed"))
+    last_spin_dt = (
+        parse_dt_safe(record.get("last_spin_at")) if record.get("last_spin_at") else None
+    )
+    last_spin_text = last_spin_dt.strftime("%Y-%m-%d %H:%M") if last_spin_dt else "-"
 
     profile_text = "\n".join(
         [
@@ -16019,6 +16421,8 @@ def show_user_profile(chat_id: int, user_id: int):
             f"📦 Status: {computed_status or '-'}",
             f"📅 Bitmə tarixi: {format_effective_expiry_for_ui(effective_raw)}",
             f"⏳ Qalan gün: {format_remaining_days_for_ui(computed_status, effective_raw)}",
+            f"🎁 Şans icazəsi: {'Bəli' if bonus_allowed_flag else 'Xeyr'}",
+            f"🎡 Son fırlatma: {last_spin_text}",
         ]
     )
 
@@ -16043,6 +16447,21 @@ def show_user_profile(chat_id: int, user_id: int):
         )
     )
     markup.add(*buttons)
+
+    markup.add(
+        types.InlineKeyboardButton(
+            "🎁 Şans ver", callback_data=f"admusr|bonuson|{user_id}"
+        ),
+        types.InlineKeyboardButton(
+            "🔒 Şansı bağla", callback_data=f"admusr|bonusoff|{user_id}"
+        ),
+    )
+    markup.add(
+        types.InlineKeyboardButton(
+            "🔁 Bugünkü şansı sıfırla",
+            callback_data=f"admusr|bonusreset|{user_id}",
+        )
+    )
 
     bot.send_message(
         chat_id,
@@ -17038,6 +17457,11 @@ def admin_show_user_panel(
     is_active = record.get("is_active")
     status_text = "Bloklanıb" if blocked_flag else ("Deaktiv" if is_active == 0 else "Aktiv")
     last_error = record.get("last_error")
+    bonus_allowed_flag = bool(record.get("bonus_allowed"))
+    last_spin_dt = (
+        parse_dt_safe(record.get("last_spin_at")) if record.get("last_spin_at") else None
+    )
+    last_spin_text = last_spin_dt.strftime("%Y-%m-%d %H:%M") if last_spin_dt else "-"
 
     info_txt = (
         f"🆔 İstifadəçi: {target_id}\n"
@@ -17047,6 +17471,8 @@ def admin_show_user_panel(
         f"🔖 Hesab statusu: {status_text}\n"
         f"♾️ Limitsiz: {'Bəli' if unlimited else 'Xeyr'}\n"
         f"⛔ Bloklu: {blocked_state}\n"
+        f"🎁 Şans icazəsi: {'Bəli' if bonus_allowed_flag else 'Xeyr'}\n"
+        f"🎡 Son fırlatma: {last_spin_text}\n"
         f"🆔 Ödəniş kodu: {subscription_payment_code(target_id)}"
     )
     if last_error:
@@ -17113,6 +17539,21 @@ def admin_show_user_panel(
                 callback_data=f"admusr|block|{target_id}",
             )
         )
+
+    mk.add(
+        types.InlineKeyboardButton(
+            "🎁 Şans ver", callback_data=f"admusr|bonuson|{target_id}"
+        ),
+        types.InlineKeyboardButton(
+            "🔒 Şansı bağla", callback_data=f"admusr|bonusoff|{target_id}"
+        ),
+    )
+    mk.add(
+        types.InlineKeyboardButton(
+            "🔁 Bugünkü şansı sıfırla",
+            callback_data=f"admusr|bonusreset|{target_id}",
+        )
+    )
 
     mk.add(
         types.InlineKeyboardButton(
@@ -17609,6 +18050,30 @@ def cb_admin_user_panel_actions(c):
         safe_answer_callback_query(
             c.id, "✅ Blokdan çıxarıldı." if unblocked else "⚠️ Blokda deyil."
         )
+    elif action == "bonuson":
+        updated = set_bonus_allowed(uid, True)
+        if updated:
+            try:
+                bot.send_message(
+                    uid,
+                    (
+                        "🎁 Sizə bonus şansı verildi!\n"
+                        "Şansınızı sına düyməsindən 1 dəfə istifadə edə bilərsiniz."
+                    ),
+                )
+            except Exception:
+                pass
+        safe_answer_callback_query(
+            c.id, "🎁 Şans açıldı" if updated else "⚠️ Yenilənmə alınmadı"
+        )
+    elif action == "bonusoff":
+        updated = set_bonus_allowed(uid, False)
+        safe_answer_callback_query(
+            c.id, "🔒 Şans bağlandı" if updated else "⚠️ Yenilənmə alınmadı"
+        )
+    elif action == "bonusreset":
+        reset_bonus_spin(uid)
+        safe_answer_callback_query(c.id, "🔁 Son fırlatma sıfırlandı")
     elif action == "unlimit":
         sub = get_subscription(uid) or {}
         if is_user_unlimited(uid, sub=sub):
@@ -20566,6 +21031,55 @@ def show_referral_stats(chat_id: int):
         lines.append("Hələ referral qeydiyyatı yoxdur.")
 
     bot.send_message(chat_id, "\n".join(lines))
+
+
+def show_bonus_stats(chat_id: int):
+    if not is_admin(chat_id):
+        return
+
+    stats = fetch_bonus_stats()
+    probabilities = get_bonus_probabilities()
+    lines = ["📊 Şans Statistikası"]
+    lines.append(f"• Bu gün fırladanlar: {stats.get('today_spins', 0)}")
+    lines.append(f"• Ümumi fırlatma sayı: {stats.get('total_spins', 0)}")
+    lines.append(f"• Verilən ümumi bonus günlər: {stats.get('total_days', 0)}")
+
+    if probabilities:
+        lines.append("\nEhtimallar:")
+        for day, weight in sorted(probabilities.items()):
+            lines.append(f"• {day} gün: {weight}%")
+
+    recent = stats.get("recent") or []
+    if recent:
+        lines.append("\nSon fırlatmalar:")
+        for row in recent:
+            user_id = _row_value_safe(row, "user_id", "-")
+            username = _row_value_safe(row, "username") or "-"
+            days_won = _row_value_safe(row, "days_won", 0) or 0
+            created_raw = _row_value_safe(row, "created_at")
+            created_dt = parse_dt_safe(created_raw)
+            created_text = (
+                created_dt.strftime("%Y-%m-%d %H:%M") if created_dt else str(created_raw or "-")
+            )
+            uname_display = f"@{username}" if username and username != "-" else "-"
+            lines.append(
+                f"• {created_text} — {user_id} ({uname_display}) : {days_won} gün"
+            )
+
+    mk = types.InlineKeyboardMarkup()
+    mk.add(
+        types.InlineKeyboardButton(
+            "⚙️ Ehtimalları dəyiş", callback_data="bonusprob:edit"
+        )
+    )
+    mk.add(
+        types.InlineKeyboardButton("🔄 Yenilə", callback_data="bonusprob:refresh")
+    )
+    mk.add(
+        types.InlineKeyboardButton(ADMIN_PANEL_BACK_MAIN, callback_data="adm_back:main")
+    )
+
+    bot.send_message(chat_id, "\n".join(lines), reply_markup=mk)
 
 
 def show_revenue_report(chat_id: int):
