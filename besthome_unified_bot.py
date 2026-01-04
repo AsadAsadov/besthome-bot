@@ -5392,8 +5392,8 @@ def build_search_menu_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("🏠 Satılır", "🏢 Kirayə verilir")
     kb.row("🔍 Açar sözlə axtar", "📞 Nömrə ilə axtar")
-    kb.row("⭐ Favorilərim")
-    kb.row("🔔 Bildirişlərim", "⬅️ Geri")
+    kb.row("⭐ Favorilərim", "🔔 Bildirişlərim")
+    kb.row("⬅️ Geri")
     return kb
 
 

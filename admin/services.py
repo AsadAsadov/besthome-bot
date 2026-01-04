@@ -4,6 +4,8 @@ import sqlite3
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple, List, Sequence
 
+import requests
+
 logger = logging.getLogger("admin_panel")
 
 
@@ -279,6 +281,82 @@ def extend_users_bulk(db: AdminDatabase, chat_ids: Sequence[int], days: int) -> 
         return len(normalized_ids)
     finally:
         conn.close()
+
+
+def _ensure_chance_columns(conn: sqlite3.Connection) -> None:
+    columns = set()
+    for row in conn.execute("PRAGMA table_info(users)"):
+        try:
+            columns.add(row[1])
+        except Exception:
+            try:
+                columns.add(row["name"])
+            except Exception:
+                continue
+
+    if "chance_enabled" not in columns:
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN chance_enabled INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            logger.exception("Failed to add chance_enabled column")
+
+    if "chance_last_used" not in columns:
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN chance_last_used DATETIME")
+        except sqlite3.OperationalError:
+            logger.exception("Failed to add chance_last_used column")
+
+    conn.commit()
+
+
+def grant_chance_bulk(db: AdminDatabase, chat_ids: Sequence[int]) -> Tuple[int, List[int]]:
+    normalized_ids = [uid for uid in chat_ids if isinstance(uid, int) and uid > 0]
+    if not normalized_ids:
+        return 0, []
+
+    placeholders = ",".join(["?"] * len(normalized_ids))
+    conn = db.local_conn()
+    try:
+        _ensure_chance_columns(conn)
+        cur = conn.execute(
+            f"SELECT chat_id FROM users WHERE chat_id IN ({placeholders})", normalized_ids
+        )
+        existing_ids = [int(row["chat_id"]) for row in cur.fetchall() if row["chat_id"]]
+        if not existing_ids:
+            return 0, []
+
+        placeholders_existing = ",".join(["?"] * len(existing_ids))
+        cur = conn.execute(
+            f"UPDATE users SET chance_enabled=1, chance_last_used=NULL WHERE chat_id IN ({placeholders_existing})",
+            existing_ids,
+        )
+        conn.commit()
+        return cur.rowcount, existing_ids
+    finally:
+        conn.close()
+
+
+def send_chance_enabled_notifications(chat_ids: Sequence[int], text: str) -> int:
+    token = os.environ.get("BOT_TOKEN")
+    if not token:
+        logger.warning("BOT_TOKEN is not set; skipping chance notifications")
+        return 0
+
+    sent = 0
+    api_url = f"https://api.telegram.org/bot{token}/sendMessage"
+    for chat_id in chat_ids:
+        try:
+            resp = requests.post(
+                api_url,
+                json={"chat_id": chat_id, "text": text},
+                timeout=5,
+            )
+            if resp.ok and (resp.json().get("ok") is True):
+                sent += 1
+        except Exception as exc:
+            logger.warning("Failed to send chance notification chat_id=%s error=%s", chat_id, exc)
+            continue
+    return sent
 
 
 def block_user(db: AdminDatabase, chat_id: int, blocked: bool) -> bool:

@@ -87,20 +87,21 @@
 </div>
 
 <div id="bulk-actions" class="card" style="display:none; position: sticky; bottom: 12px; z-index:10;">
-  <div class="inline" style="justify-content: space-between; gap:12px; flex-wrap: wrap; align-items: center;">
-    <div class="inline" style="gap:8px; flex-wrap: wrap; align-items: center;">
-      <strong>Seçilənlərə uzatma:</strong>
-      {% for d in [1,7,15,30] %}
-        <button type="button" class="extend-btn" data-days="{{ d }}">+{{ d }} gün</button>
-      {% endfor %}
-      <input type="number" id="custom-days" placeholder="Gün" min="1" style="width:90px;" />
-      <button type="button" id="extend-custom">Uzat</button>
-    </div>
-    <div class="inline" style="gap:8px; flex-wrap: wrap; align-items: center;">
-      <button type="button" class="action-btn" data-action="approve">✅ Təsdiqlə</button>
-      <button type="button" class="action-btn" data-action="block">🚫 Blokla</button>
-      <button type="button" class="action-btn" data-action="unblock">♻️ Blokdan çıxar</button>
-    </div>
+    <div class="inline" style="justify-content: space-between; gap:12px; flex-wrap: wrap; align-items: center;">
+      <div class="inline" style="gap:8px; flex-wrap: wrap; align-items: center;">
+        <strong>Seçilənlərə uzatma:</strong>
+        {% for d in [1,7,15,30] %}
+          <button type="button" class="extend-btn" data-days="{{ d }}">+{{ d }} gün</button>
+        {% endfor %}
+        <input type="number" id="custom-days" placeholder="Gün" min="1" style="width:90px;" />
+        <button type="button" id="extend-custom">Uzat</button>
+      </div>
+      <div class="inline" style="gap:8px; flex-wrap: wrap; align-items: center;">
+        <button type="button" class="action-btn" data-action="grant_chance">🎁 Şans ver</button>
+        <button type="button" class="action-btn" data-action="approve">✅ Təsdiqlə</button>
+        <button type="button" class="action-btn" data-action="block">🚫 Blokla</button>
+        <button type="button" class="action-btn" data-action="unblock">♻️ Blokdan çıxar</button>
+      </div>
   </div>
 </div>
 
