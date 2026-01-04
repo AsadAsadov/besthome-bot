@@ -1662,6 +1662,7 @@ def init_local_db():
             customer_requests_enabled INTEGER DEFAULT 0,
             source_type TEXT,
             source_area TEXT,
+            join_source TEXT,
             attribution_created_at TEXT,
             created_at TEXT,
             demo_days INTEGER,
@@ -1697,6 +1698,7 @@ def init_local_db():
         "ALTER TABLE users ADD COLUMN first_name TEXT",
         "ALTER TABLE users ADD COLUMN source_type TEXT",
         "ALTER TABLE users ADD COLUMN source_area TEXT",
+        "ALTER TABLE users ADD COLUMN join_source TEXT",
         "ALTER TABLE users ADD COLUMN attribution_created_at TEXT",
         "ALTER TABLE users ADD COLUMN created_at TEXT",
         "ALTER TABLE users ADD COLUMN demo_days INTEGER",
@@ -2630,7 +2632,8 @@ def get_user_record(chat_id: int) -> Optional[dict]:
                u.is_blocked, u.promo_active, u.promo_expires_at, u.referred_by,
                u.referral_bonus_used, u.referral_milestone_used, u.demo_used,
                u.demo_expires_at, u.blocked_at, u.last_error, u.is_active, u.deleted_at,
-               uw.computed_status, uw.effective_expires_at, u.bonus_allowed, u.last_spin_at
+               uw.computed_status, uw.effective_expires_at, u.bonus_allowed, u.last_spin_at,
+               u.join_source
         FROM users u
         LEFT JOIN users_with_status uw ON uw.chat_id = u.chat_id
         WHERE u.chat_id=?
@@ -5618,6 +5621,9 @@ def register_or_update_user_if_needed(message, start_arg: str):
     first_name = message.from_user.first_name or ""
     full_name = message.from_user.full_name or ""
     start_arg = (start_arg or "").strip().lower()
+    join_source_value: Optional[str] = (
+        start_arg if start_arg in ALLOWED_START_AREAS else None
+    )
     if start_arg in ALLOWED_START_AREAS:
         source_type = "qr"
         source_area: Optional[str] = start_arg
@@ -5662,8 +5668,8 @@ def register_or_update_user_if_needed(message, start_arg: str):
         try:
             cur.execute(
                 """
-                INSERT INTO users (chat_id, username, full_name, first_seen, approved, is_admin, last_version, referred_by, referral_bonus_used, referral_milestone_used, is_first_start, first_name, source_type, source_area, attribution_created_at, created_at, demo_days, demo_end_at, demo_expires_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO users (chat_id, username, full_name, first_seen, approved, is_admin, last_version, referred_by, referral_bonus_used, referral_milestone_used, is_first_start, first_name, source_type, source_area, join_source, attribution_created_at, created_at, demo_days, demo_end_at, demo_expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chat_id,
@@ -5680,6 +5686,7 @@ def register_or_update_user_if_needed(message, start_arg: str):
                     first_name,
                     source_type,
                     source_area,
+                    join_source_value,
                     attribution_created_at,
                     created_at,
                     demo_days,
@@ -14461,48 +14468,54 @@ def fetch_qr_stats(range_key: str):
         start_time = get_qr_stats_start_time(range_key)
         conn = get_db()
         cur = conn.cursor()
-        params: List[Any] = []
-        base_where = "source_type='qr_or_start' AND source_area IS NOT NULL"
+        source_params: List[Any] = list(QR_STATS_AREAS)
+        base_where = f"join_source IN ({','.join(['?'] * len(QR_STATS_AREAS))})"
         time_filter = ""
         if start_time:
             time_filter = " AND datetime(created_at) >= datetime(?)"
-            params.append(start_time.isoformat())
+            source_params.append(start_time.isoformat())
 
         cur.execute(
             f"""
-            SELECT user_id, username, source_area, created_at
+            SELECT chat_id as user_id, username, join_source, created_at
             FROM users
             WHERE {base_where}{time_filter}
             ORDER BY datetime(created_at) DESC
             LIMIT 50
             """,
-            params,
+            source_params,
         )
         rows = cur.fetchall()
 
         cur.execute(
             f"""
-            SELECT source_area, COUNT(*) as cnt
+            SELECT join_source, COUNT(*) as cnt
             FROM users
             WHERE {base_where}{time_filter}
-            GROUP BY source_area
+            GROUP BY join_source
             """,
-            params,
+            source_params,
         )
         count_rows = cur.fetchall()
         for count_row in count_rows:
             area_code = (
-                count_row["source_area"]
-                if "source_area" in count_row.keys()
+                count_row["join_source"]
+                if "join_source" in count_row.keys()
                 else count_row[0]
             )
             cnt = int(count_row["cnt"] if "cnt" in count_row.keys() else count_row[1])
             if area_code in area_counts:
                 area_counts[area_code] = cnt
 
+        total_params: List[Any] = []
+        total_time_filter = ""
+        if start_time:
+            total_time_filter = " AND datetime(created_at) >= datetime(?)"
+            total_params.append(start_time.isoformat())
+
         cur.execute(
-            f"SELECT COUNT(*) FROM users WHERE {base_where}{time_filter}",
-            params,
+            f"SELECT COUNT(*) FROM users WHERE join_source IS NOT NULL{total_time_filter}",
+            total_params,
         )
         total_row = cur.fetchone()
         total = int(total_row[0]) if total_row else 0
@@ -14523,10 +14536,12 @@ def fetch_qr_top_areas():
     try:
         conn = get_db()
         cur = conn.cursor()
-        base_where = "source_type='qr_or_start' AND source_area IS NOT NULL"
+        placeholders = ",".join(["?"] * len(QR_STATS_AREAS))
         cur.execute(
-            f"SELECT source_area, COUNT(*) as cnt FROM users WHERE {base_where} "
-            "GROUP BY source_area ORDER BY cnt DESC"
+            f"SELECT join_source, COUNT(*) as cnt FROM users "
+            f"WHERE join_source IN ({placeholders}) "
+            "GROUP BY join_source ORDER BY cnt DESC",
+            list(QR_STATS_AREAS),
         )
         rows = cur.fetchall()
     except Exception:
@@ -14573,7 +14588,7 @@ def send_qr_stats(chat_id: int, range_key: str):
     lines = [f"📊 QR Statistikası ({label})", ""]
     area_groups: Dict[str, List[Any]] = {area: [] for area in QR_STATS_AREAS}
     for row in rows:
-        area_code = row["source_area"] if "source_area" in row.keys() else row[2]
+        area_code = row["join_source"] if "join_source" in row.keys() else row[2]
         if area_code in area_groups:
             area_groups[area_code].append(row)
 
@@ -14618,7 +14633,7 @@ def send_qr_top_areas(chat_id: int):
     else:
         for idx, row in enumerate(rows[:3]):
             medal = medals[idx] if idx < len(medals) else f"{idx + 1}"
-            area_code = row["source_area"] if "source_area" in row.keys() else row[0]
+            area_code = row["join_source"] if "join_source" in row.keys() else row[0]
             cnt = int(row["cnt"] if "cnt" in row.keys() else row[1])
             lines.append(f"{medal} {format_qr_area_label(area_code)} — {cnt} istifadəçi")
     bot.send_message(chat_id, "\n".join(lines))
@@ -17493,9 +17508,16 @@ def admin_show_user_panel(
         parse_dt_safe(record.get("last_spin_at")) if record.get("last_spin_at") else None
     )
     last_spin_text = last_spin_dt.strftime("%Y-%m-%d %H:%M") if last_spin_dt else "-"
+    join_source_code = record.get("join_source")
+    join_source_text = (
+        f"QR — {format_qr_area_label(join_source_code)}"
+        if join_source_code
+        else "Birbaşa /start"
+    )
 
     info_txt = (
         f"🆔 İstifadəçi: {target_id}\n"
+        f"🔗 Qoşulma mənbəyi: {join_source_text}\n"
         f"📦 Status: {computed_status or '-'}\n"
         f"📅 Bitmə tarixi: {format_effective_expiry_for_ui(effective_raw)}\n"
         f"⏳ Qalan gün: {format_remaining_days_for_ui(computed_status, effective_raw)}\n"
