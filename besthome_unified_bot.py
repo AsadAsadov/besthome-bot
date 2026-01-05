@@ -1665,7 +1665,8 @@ def init_local_db():
             demo_days INTEGER,
             bonus_allowed INTEGER DEFAULT 0,
             last_spin_at TEXT,
-            chance_last_used_at TEXT
+            chance_last_used_at TEXT,
+            chance_blocked INTEGER DEFAULT 0
         )
     """
     )
@@ -1703,6 +1704,7 @@ def init_local_db():
         "ALTER TABLE users ADD COLUMN bonus_allowed INTEGER DEFAULT 0",
         "ALTER TABLE users ADD COLUMN last_spin_at TEXT",
         "ALTER TABLE users ADD COLUMN chance_last_used_at TEXT",
+        "ALTER TABLE users ADD COLUMN chance_blocked INTEGER DEFAULT 0",
         "ALTER TABLE users ADD COLUMN is_blocked INTEGER DEFAULT 0",
         "ALTER TABLE users ADD COLUMN last_error TEXT",
         "ALTER TABLE users ADD COLUMN is_active INTEGER DEFAULT 1",
@@ -2620,7 +2622,7 @@ def get_user_record(chat_id: int) -> Optional[dict]:
                u.referral_bonus_used, u.referral_milestone_used, u.demo_used,
                u.demo_expires_at, u.blocked_at, u.last_error, u.is_active, u.deleted_at,
                uw.computed_status, uw.effective_expires_at, u.bonus_allowed, u.last_spin_at,
-               u.join_source, u.chance_last_used_at
+               u.join_source, u.chance_last_used_at, u.chance_blocked
         FROM users u
         LEFT JOIN users_with_status uw ON uw.chat_id = u.chat_id
         WHERE u.chat_id=?
@@ -3332,6 +3334,13 @@ def handle_chance_request(user_id: int) -> None:
     chat_id = user_id
     record = get_user_record(user_id) or {}
     now = datetime.utcnow()
+
+    if record.get("chance_blocked"):
+        bot.send_message(
+            chat_id,
+            "⛔ Şans funksiyası sizin üçün deaktiv edilib.\nƏlavə məlumat üçün adminə müraciət edin.",
+        )
+        return
 
     last_used_at = parse_dt_safe(record.get("chance_last_used_at")) if record else None
     if last_used_at is not None and now - last_used_at < timedelta(hours=24):
@@ -14050,7 +14059,8 @@ def phone_search_handler(message):
         bot.send_message(chat_id, "Günlük nömrə ilə axtarış limitiniz bitib.")
         return
 
-    raw = "".join(ch for ch in (message.text or "") if ch.isdigit())
+    digits = "".join(ch for ch in (message.text or "") if ch.isdigit())
+    raw = digits[-9:] if len(digits) > 9 else digits
     if len(raw) < 7:
         bot.send_message(chat_id, "⚠️ Zəhmət olmasa düzgün nömrə yazın (min. 7 rəqəm).")
         return
@@ -14268,7 +14278,8 @@ def agent_search_by_phone(message):
     if not is_admin(message.chat.id):
         return
 
-    num = "".join(ch for ch in (message.text or "") if ch.isdigit())
+    digits = "".join(ch for ch in (message.text or "") if ch.isdigit())
+    num = digits[-9:] if len(digits) > 9 else digits
     if len(num) < 7:
         bot.send_message(message.chat.id, "⚠️ Minimum 7 rəqəm yaz.")
         return
@@ -17586,6 +17597,14 @@ def admin_show_user_panel(
         info_txt += f"\n⚠️ Son xəta: {last_error}"
 
     mk = types.InlineKeyboardMarkup()
+    mk.row(
+        types.InlineKeyboardButton(
+            "🎁 Şansı sıfırla", callback_data=f"admusr|chance_reset|{target_id}"
+        ),
+        types.InlineKeyboardButton(
+            "⛔ Şansı bağla", callback_data=f"admusr|chance_block|{target_id}"
+        ),
+    )
     mk.add(
         types.InlineKeyboardButton(
             "➕ Gün əlavə et",
@@ -18112,6 +18131,16 @@ def cb_admin_user_panel_actions(c):
             if new_exp:
                 send_demo_update_notification(uid, days, new_exp, granted=True)
             safe_answer_callback_query(c.id, f"✅ {days} gün demo verildi.")
+    elif action == "chance_reset":
+        updated = _reset_chance_usage_for_users([uid])
+        safe_answer_callback_query(
+            c.id, "✅ Şans sıfırlandı." if updated else "⚠️ Yenilənmə olmadı."
+        )
+    elif action == "chance_block":
+        updated = _block_chance_for_users([uid])
+        safe_answer_callback_query(
+            c.id, "✅ Şans bağlandı." if updated else "⚠️ Artıq bağlıdır."
+        )
     elif action == "block":
         blocked = block_user(uid)
         safe_answer_callback_query(
@@ -19144,6 +19173,16 @@ def _send_bulk_action_menu(chat_id: int, list_status: str, page: int):
     mk = types.InlineKeyboardMarkup()
     mk.row(
         types.InlineKeyboardButton(
+            "🎁 Şansı sıfırla",
+            callback_data=f"adm_bulk_reset:{list_status}:{page}",
+        ),
+        types.InlineKeyboardButton(
+            "⛔ Şansı bağla",
+            callback_data=f"adm_bulk_block:{list_status}:{page}",
+        ),
+    )
+    mk.row(
+        types.InlineKeyboardButton(
             "+30 gün", callback_data=f"adm_bulk_do:30:{list_status}:{page}"
         ),
         types.InlineKeyboardButton(
@@ -19214,6 +19253,68 @@ def _perform_bulk_extend(chat_id: int, days: int, list_status: str, page: int):
     )
 
 
+def _reset_chance_usage_for_users(user_ids: List[int]) -> int:
+    if not user_ids:
+        return 0
+    conn = get_local_conn()
+    cur = conn.cursor()
+    _ensure_chance_columns_exists(conn)
+    updated = 0
+    for uid in user_ids:
+        cur.execute("UPDATE users SET chance_last_used_at=NULL WHERE chat_id=?", (uid,))
+        try:
+            updated += max(cur.rowcount or 0, 0)
+        except Exception:
+            pass
+    conn.commit()
+    conn.close()
+    return updated
+
+
+def _block_chance_for_users(user_ids: List[int]) -> int:
+    if not user_ids:
+        return 0
+    conn = get_local_conn()
+    cur = conn.cursor()
+    _ensure_chance_columns_exists(conn)
+    updated = 0
+    for uid in user_ids:
+        cur.execute("UPDATE users SET chance_blocked=1 WHERE chat_id=?", (uid,))
+        try:
+            updated += max(cur.rowcount or 0, 0)
+        except Exception:
+            pass
+    conn.commit()
+    conn.close()
+    return updated
+
+
+def _perform_bulk_chance_reset(chat_id: int, list_status: str, page: int):
+    selected_ids = list(admin_selected_users.get(chat_id, set()))
+    if not selected_ids:
+        bot.send_message(chat_id, "⚠️ Əvvəlcə istifadəçiləri seçin")
+        return
+    updated = _reset_chance_usage_for_users(selected_ids)
+    clear_selected_users(chat_id)
+    bot.send_message(
+        chat_id, f"✅ {updated} istifadəçinin şansı sıfırlandı"
+    )
+    update_admin_users_state(chat_id, filter_value=list_status, page=page)
+    show_all_users(chat_id, status=list_status, page=page, message=None, force_new=False)
+
+
+def _perform_bulk_chance_block(chat_id: int, list_status: str, page: int):
+    selected_ids = list(admin_selected_users.get(chat_id, set()))
+    if not selected_ids:
+        bot.send_message(chat_id, "⚠️ Əvvəlcə istifadəçiləri seçin")
+        return
+    updated = _block_chance_for_users(selected_ids)
+    clear_selected_users(chat_id)
+    bot.send_message(chat_id, f"✅ {updated} istifadəçi üçün şans bağlandı")
+    update_admin_users_state(chat_id, filter_value=list_status, page=page)
+    show_all_users(chat_id, status=list_status, page=page, message=None, force_new=False)
+
+
 def _ensure_chance_columns_exists(conn: sqlite3.Connection) -> None:
     columns = set()
     for row in conn.execute("PRAGMA table_info(users)"):
@@ -19228,6 +19329,11 @@ def _ensure_chance_columns_exists(conn: sqlite3.Connection) -> None:
     if "chance_last_used_at" not in columns:
         try:
             conn.execute("ALTER TABLE users ADD COLUMN chance_last_used_at DATETIME")
+        except sqlite3.OperationalError:
+            pass
+    if "chance_blocked" not in columns:
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN chance_blocked INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
             pass
     conn.commit()
@@ -19250,6 +19356,36 @@ def cb_admin_bulk_apply(c):
     except Exception:
         return
     _perform_bulk_extend(chat_id, days, list_status, page)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_bulk_reset:"))
+@callback_guard
+def cb_admin_bulk_reset(c):
+    chat_id = c.message.chat.id if c.message else None
+    safe_answer_callback_query(c.id)
+    if not is_admin(chat_id):
+        return
+    try:
+        _, list_status, page_raw = c.data.split(":")
+        page = int(page_raw)
+    except Exception:
+        return
+    _perform_bulk_chance_reset(chat_id, list_status, page)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_bulk_block:"))
+@callback_guard
+def cb_admin_bulk_block(c):
+    chat_id = c.message.chat.id if c.message else None
+    safe_answer_callback_query(c.id)
+    if not is_admin(chat_id):
+        return
+    try:
+        _, list_status, page_raw = c.data.split(":")
+        page = int(page_raw)
+    except Exception:
+        return
+    _perform_bulk_chance_block(chat_id, list_status, page)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_bulk_custom:"))
