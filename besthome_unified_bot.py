@@ -3270,17 +3270,13 @@ def ensure_chance_usage_state(
     return allowed_today, used_today, last_used_at, extra_clicks
 
 
-def handle_chance_request(chat_id: int) -> None:
-    record = get_user_record(chat_id) or {}
+def process_chance_click(user_id: int, chat_id: int) -> None:
+    record = get_user_record(user_id) or {}
     now = datetime.utcnow()
 
-    if record and (record.get("blocked") or record.get("is_blocked")):
-        send_blocked_prompt(chat_id)
-        return
-
-    allowed, next_available = can_use_chance(record, now)
-    if not allowed:
-        available_at = next_available or (now + timedelta(hours=24))
+    last_used_at = parse_dt_safe(record.get("chance_last_used_at")) if record else None
+    if last_used_at is not None and now - last_used_at < timedelta(hours=24):
+        available_at = last_used_at + timedelta(hours=24)
         bot.send_message(
             chat_id,
             (
@@ -3292,8 +3288,9 @@ def handle_chance_request(chat_id: int) -> None:
         )
         return
 
-    entitlement_type, _ = resolve_user_entitlement(chat_id)
-    bonus_days = pick_bonus_days()
+    if record and (record.get("blocked") or record.get("is_blocked")):
+        send_blocked_prompt(chat_id)
+        return
 
     conn = get_local_conn()
     try:
@@ -3301,14 +3298,17 @@ def handle_chance_request(chat_id: int) -> None:
         _ensure_chance_columns_exists(conn)
         cur.execute(
             "UPDATE users SET chance_last_used_at=?, last_spin_at=? WHERE chat_id=?",
-            (now.isoformat(), now.isoformat(), chat_id),
+            (now.isoformat(), now.isoformat(), user_id),
         )
         conn.commit()
     finally:
         conn.close()
 
+    entitlement_type, _ = resolve_user_entitlement(user_id)
+    bonus_days = pick_bonus_days()
+
     if bonus_days > 0:
-        apply_bonus_days(chat_id, bonus_days, entitlement_type)
+        apply_bonus_days(user_id, bonus_days, entitlement_type)
 
     bot.send_message(chat_id, f"🎁 Bu gün üçün {bonus_days} gün qazandınız 🎉")
 
@@ -8573,7 +8573,7 @@ def handle_bonus_spin_request(message):
         return
 
     chat_id = message.chat.id
-    handle_chance_request(chat_id)
+    process_chance_click(message.from_user.id, chat_id)
 
 
 @bot.message_handler(func=lambda m: m.text == "⬅️ Geri")
