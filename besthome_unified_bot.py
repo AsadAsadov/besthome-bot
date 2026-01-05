@@ -3246,17 +3246,71 @@ def update_user_chance_usage(chat_id: int, last_used_at: Optional[datetime]):
     conn.close()
 
 
+def can_use_chance(record: Optional[dict], now: datetime) -> Tuple[bool, Optional[datetime]]:
+    last_used_at = parse_dt_safe(record.get("chance_last_used_at")) if record else None
+    if not last_used_at:
+        return True, None
+    next_available = last_used_at + timedelta(hours=24)
+    return now >= next_available, next_available
+
+
 def ensure_chance_usage_state(
     chat_id: int, record: Optional[dict], now: Optional[datetime] = None
 ) -> Tuple[int, int, Optional[datetime], int]:
     now = now or datetime.utcnow()
     record = record or get_user_record(chat_id) or {}
-    last_used_at = parse_dt_safe(record.get("chance_last_used_at"))
     allowed_today = DEFAULT_DAILY_CHANCE_LIMIT
-    used_today = 1 if last_used_at and now - last_used_at < timedelta(hours=24) else 0
+    allowed, _next_available = can_use_chance(record, now)
+    last_used_at = parse_dt_safe(record.get("chance_last_used_at"))
+    used_today = 0
+    if last_used_at:
+        used_today = 0 if allowed else 1
     extra_clicks = 0
 
     return allowed_today, used_today, last_used_at, extra_clicks
+
+
+def handle_chance_request(chat_id: int) -> None:
+    record = get_user_record(chat_id) or {}
+    now = datetime.utcnow()
+
+    if record and (record.get("blocked") or record.get("is_blocked")):
+        send_blocked_prompt(chat_id)
+        return
+
+    allowed, next_available = can_use_chance(record, now)
+    if not allowed:
+        available_at = next_available or (now + timedelta(hours=24))
+        bot.send_message(
+            chat_id,
+            (
+                "⏳ Bu gün artıq şansınızı istifadə etmisiniz.\n"
+                "Növbəti şans:\n"
+                f"📅 {available_at.strftime('%d.%m.%Y')}\n"
+                f"⏰ {available_at.strftime('%H:%M')}"
+            ),
+        )
+        return
+
+    entitlement_type, _ = resolve_user_entitlement(chat_id)
+    bonus_days = pick_bonus_days()
+
+    conn = get_local_conn()
+    try:
+        cur = conn.cursor()
+        _ensure_chance_columns_exists(conn)
+        cur.execute(
+            "UPDATE users SET chance_last_used_at=?, last_spin_at=? WHERE chat_id=?",
+            (now.isoformat(), now.isoformat(), chat_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    if bonus_days > 0:
+        apply_bonus_days(chat_id, bonus_days, entitlement_type)
+
+    bot.send_message(chat_id, f"🎁 Bu gün üçün {bonus_days} gün qazandınız 🎉")
 
 
 
@@ -8519,45 +8573,7 @@ def handle_bonus_spin_request(message):
         return
 
     chat_id = message.chat.id
-    record = get_user_record(chat_id)
-    now = datetime.utcnow()
-    if record and (record.get("blocked") or record.get("is_blocked")):
-        send_blocked_prompt(chat_id)
-        return
-
-    last_used_at = parse_dt_safe(record.get("chance_last_used_at")) if record else None
-    if last_used_at:
-        delta = now - last_used_at
-        if delta < timedelta(hours=24):
-            available_at = last_used_at + timedelta(hours=24)
-            bot.send_message(
-                chat_id,
-                (
-                    "⏳ Bu gün artıq şansınızı istifadə etmisiniz.\n\n"
-                    "Növbəti şans:\n"
-                    f"📅 {available_at.strftime('%d.%m.%Y')}\n"
-                    f"⏰ {available_at.strftime('%H:%M')}"
-                ),
-            )
-            return
-
-    entitlement_type, _ = resolve_user_entitlement(chat_id)
-    bonus_days = pick_bonus_days()
-    last_used_at = now
-    update_user_chance_usage(chat_id, last_used_at)
-    set_last_spin_at(chat_id, now)
-
-    if bonus_days > 0:
-        apply_bonus_days(chat_id, bonus_days, entitlement_type)
-
-    bot.send_message(
-        chat_id,
-        (
-            "🎁 Təbriklər!\n"
-            f"Bu gün üçün **{bonus_days} gün** qazandınız 🎉"
-        ),
-        parse_mode="Markdown",
-    )
+    handle_chance_request(chat_id)
 
 
 @bot.message_handler(func=lambda m: m.text == "⬅️ Geri")
