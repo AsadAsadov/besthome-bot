@@ -5823,6 +5823,27 @@ def register_or_update_user_if_needed(message, start_arg: str):
             conn.rollback()
             logger.exception("Failed to insert new user chat_id=%s", chat_id)
             bot.send_message(chat_id, "⚠️ Texniki problem oldu, amma bot aktivdir.")
+        else:
+            try:
+                username_display = username if username else "-"
+                username_line = (
+                    f"@{username_display}" if username_display != "-" else "-"
+                )
+                joined_at = (datetime.utcnow() + timedelta(hours=4)).strftime(
+                    "%d.%m.%Y %H:%M"
+                )
+                admin_text = (
+                    "🆕 Yeni istifadəçi qoşuldu\n\n"
+                    f"👤 ID: {chat_id}\n"
+                    f"👤 Username: {username_line}\n"
+                    f"👤 Ad: {first_name}\n"
+                    f"⏰ Tarix: {joined_at}"
+                )
+                bot.send_message(ADMIN_ID, admin_text)
+            except Exception as e:
+                logger.warning(
+                    "Failed to notify admin about new user %s: %s", chat_id, e
+                )
 
         if referred_by_value:
             try:
