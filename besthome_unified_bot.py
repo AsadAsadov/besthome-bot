@@ -3336,13 +3336,14 @@ def handle_chance_request(user_id: int) -> None:
     last_used_at = parse_dt_safe(record.get("chance_last_used_at")) if record else None
     if last_used_at is not None and now - last_used_at < timedelta(hours=24):
         available_at = last_used_at + timedelta(hours=24)
+        display_time = available_at + timedelta(hours=4)
         bot.send_message(
             chat_id,
             (
                 "⏳ Bu gün artıq şansınızı istifadə etmisiniz.\n\n"
                 "Növbəti şans:\n"
-                f"📅 {available_at.strftime('%d.%m.%Y')}\n"
-                f"⏰ {available_at.strftime('%H:%M')}"
+                f"📅 {display_time.strftime('%d.%m.%Y')}\n"
+                f"⏰ {display_time.strftime('%H:%M')}"
             ),
         )
         return
@@ -3779,7 +3780,8 @@ def format_promo_date(dt: Optional[datetime], include_year: bool = False) -> str
     if not dt:
         return "—"
     fmt = "%d %b %Y" if include_year else "%d %b"
-    return dt.strftime(fmt)
+    display_time = dt + timedelta(hours=4)
+    return display_time.strftime(fmt)
 
 
 def set_user_promo_status(
@@ -5832,9 +5834,10 @@ def register_or_update_user_if_needed(message, start_arg: str):
             remaining = demo_expiry - datetime.utcnow()
             remaining_days = remaining.days
             remaining_hours = (remaining.seconds // 3600)
+            display_time = demo_expiry + timedelta(hours=4)
             demo_info_text = (
                 "🎁 Demo aktivdir. \n"
-                f"Bitmə tarixi: {demo_expiry.strftime('%d.%m.%Y %H:%M')} (qalıb {remaining_days} gün {remaining_hours} saat)"
+                f"Bitmə tarixi: {display_time.strftime('%d.%m.%Y %H:%M')} (qalıb {remaining_days} gün {remaining_hours} saat)"
             )
         elif "demo_used" in row and row["demo_used"]:
             demo_info_text = "🎁 Demo müddətiniz bitib. Ödəniş menyusundan yeniləyə bilərsiniz."
@@ -6082,7 +6085,8 @@ def format_customer_request_card(row: dict) -> str:
     req_txt = "Alış" if req_type == "buy" else "Kirayə"
     created_raw = _row_value_safe(row, "created_at")
     created_dt = parse_dt_safe(created_raw)
-    date_txt = created_dt.strftime("%d.%m.%Y") if created_dt else "-"
+    display_time = created_dt + timedelta(hours=4) if created_dt else None
+    date_txt = display_time.strftime("%d.%m.%Y") if display_time else "-"
 
     lines = [
         "━━━━━━━━━━━━━━━━━━",
@@ -6234,7 +6238,8 @@ def format_agent_request_card(row: dict) -> str:
         row, "request_created_at"
     )
     created_dt = parse_dt_safe(created_raw)
-    date_txt = created_dt.strftime("%d.%m.%Y") if created_dt else "-"
+    display_time = created_dt + timedelta(hours=4) if created_dt else None
+    date_txt = display_time.strftime("%d.%m.%Y") if display_time else "-"
 
     lines = [
         "👥 Müştəri istəyi",
@@ -7811,9 +7816,10 @@ def cb_demo_activate(c):
     demo_used = record.get("demo_used", 0)
 
     if demo_end and demo_end > now:
+        display_time = demo_end + timedelta(hours=4)
         msg = (
             "ℹ️ Siz artıq demo istifadə edirsiniz.\n"
-            f"Bitmə tarixi: {demo_end.strftime('%d.%m.%Y %H:%M')}"
+            f"Bitmə tarixi: {display_time.strftime('%d.%m.%Y %H:%M')}"
         )
         bot.send_message(chat_id, msg)
         logger.info("Demo denied (already active) chat_id=%s", chat_id)
@@ -7843,9 +7849,10 @@ def cb_demo_activate(c):
     except Exception:
         pass
 
+    display_expiry = expires + timedelta(hours=4)
     bot.send_message(
         chat_id,
-        f"🎁 Demo aktiv edildi. Bitmə tarixi: {expires.strftime('%d.%m.%Y %H:%M')}",
+        f"🎁 Demo aktiv edildi. Bitmə tarixi: {display_expiry.strftime('%d.%m.%Y %H:%M')}",
     )
     if was_blocked:
         logger.info("User auto-unblocked via demo chat_id=%s", chat_id)
@@ -7865,7 +7872,7 @@ def cb_demo_activate(c):
         f"Ad: {full_name if full_name else '-'}\n"
         f"Username: {admin_username}\n\n"
         "⏳ Demo bitmə tarixi:\n"
-        f"{expires.strftime('%d.%m.%Y %H:%M')}"
+        f"{display_expiry.strftime('%d.%m.%Y %H:%M')}"
     )
     bot.send_message(ADMIN_ID, admin_text)
     reset_user_state(chat_id)
@@ -7961,7 +7968,7 @@ def cb_pay_admin(c):
             bot.send_message(
                 uid,
                 "✅ Hesabınız aktivləşdirildi\n"
-                f"📅 Bitmə tarixi: {expires.strftime('%d.%m.%Y')}",
+                f"📅 Bitmə tarixi: {(expires + timedelta(hours=4)).strftime('%d.%m.%Y')}",
             )
         except Exception:
             pass
@@ -14654,7 +14661,8 @@ def send_qr_stats(chat_id: int, range_key: str):
                 join_time = str(created_value)
                 try:
                     join_dt = datetime.fromisoformat(str(created_value))
-                    join_time = join_dt.strftime("%Y-%m-%d %H:%M")
+                    display_time = join_dt + timedelta(hours=4)
+                    join_time = display_time.strftime("%Y-%m-%d %H:%M")
                 except Exception:
                     pass
                 lines.append(f"{idx}) ID: {user_id}")
@@ -14947,7 +14955,8 @@ def show_admin_request_rayons(
 
 def format_admin_request_list_item(req: dict) -> str:
     created_dt = parse_dt_safe(req.get("created_at"))
-    created_at = created_dt.strftime("%Y-%m-%d %H:%M") if created_dt else "bilinmir"
+    display_time = created_dt + timedelta(hours=4) if created_dt else None
+    created_at = display_time.strftime("%Y-%m-%d %H:%M") if display_time else "bilinmir"
     req_type = format_admin_request_type(req.get("request_type"))
     return "\n".join(
         [
@@ -15186,7 +15195,8 @@ def build_telegram_user_link(user_id: Optional[int]) -> Optional[str]:
 
 def format_request_card(req: dict) -> str:
     created_dt = parse_dt_safe(req.get("created_at"))
-    created_at = created_dt.strftime("%Y-%m-%d %H:%M") if created_dt else "bilinmir"
+    display_time = created_dt + timedelta(hours=4) if created_dt else None
+    created_at = display_time.strftime("%Y-%m-%d %H:%M") if display_time else "bilinmir"
     req_type = format_request_type(req.get("request_type"))
     return "\n".join(
         [
@@ -15207,7 +15217,8 @@ def format_request_card(req: dict) -> str:
 
 def format_public_request_card(req: dict) -> str:
     created_dt = parse_dt_safe(req.get("created_at"))
-    created_at = created_dt.strftime("%Y-%m-%d %H:%M") if created_dt else "bilinmir"
+    display_time = created_dt + timedelta(hours=4) if created_dt else None
+    created_at = display_time.strftime("%Y-%m-%d %H:%M") if display_time else "bilinmir"
     req_type = format_request_type(req.get("request_type"))
     return "\n".join(
         [
@@ -15453,7 +15464,8 @@ def show_flagged_requests(chat_id: int, page: int = 1):
 
 def format_archived_request_card(req: dict) -> str:
     created_dt = parse_dt_safe(req.get("created_at"))
-    created_at = created_dt.strftime("%Y-%m-%d %H:%M") if created_dt else "-"
+    display_time = created_dt + timedelta(hours=4) if created_dt else None
+    created_at = display_time.strftime("%Y-%m-%d %H:%M") if display_time else "-"
     req_type = format_request_type(req.get("request_type"))
     return "\n".join(
         [
@@ -16500,7 +16512,10 @@ def show_user_profile(chat_id: int, user_id: int):
     _, used_today, last_used_at, _ = ensure_chance_usage_state(
         user_id, record, datetime.utcnow()
     )
-    last_chance_text = last_used_at.strftime("%Y-%m-%d %H:%M") if last_used_at else "-"
+    display_last_used = last_used_at + timedelta(hours=4) if last_used_at else None
+    last_chance_text = (
+        display_last_used.strftime("%Y-%m-%d %H:%M") if display_last_used else "-"
+    )
     last_spin_text = last_chance_text
 
     profile_text = "\n".join(
@@ -16688,7 +16703,8 @@ def build_demo_users_view(page: int = 1) -> Tuple[str, types.InlineKeyboardMarku
         if expiry_dt and expiry_dt > now:
             remaining_days = math.ceil((expiry_dt - now).total_seconds() / 86400)
 
-        expiry_txt = expiry_dt.strftime("%Y-%m-%d %H:%M") if expiry_dt else "-"
+        display_expiry = expiry_dt + timedelta(hours=4) if expiry_dt else None
+        expiry_txt = display_expiry.strftime("%Y-%m-%d %H:%M") if display_expiry else "-"
         status_txt = "🟢 Aktiv demo" if is_active else "🔴 Vaxtı bitmiş demo"
         profile_url = get_demo_profile_url(row["chat_id"], row["username"])
         display_name = normalize_demo_user_display(
@@ -17241,9 +17257,9 @@ def show_admin_promo_list(chat_id: int, page: int = 1):
         created_txt = "-"
         if r["created_at"]:
             try:
-                created_txt = datetime.fromisoformat(
-                    str(r["created_at"]).replace(" ", "T")
-                ).strftime("%d.%m.%Y")
+                created_dt = datetime.fromisoformat(str(r["created_at"]).replace(" ", "T"))
+                display_time = created_dt + timedelta(hours=4)
+                created_txt = display_time.strftime("%d.%m.%Y")
             except Exception:
                 created_txt = str(r["created_at"])
         lines.append(f"{r['code']} — {r['days']} gün | {status} | {created_txt}")
@@ -17539,7 +17555,10 @@ def admin_show_user_panel(
     _, used_today, last_used_at, _ = ensure_chance_usage_state(
         target_id, record, datetime.utcnow()
     )
-    last_chance_text = last_used_at.strftime("%Y-%m-%d %H:%M") if last_used_at else "-"
+    display_last_used = last_used_at + timedelta(hours=4) if last_used_at else None
+    last_chance_text = (
+        display_last_used.strftime("%Y-%m-%d %H:%M") if display_last_used else "-"
+    )
     last_spin_text = last_chance_text
     join_source_code = record.get("join_source")
     join_source_text = (
@@ -17655,9 +17674,11 @@ def show_payment_history_list(chat_id: int, page: int = 1):
         last_dt = "-"
         if r["last_payment_date"]:
             try:
-                last_dt = datetime.fromisoformat(
+                last_dt_value = datetime.fromisoformat(
                     str(r["last_payment_date"]).replace(" ", "T")
-                ).strftime("%d.%m.%Y")
+                )
+                display_time = last_dt_value + timedelta(hours=4)
+                last_dt = display_time.strftime("%d.%m.%Y")
             except Exception:
                 last_dt = str(r["last_payment_date"])
         lines.append(f"🆔 {r['chat_id']} — {r['total_paid']} AZN (son: {last_dt})")
@@ -17754,9 +17775,11 @@ def show_user_payment_details(
     last_payment = "-"
     if summary["last_dt"]:
         try:
-            last_payment = datetime.fromisoformat(
+            last_dt_value = datetime.fromisoformat(
                 str(summary["last_dt"]).replace(" ", "T")
-            ).strftime("%d.%m.%Y %H:%M")
+            )
+            display_time = last_dt_value + timedelta(hours=4)
+            last_payment = display_time.strftime("%d.%m.%Y %H:%M")
         except Exception:
             last_payment = str(summary["last_dt"])
 
@@ -17772,9 +17795,11 @@ def show_user_payment_details(
         pay_date = "-"
         if p["approved_at"]:
             try:
-                pay_date = datetime.fromisoformat(
+                approved_dt = datetime.fromisoformat(
                     str(p["approved_at"]).replace(" ", "T")
-                ).strftime("%d.%m.%Y %H:%M")
+                )
+                display_time = approved_dt + timedelta(hours=4)
+                pay_date = display_time.strftime("%d.%m.%Y %H:%M")
             except Exception:
                 pay_date = str(p["approved_at"])
         lines.append(f"{idx}) {pay_date} — {p['plan']} — {p['amount']} AZN")
@@ -18013,7 +18038,8 @@ def admin_grant_demo_days(user_id: int, days: int) -> Optional[datetime]:
 def send_demo_update_notification(user_id: int, days: int, new_exp: Optional[datetime], granted: bool):
     if not new_exp:
         return
-    date_text = new_exp.strftime("%d.%m.%Y %H:%M")
+    display_time = new_exp + timedelta(hours=4)
+    date_text = display_time.strftime("%d.%m.%Y %H:%M")
     if granted:
         text = (
             f"🎁 Sizə {days} günlük demo verildi. Pulsuz istifadə edə bilərsiniz.\n"
@@ -18239,7 +18265,8 @@ def parse_join_datetime(dt_raw: Optional[str]) -> Tuple[str, str]:
         return "-", "-"
     try:
         join_dt = datetime.fromisoformat(str(dt_raw).replace(" ", "T"))
-        return join_dt.strftime("%Y-%m-%d"), join_dt.strftime("%H:%M")
+        display_time = join_dt + timedelta(hours=4)
+        return display_time.strftime("%Y-%m-%d"), display_time.strftime("%H:%M")
     except Exception:
         return str(dt_raw), "-"
 
@@ -18251,7 +18278,8 @@ def format_display_date(dt_raw: Optional[str]) -> str:
         dt = parse_dt_safe(dt_raw)
     if not dt:
         return "-"
-    return dt.strftime("%d.%m.%Y")
+    display_time = dt + timedelta(hours=4)
+    return display_time.strftime("%d.%m.%Y")
 
 
 def normalize_effective_expiry(
@@ -18275,7 +18303,8 @@ def format_effective_expiry_for_ui(raw: Optional[Union[str, datetime]]) -> str:
     dt = normalize_effective_expiry(raw)
     if not dt:
         return "—"
-    return dt.strftime("%d.%m.%Y")
+    display_time = dt + timedelta(hours=4)
+    return display_time.strftime("%d.%m.%Y")
 
 
 def format_remaining_days_for_ui(
@@ -21165,7 +21194,10 @@ def show_bonus_stats(chat_id: int):
             days_won = _row_value_safe(row, "granted_days", _row_value_safe(row, "days_won", 0)) or 0
             created_raw = _row_value_safe(row, "created_at")
             created_dt = parse_dt_safe(created_raw)
-            time_text = created_dt.strftime("%H:%M") if created_dt else str(created_raw or "-")
+            display_time = created_dt + timedelta(hours=4) if created_dt else None
+            time_text = (
+                display_time.strftime("%H:%M") if display_time else str(created_raw or "-")
+            )
             lines.append(f"• {time_text} — {user_id} → {days_won} gün")
 
     mk = types.InlineKeyboardMarkup()
@@ -21236,12 +21268,15 @@ def show_revenue_report(chat_id: int):
     history_lines = []
     for i in range(1, 4):
         m_start, total, cnt = month_stats(i)
-        history_lines.append(f"{m_start.strftime('%B %Y')}: {total} AZN ({cnt} ödəniş)")
+        display_time = m_start + timedelta(hours=4)
+        history_lines.append(
+            f"{display_time.strftime('%B %Y')}: {total} AZN ({cnt} ödəniş)"
+        )
 
     conn.close()
 
     report_lines = [
-        f"📅 {current_start.strftime('%B %Y')} (cari ay):\n"
+        f"📅 {(current_start + timedelta(hours=4)).strftime('%B %Y')} (cari ay):\n"
         f"• Toplam gəlir: {current_total} AZN\n"
         f"• Ödəniş sayı: {current_count}\n"
         f"• Aktiv abunə sayı: {active_subs}",
