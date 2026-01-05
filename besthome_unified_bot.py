@@ -4061,17 +4061,14 @@ def build_card_payment_button(plan_key: str) -> types.InlineKeyboardButton:
 def build_payment_action_markup(
     plan_key: str, plan: dict, payment_code: str, include_card_button: bool = True
 ) -> types.InlineKeyboardMarkup:
-    plan_name = quote(plan.get("title", "")) if plan else ""
-    whatsapp_url = (
-        "https://wa.me/994708468585?text="
-        "Salam%20BestHome,%20{plan_name}%20paketi%20almaq%20isteyirem.%20"
-        "Odenis%20kodu:%20BH-{payment_code}"
-    ).format(plan_name=plan_name, payment_code=payment_code)
-    telegram_url = (
-        "https://t.me/esedovesed?text="
-        "Salam%20BestHome,%20{plan_name}%20paketi%20almaq%20isteyirem.%20"
-        "Odenis%20kodu:%20BH-{payment_code}"
-    ).format(plan_name=plan_name, payment_code=payment_code)
+    contact_message = (
+        "Salam.\n"
+        "Best Home Əmlak Botu üçün 1 günlük paket almaq istəyirəm.\n\n"
+        f"Ödəniş kodu: {payment_code}"
+    )
+    encoded_message = quote(contact_message, safe="")
+    whatsapp_url = f"https://wa.me/994708468585?text={encoded_message}"
+    telegram_url = f"https://t.me/esedovesed?text={encoded_message}"
 
     mk = types.InlineKeyboardMarkup(row_width=1)
     if include_card_button:
@@ -5580,35 +5577,32 @@ def build_whatsapp_message(ev: dict) -> str:
     is_rent = "kir" in op_raw or "rent" in op_raw
 
     rooms_val = ev.get("rooms") or ev.get("Otaq_sayi") or ""
-    rooms_txt = f"{rooms_val} otaqlı" if rooms_val else "mənzil"
+    rooms_txt = f"{rooms_val} otaqlı" if rooms_val else ""
 
     location_raw = ev.get("rayon") or ev.get("Rayon_Qesebe") or ""
     if not location_raw:
         location_raw = ev.get("address") or ev.get("Unvan") or ""
 
-    loc_suffix = ""
-    loc_lower = location_raw.lower()
-    if location_raw:
-        if "qəs" in loc_lower or "qes" in loc_lower:
-            loc_suffix = " qəsəbəsində"
-        else:
-            loc_suffix = " rayonunda"
+    message_lines = ["Salam."]
 
-    body = "Salam, "
-    if location_raw:
-        body += f"{location_raw}{loc_suffix} paylaşdığınız "
+    address = location_raw.strip()
+    base = ""
+    if address:
+        base += f"{address} yerləşən "
+    if rooms_txt:
+        base += f"{rooms_txt} mənziliniz "
     else:
-        body += "paylaşdığınız "
+        base += "mənziliniz "
 
     if is_rent:
-        body += f"{rooms_txt} kirayə mənzil hələ mövcuddur?"
+        message_lines.append(f"{base}kirayə verilir?")
     else:
-        body += f"{rooms_txt} satışda olan mənzil satılıb?"
+        message_lines.append(f"{base}satışdadır?")
 
     link = ev.get("link") or ev.get("source_link")
     if link:
-        body += f"\n{link}"
-    return body
+        message_lines.extend(["", "Elan linki:", link])
+    return "\n".join(message_lines)
 
 
 def _strip_contact_details(text: str, ev: dict) -> str:
@@ -7835,7 +7829,7 @@ def cb_payplan(c):
         "selected_price": plan.get("price"),
     }
     payment_code = subscription_payment_code(chat_id)
-    mk = build_payment_action_markup(plan_key, plan or {}, chat_id)
+    mk = build_payment_action_markup(plan_key, plan or {}, payment_code)
 
     pay_text = (
         "🎁 BONUS İMKAN\n\n"
@@ -7885,7 +7879,7 @@ def cb_card_payment_info(c):
     )
 
     mk = build_payment_action_markup(
-        plan_key or "", plan, chat_id, include_card_button=False
+        plan_key or "", plan, subscription_payment_code(chat_id), include_card_button=False
     )
     bot.send_message(chat_id, info_text, reply_markup=mk)
     try:
