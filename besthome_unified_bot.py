@@ -17695,22 +17695,22 @@ def admin_show_user_panel(
     )
 
     info_txt = (
-        f"🆔 İstifadəçi: {target_id}\n"
-        f"🔗 Qoşulma mənbəyi: {join_source_text}\n"
-        f"📦 Status: {computed_status or '-'}\n"
-        f"📅 Bitmə tarixi: {format_effective_expiry_for_ui(effective_raw)}\n"
-        f"⏳ Qalan gün: {format_remaining_days_for_ui(computed_status, effective_raw)}\n"
-        f"🔖 Hesab statusu: {status_text}\n"
+        f"🆔 İstifadəçi: <a href=\"tg://user?id={target_id}\">{target_id}</a>\n"
+        f"🔗 Qoşulma mənbəyi: {html.escape(join_source_text)}\n"
+        f"📦 Status: {html.escape(computed_status or '-')}\n"
+        f"📅 Bitmə tarixi: {html.escape(format_effective_expiry_for_ui(effective_raw))}\n"
+        f"⏳ Qalan gün: {html.escape(format_remaining_days_for_ui(computed_status, effective_raw))}\n"
+        f"🔖 Hesab statusu: {html.escape(status_text)}\n"
         f"♾️ Limitsiz: {'Bəli' if unlimited else 'Xeyr'}\n"
         f"⛔ Bloklu: {blocked_state}\n"
-        f"🎡 Son klik: {last_spin_text}\n"
-        f"🕒 Son şans istifadəsi: {last_chance_text}\n"
+        f"🎡 Son klik: {html.escape(last_spin_text)}\n"
+        f"🕒 Son şans istifadəsi: {html.escape(last_chance_text)}\n"
         "🎁 Şans: 24 saata 1 dəfə\n"
         f"🚦 Bugün istifadə: {'Bəli' if used_today else 'Xeyr'}\n"
-        f"🆔 Ödəniş kodu: {subscription_payment_code(target_id)}"
+        f"🆔 Ödəniş kodu: {html.escape(subscription_payment_code(target_id))}"
     )
     if last_error:
-        info_txt += f"\n⚠️ Son xəta: {last_error}"
+        info_txt += f"\n⚠️ Son xəta: {html.escape(last_error)}"
 
     mk = _build_admin_user_markup(target_id, record, unlimited, blocked_flag)
 
@@ -17721,11 +17721,12 @@ def admin_show_user_panel(
                 chat_id=admin_chat_id,
                 message_id=message.message_id,
                 reply_markup=mk,
+                parse_mode="HTML",
             )
             return
         except Exception:
             pass
-    bot.send_message(admin_chat_id, info_txt, reply_markup=mk)
+    bot.send_message(admin_chat_id, info_txt, reply_markup=mk, parse_mode="HTML")
 
 
 def show_payment_history_list(chat_id: int, page: int = 1):
@@ -18959,13 +18960,25 @@ def show_all_users(
                     computed_status, expiry_raw
                 )
 
+            uid_str = str(uid)
+            uid_text = (
+                f'🆔 ID: <a href="tg://user?id={uid_str}">{uid_str}</a>'
+                if uid_str.isdigit()
+                else f"🆔 ID: {uid_str}"
+            )
+
+            name_display = html.escape(name)
+            username_display = html.escape(username_value)
+            expiry_display = html.escape(expiry_text)
+            remaining_display = html.escape(remaining_text)
+
             entry_lines = [
                 f"[{idx}]",
-                f"{TEXTS_AZ['admin_userlist_entry_name']}: {name}",
-                f"{TEXTS_AZ['admin_userlist_entry_id']}: {uid}",
-                f"{TEXTS_AZ['admin_userlist_entry_username']}: {username_value}",
-                f"{TEXTS_AZ['admin_userlist_entry_expiry']}: {expiry_text}",
-                f"{TEXTS_AZ['admin_userlist_entry_remaining']}: {remaining_text}",
+                f"{TEXTS_AZ['admin_userlist_entry_name']}: {name_display}",
+                uid_text,
+                f"{TEXTS_AZ['admin_userlist_entry_username']}: {username_display}",
+                f"{TEXTS_AZ['admin_userlist_entry_expiry']}: {expiry_display}",
+                f"{TEXTS_AZ['admin_userlist_entry_remaining']}: {remaining_display}",
             ]
 
             text_lines.append("\n".join(entry_lines))
@@ -19068,12 +19081,13 @@ def show_all_users(
                     chat_id,
                     message.message_id,
                     reply_markup=mk,
+                    parse_mode="HTML",
                 )
             else:
-                bot.send_message(chat_id, text, reply_markup=mk)
+                bot.send_message(chat_id, text, reply_markup=mk, parse_mode="HTML")
         except Exception:
             logger.error("Admin send failed", exc_info=True)
-            safe_admin_step(chat_id, text, reply_markup=mk)
+            safe_admin_step(chat_id, text, reply_markup=mk, parse_mode="HTML")
     except Exception:
         logger.exception("show_all_users fatal error")
         safe_send(chat_id, TEXTS_AZ["admin_userlist_open_error"])
@@ -21090,11 +21104,10 @@ def format_active_user_stats(users):
 
         block_lines = []
         if display_name != "—":
-            block_lines.append(f"👤 {display_name}")
-        if profile_url:
-            block_lines.append(f'🆔 <a href="{profile_url}">ID: {chat_id}</a>')
-        else:
-            block_lines.append(f"🆔 ID: {chat_id}")
+            block_lines.append(f"👤 {html.escape(display_name)}")
+        block_lines.append(
+            f'🆔 ID: <a href="tg://user?id={chat_id}">{chat_id}</a>'
+        )
         block_lines.append(f"🔍 Axtarış sayı: {cnt}")
 
         blocks.append("\n".join(block_lines))
