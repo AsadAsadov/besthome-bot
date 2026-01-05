@@ -2130,6 +2130,17 @@ def init_local_db():
         """
     )
     cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS keyword_alert_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            listing_id INTEGER NOT NULL,
+            keyword TEXT NOT NULL,
+            created_at DATETIME NOT NULL
+        )
+        """
+    )
+    cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_customer_request_favorites_user ON customer_request_favorites(user_id)"
     )
     cur.execute(
