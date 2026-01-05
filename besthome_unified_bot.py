@@ -3259,7 +3259,7 @@ def ensure_chance_usage_state(
 ) -> Tuple[int, int, Optional[datetime], int]:
     now = now or datetime.utcnow()
     record = record or get_user_record(chat_id) or {}
-    allowed_today = DEFAULT_DAILY_CHANCE_LIMIT
+    allowed_today = 1
     allowed, _next_available = can_use_chance(record, now)
     last_used_at = parse_dt_safe(record.get("chance_last_used_at"))
     used_today = 0
@@ -3280,7 +3280,7 @@ def process_chance_click(user_id: int, chat_id: int) -> None:
         bot.send_message(
             chat_id,
             (
-                "⏳ Bu gün artıq şansınızı istifadə etmisiniz.\n"
+                "⏳ Bu gün artıq şansınızı istifadə etmisiniz.\n\n"
                 "Növbəti şans:\n"
                 f"📅 {available_at.strftime('%d.%m.%Y')}\n"
                 f"⏰ {available_at.strftime('%H:%M')}"
@@ -3292,17 +3292,7 @@ def process_chance_click(user_id: int, chat_id: int) -> None:
         send_blocked_prompt(chat_id)
         return
 
-    conn = get_local_conn()
-    try:
-        cur = conn.cursor()
-        _ensure_chance_columns_exists(conn)
-        cur.execute(
-            "UPDATE users SET chance_last_used_at=?, last_spin_at=? WHERE chat_id=?",
-            (now.isoformat(), now.isoformat(), user_id),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    update_user_chance_usage(chat_id=user_id, last_used_at=now)
 
     entitlement_type, _ = resolve_user_entitlement(user_id)
     bonus_days = pick_bonus_days()
@@ -3310,7 +3300,11 @@ def process_chance_click(user_id: int, chat_id: int) -> None:
     if bonus_days > 0:
         apply_bonus_days(user_id, bonus_days, entitlement_type)
 
-    bot.send_message(chat_id, f"🎁 Bu gün üçün {bonus_days} gün qazandınız 🎉")
+    bot.send_message(
+        chat_id,
+        f"🎁 Təbriklər!\nBu gün üçün **{bonus_days} gün** qazandınız 🎉",
+        parse_mode="Markdown",
+    )
 
 
 
@@ -16444,14 +16438,11 @@ def show_user_profile(chat_id: int, user_id: int):
     username = record.get("username")
     computed_status = record.get("computed_status") or get_user_computed_status(user_id)
     effective_raw = record.get("effective_expires_at")
-    last_spin_dt = (
-        parse_dt_safe(record.get("last_spin_at")) if record.get("last_spin_at") else None
-    )
-    last_spin_text = last_spin_dt.strftime("%Y-%m-%d %H:%M") if last_spin_dt else "-"
     _, used_today, last_used_at, _ = ensure_chance_usage_state(
         user_id, record, datetime.utcnow()
     )
     last_chance_text = last_used_at.strftime("%Y-%m-%d %H:%M") if last_used_at else "-"
+    last_spin_text = last_chance_text
 
     profile_text = "\n".join(
         [
@@ -17486,14 +17477,11 @@ def admin_show_user_panel(
     is_active = record.get("is_active")
     status_text = "Bloklanıb" if blocked_flag else ("Deaktiv" if is_active == 0 else "Aktiv")
     last_error = record.get("last_error")
-    last_spin_dt = (
-        parse_dt_safe(record.get("last_spin_at")) if record.get("last_spin_at") else None
-    )
-    last_spin_text = last_spin_dt.strftime("%Y-%m-%d %H:%M") if last_spin_dt else "-"
     _, used_today, last_used_at, _ = ensure_chance_usage_state(
         target_id, record, datetime.utcnow()
     )
     last_chance_text = last_used_at.strftime("%Y-%m-%d %H:%M") if last_used_at else "-"
+    last_spin_text = last_chance_text
     join_source_code = record.get("join_source")
     join_source_text = (
         f"QR — {format_qr_area_label(join_source_code)}"
