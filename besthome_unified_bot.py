@@ -17546,6 +17546,59 @@ def admin_search_by_id_step(message):
     admin_show_user_panel(message.chat.id, target_id)
 
 
+def _build_admin_user_markup(
+    target_id: int, record: dict, unlimited: bool, blocked_flag: bool
+) -> types.InlineKeyboardMarkup:
+    mk = types.InlineKeyboardMarkup()
+    chance_blocked = 1 if record.get("chance_blocked") else 0
+    chance_action = "on" if chance_blocked else "off"
+    chance_btn_text = "✅ Şansı aktiv et" if chance_blocked else "⛔ Şansı bağla"
+
+    mk.row(
+        types.InlineKeyboardButton(
+            "🎁 Şansı sıfırla", callback_data=f"admusr|chance_reset|{target_id}"
+        ),
+        types.InlineKeyboardButton(
+            chance_btn_text,
+            callback_data=f"chance_toggle:{chance_action}:user:{target_id}",
+        ),
+    )
+    mk.add(
+        types.InlineKeyboardButton(
+            "➕ Gün əlavə et",
+            callback_data=f"admusr|extend_custom|{target_id}",
+        )
+    )
+    if record.get("blocked"):
+        mk.add(
+            types.InlineKeyboardButton(
+                "✅ Blokdan çıxart",
+                callback_data=f"admusr|unblock|{target_id}",
+            )
+        )
+    else:
+        mk.add(
+            types.InlineKeyboardButton(
+                "⛔ Blokla",
+                callback_data=f"admusr|block|{target_id}",
+            )
+        )
+
+    mk.add(
+        types.InlineKeyboardButton(
+            "❌ Limitsizi ləğv et" if unlimited else "♾️ Limitsiz et",
+            callback_data=f"admusr|unlimit|{target_id}",
+        )
+    )
+
+    mk.add(
+        types.InlineKeyboardButton(
+            "🗑 İstifadəçini sil", callback_data=f"admusr|delete|{target_id}"
+        )
+    )
+    return mk
+
+
 def admin_show_user_panel(
     admin_chat_id: int, target_id: int, message: Optional[types.Message] = None
 ):
@@ -17596,48 +17649,7 @@ def admin_show_user_panel(
     if last_error:
         info_txt += f"\n⚠️ Son xəta: {last_error}"
 
-    mk = types.InlineKeyboardMarkup()
-    mk.row(
-        types.InlineKeyboardButton(
-            "🎁 Şansı sıfırla", callback_data=f"admusr|chance_reset|{target_id}"
-        ),
-        types.InlineKeyboardButton(
-            "⛔ Şansı bağla", callback_data=f"admusr|chance_block|{target_id}"
-        ),
-    )
-    mk.add(
-        types.InlineKeyboardButton(
-            "➕ Gün əlavə et",
-            callback_data=f"admusr|extend_custom|{target_id}",
-        )
-    )
-    if record.get("blocked"):
-        mk.add(
-            types.InlineKeyboardButton(
-                "✅ Blokdan çıxart",
-                callback_data=f"admusr|unblock|{target_id}",
-            )
-        )
-    else:
-        mk.add(
-            types.InlineKeyboardButton(
-                "⛔ Blokla",
-                callback_data=f"admusr|block|{target_id}",
-            )
-        )
-
-    mk.add(
-        types.InlineKeyboardButton(
-            "❌ Limitsizi ləğv et" if unlimited else "♾️ Limitsiz et",
-            callback_data=f"admusr|unlimit|{target_id}",
-        )
-    )
-
-    mk.add(
-        types.InlineKeyboardButton(
-            "🗑 İstifadəçini sil", callback_data=f"admusr|delete|{target_id}"
-        )
-    )
+    mk = _build_admin_user_markup(target_id, record, unlimited, blocked_flag)
 
     if message:
         try:
@@ -19169,16 +19181,24 @@ def cb_admin_select_none(c):
     show_all_users(chat_id, list_status, page=page, message=c.message, force_new=False)
 
 
-def _send_bulk_action_menu(chat_id: int, list_status: str, page: int):
+def _build_bulk_action_markup(
+    list_status: str, page: int, selected_ids: List[int]
+) -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup()
+
+    state_map = _fetch_chance_block_state(selected_ids)
+    all_blocked = bool(state_map) and all(v for v in state_map.values())
+    toggle_text = "✅ Şansı aktiv et" if all_blocked else "⛔ Şansı bağla"
+    toggle_action = "on" if all_blocked else "off"
+
     mk.row(
         types.InlineKeyboardButton(
             "🎁 Şansı sıfırla",
             callback_data=f"adm_bulk_reset:{list_status}:{page}",
         ),
         types.InlineKeyboardButton(
-            "⛔ Şansı bağla",
-            callback_data=f"adm_bulk_block:{list_status}:{page}",
+            toggle_text,
+            callback_data=f"chance_toggle:{toggle_action}:bulk:{list_status}:{page}",
         ),
     )
     mk.row(
@@ -19200,6 +19220,22 @@ def _send_bulk_action_menu(chat_id: int, list_status: str, page: int):
             "❌ Ləğv et", callback_data=f"adm_bulk_cancel:{list_status}:{page}"
         )
     )
+    return mk
+
+
+def _send_bulk_action_menu(
+    chat_id: int, list_status: str, page: int, message: Optional[types.Message] = None
+):
+    selected_ids = list(admin_selected_users.get(chat_id, set()))
+    mk = _build_bulk_action_markup(list_status, page, selected_ids)
+    if message:
+        try:
+            bot.edit_message_reply_markup(
+                chat_id=chat_id, message_id=message.message_id, reply_markup=mk
+            )
+            return
+        except Exception:
+            pass
     bot.send_message(
         chat_id, "Seçilən istifadəçilər üçün müddət seçin:", reply_markup=mk
     )
@@ -19253,6 +19289,42 @@ def _perform_bulk_extend(chat_id: int, days: int, list_status: str, page: int):
     )
 
 
+def _fetch_chance_block_state(user_ids: List[int]) -> Dict[int, int]:
+    if not user_ids:
+        return {}
+    conn = get_local_conn()
+    cur = conn.cursor()
+    _ensure_chance_columns_exists(conn)
+    placeholders = ",".join(["?"] * len(user_ids))
+    cur.execute(
+        f"SELECT chat_id, chance_blocked FROM users WHERE chat_id IN ({placeholders})",
+        user_ids,
+    )
+    result = {int(row[0]): int(row[1] or 0) for row in cur.fetchall()}
+    conn.close()
+    return result
+
+
+def _set_chance_block_state(user_ids: List[int], blocked: int) -> int:
+    if not user_ids:
+        return 0
+    conn = get_local_conn()
+    cur = conn.cursor()
+    _ensure_chance_columns_exists(conn)
+    updated = 0
+    for uid in user_ids:
+        cur.execute(
+            "UPDATE users SET chance_blocked=? WHERE chat_id=?", (blocked, uid)
+        )
+        try:
+            updated += max(cur.rowcount or 0, 0)
+        except Exception:
+            pass
+    conn.commit()
+    conn.close()
+    return updated
+
+
 def _reset_chance_usage_for_users(user_ids: List[int]) -> int:
     if not user_ids:
         return 0
@@ -19272,21 +19344,7 @@ def _reset_chance_usage_for_users(user_ids: List[int]) -> int:
 
 
 def _block_chance_for_users(user_ids: List[int]) -> int:
-    if not user_ids:
-        return 0
-    conn = get_local_conn()
-    cur = conn.cursor()
-    _ensure_chance_columns_exists(conn)
-    updated = 0
-    for uid in user_ids:
-        cur.execute("UPDATE users SET chance_blocked=1 WHERE chat_id=?", (uid,))
-        try:
-            updated += max(cur.rowcount or 0, 0)
-        except Exception:
-            pass
-    conn.commit()
-    conn.close()
-    return updated
+    return _set_chance_block_state(user_ids, 1)
 
 
 def _perform_bulk_chance_reset(chat_id: int, list_status: str, page: int):
@@ -19386,6 +19444,61 @@ def cb_admin_bulk_block(c):
     except Exception:
         return
     _perform_bulk_chance_block(chat_id, list_status, page)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("chance_toggle:"))
+@callback_guard
+def cb_chance_toggle(c):
+    chat_id = c.message.chat.id if c.message else None
+    safe_answer_callback_query(c.id)
+    if not is_admin(chat_id):
+        return
+
+    parts = c.data.split(":")
+    if len(parts) < 3:
+        return
+
+    action = parts[1]
+    mode = parts[2]
+    target_state = 0 if action == "on" else 1
+
+    if mode == "user" and len(parts) >= 4:
+        try:
+            uid = int(parts[3])
+        except Exception:
+            return
+
+        _set_chance_block_state([uid], target_state)
+        record = get_user_record(uid) or {}
+        mk = _build_admin_user_markup(
+            uid,
+            record,
+            is_user_unlimited(uid),
+            bool(record.get("blocked") or record.get("is_blocked")),
+        )
+        try:
+            bot.edit_message_reply_markup(
+                chat_id=chat_id, message_id=c.message.message_id, reply_markup=mk
+            )
+        except Exception:
+            pass
+        return
+
+    if mode == "bulk" and len(parts) >= 5:
+        list_status = parts[3]
+        try:
+            page = int(parts[4])
+        except Exception:
+            return
+        selected_ids = list(admin_selected_users.get(chat_id, set()))
+        if not selected_ids:
+            safe_answer_callback_query(
+                c.id, "⚠️ Əvvəlcə istifadəçiləri seçin", show_alert=True
+            )
+            return
+        _set_chance_block_state(selected_ids, target_state)
+        _send_bulk_action_menu(chat_id, list_status, page, message=c.message)
+        return
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_bulk_custom:"))
