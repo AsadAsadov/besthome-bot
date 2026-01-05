@@ -54,6 +54,10 @@ SUBSCRIPTION_PLANS = {
     "30": {"title": "30 gün", "price": "9 AZN", "days": 30},
 }
 
+# Kapital Bank hazır olduqda URL-ı burada təyin etmək kifayətdir (məsələn,
+# https://pay.kapitalbank.az/merchant/XXXX).
+CARD_PAYMENT_URL = os.getenv("CARD_PAYMENT_URL")
+
 REFERRAL_REWARD_DAYS = 3
 REFERRAL_MILESTONE_COUNT = 10
 REFERRAL_MILESTONE_BONUS_DAYS = 45
@@ -4046,6 +4050,38 @@ def is_demo_available(chat_id: int) -> bool:
     return True
 
 
+def build_card_payment_button(plan_key: str) -> types.InlineKeyboardButton:
+    if CARD_PAYMENT_URL:
+        return types.InlineKeyboardButton("💳 Kartla ödəniş", url=CARD_PAYMENT_URL)
+    return types.InlineKeyboardButton(
+        "💳 Kartla ödəniş (tezliklə)", callback_data=f"cardpay|{plan_key}"
+    )
+
+
+def build_payment_action_markup(
+    plan_key: str, plan: dict, payment_code: str, include_card_button: bool = True
+) -> types.InlineKeyboardMarkup:
+    plan_name = quote(plan.get("title", "")) if plan else ""
+    whatsapp_url = (
+        "https://wa.me/994708468585?text="
+        "Salam%20BestHome,%20{plan_name}%20paketi%20almaq%20isteyirem.%20"
+        "Odenis%20kodu:%20BH-{payment_code}"
+    ).format(plan_name=plan_name, payment_code=payment_code)
+    telegram_url = (
+        "https://t.me/esedovesed?text="
+        "Salam%20BestHome,%20{plan_name}%20paketi%20almaq%20isteyirem.%20"
+        "Odenis%20kodu:%20BH-{payment_code}"
+    ).format(plan_name=plan_name, payment_code=payment_code)
+
+    mk = types.InlineKeyboardMarkup(row_width=1)
+    if include_card_button:
+        mk.add(build_card_payment_button(plan_key))
+    mk.add(types.InlineKeyboardButton("📲 WhatsApp-da yaz", url=whatsapp_url))
+    mk.add(types.InlineKeyboardButton("✈️ Telegram-da yaz", url=telegram_url))
+    mk.add(types.InlineKeyboardButton("✅ Ödəniş etdim", callback_data=f"paydone|{plan_key}"))
+    return mk
+
+
 def build_payment_menu_markup(chat_id: int):
     mk = types.InlineKeyboardMarkup()
     for key, info in SUBSCRIPTION_PLANS.items():
@@ -7799,32 +7835,7 @@ def cb_payplan(c):
         "selected_price": plan.get("price"),
     }
     payment_code = subscription_payment_code(chat_id)
-    mk = types.InlineKeyboardMarkup(row_width=1)
-    mk.add(
-        types.InlineKeyboardButton(
-            "📲 WhatsApp-da yaz",
-            url=(
-                "https://wa.me/994708468585?text="
-                "Salam%20BestHome,%20{plan_name}%20paketi%20almaq%20isteyirem.%20"
-                "Odenis%20kodu:%20BH-{payment_code}"
-            ).format(plan_name=quote(plan.get("title", "")), payment_code=chat_id),
-        )
-    )
-    mk.add(
-        types.InlineKeyboardButton(
-            "✈️ Telegram-da yaz",
-            url=(
-                "https://t.me/esedovesed?text="
-                "Salam%20BestHome,%20{plan_name}%20paketi%20almaq%20isteyirem.%20"
-                "Odenis%20kodu:%20BH-{payment_code}"
-            ).format(plan_name=quote(plan.get("title", "")), payment_code=chat_id),
-        )
-    )
-    mk.add(
-        types.InlineKeyboardButton(
-            "✅ Ödəniş etdim", callback_data=f"paydone|{plan_key}"
-        )
-    )
+    mk = build_payment_action_markup(plan_key, plan or {}, chat_id)
 
     pay_text = (
         "🎁 BONUS İMKAN\n\n"
@@ -7841,6 +7852,42 @@ def cb_payplan(c):
         f"{payment_code}"
     )
     bot.send_message(chat_id, pay_text, reply_markup=mk)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("cardpay|"))
+@callback_guard
+def cb_card_payment_info(c):
+    chat_id = c.message.chat.id
+    plan_key = c.data.split("|", 1)[1] if c.data and "|" in c.data else ""
+    plan = SUBSCRIPTION_PLANS.get(plan_key) or {}
+    logger.info(
+        "User clicked card payment (preparation mode) chat_id=%s plan=%s",
+        chat_id,
+        plan_key,
+    )
+
+    info_text = (
+        "----------------------------------\n"
+        "💳 Kartla ödəniş\n\n"
+        "Hazırda bank kartı ilə ödəniş\n"
+        "aktivləşmə mərhələsindədir.\n\n"
+        "Çox yaxın zamanda:\n"
+        "• Bir kliklə ödəniş\n"
+        "• Avtomatik aktivləşmə\n"
+        "• Gecikməsiz giriş\n\n"
+        "Bu müddətdə ödəniş üçün\n"
+        "aşağıdakı düymələrdən istifadə edin 👇\n"
+        "----------------------------------"
+    )
+
+    mk = build_payment_action_markup(
+        plan_key or "", plan, chat_id, include_card_button=False
+    )
+    bot.send_message(chat_id, info_text, reply_markup=mk)
     try:
         bot.answer_callback_query(c.id)
     except Exception:
