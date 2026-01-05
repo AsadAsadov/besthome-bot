@@ -2620,7 +2620,7 @@ def get_user_record(chat_id: int) -> Optional[dict]:
                u.referral_bonus_used, u.referral_milestone_used, u.demo_used,
                u.demo_expires_at, u.blocked_at, u.last_error, u.is_active, u.deleted_at,
                uw.computed_status, uw.effective_expires_at, u.bonus_allowed, u.last_spin_at,
-               u.join_source
+               u.join_source, u.chance_last_used_at
         FROM users u
         LEFT JOIN users_with_status uw ON uw.chat_id = u.chat_id
         WHERE u.chat_id=?
@@ -3070,6 +3070,16 @@ def ensure_bonus_tables(cur: sqlite3.Cursor):
         )
         """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chance_bonus_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            granted_days INTEGER,
+            created_at TEXT
+        )
+        """
+    )
     for days, weight in BONUS_DEFAULT_PROBABILITIES.items():
         cur.execute(
             "INSERT OR IGNORE INTO bonus_probabilities (days, weight) VALUES (?, ?)",
@@ -3120,12 +3130,45 @@ def update_bonus_probabilities(new_weights: Dict[int, int]) -> Dict[int, int]:
 
 
 def fetch_bonus_stats() -> dict:
+    now = datetime.utcnow()
+    start_of_today = datetime(now.year, now.month, now.day)
+    conn = get_local_conn()
+    cur = conn.cursor()
+    ensure_bonus_tables(cur)
+
+    cur.execute(
+        "SELECT COUNT(*), COALESCE(SUM(granted_days), 0) FROM chance_bonus_logs"
+    )
+    total_spins, total_days = cur.fetchone()
+
+    cur.execute(
+        """
+        SELECT COUNT(*), COALESCE(SUM(granted_days), 0)
+        FROM chance_bonus_logs
+        WHERE created_at >= ?
+        """,
+        (start_of_today.isoformat(),),
+    )
+    today_spins, today_days = cur.fetchone()
+
+    cur.execute(
+        """
+        SELECT user_id, granted_days, created_at
+        FROM chance_bonus_logs
+        ORDER BY created_at DESC
+        LIMIT 5
+        """
+    )
+    recent = cur.fetchall()
+
+    conn.close()
+
     return {
-        "today_spins": 0,
-        "today_days": 0,
-        "total_spins": 0,
-        "total_days": 0,
-        "recent": [],
+        "today_spins": today_spins or 0,
+        "today_days": today_days or 0,
+        "total_spins": total_spins or 0,
+        "total_days": total_days or 0,
+        "recent": recent,
     }
 
 
@@ -3246,6 +3289,21 @@ def update_user_chance_usage(chat_id: int, last_used_at: Optional[datetime]):
     conn.close()
 
 
+def log_chance_bonus(user_id: int, granted_days: int, created_at: datetime):
+    conn = get_local_conn()
+    cur = conn.cursor()
+    ensure_bonus_tables(cur)
+    cur.execute(
+        """
+        INSERT INTO chance_bonus_logs (user_id, granted_days, created_at)
+        VALUES (?, ?, ?)
+        """,
+        (user_id, granted_days, created_at.isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
 def can_use_chance(record: Optional[dict], now: datetime) -> Tuple[bool, Optional[datetime]]:
     last_used_at = parse_dt_safe(record.get("chance_last_used_at")) if record else None
     if not last_used_at:
@@ -3270,7 +3328,8 @@ def ensure_chance_usage_state(
     return allowed_today, used_today, last_used_at, extra_clicks
 
 
-def process_chance_click(user_id: int, chat_id: int) -> None:
+def handle_chance_request(user_id: int) -> None:
+    chat_id = user_id
     record = get_user_record(user_id) or {}
     now = datetime.utcnow()
 
@@ -3299,6 +3358,7 @@ def process_chance_click(user_id: int, chat_id: int) -> None:
 
     if bonus_days > 0:
         apply_bonus_days(user_id, bonus_days, entitlement_type)
+        log_chance_bonus(user_id, bonus_days, now)
 
     bot.send_message(
         chat_id,
@@ -8566,8 +8626,7 @@ def handle_bonus_spin_request(message):
     if message.text and message.text.startswith('/'):
         return
 
-    chat_id = message.chat.id
-    process_chance_click(message.from_user.id, chat_id)
+    handle_chance_request(message.from_user.id)
 
 
 @bot.message_handler(func=lambda m: m.text == "⬅️ Geri")
