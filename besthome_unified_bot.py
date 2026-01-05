@@ -8525,19 +8525,21 @@ def handle_bonus_spin_request(message):
         send_blocked_prompt(chat_id)
         return
 
-    _, used_today, last_used_at, _ = ensure_chance_usage_state(chat_id, record, now)
-    if used_today >= 1:
-        available_at = (last_used_at or now) + timedelta(hours=24)
-        bot.send_message(
-            chat_id,
-            (
-                "⏳ Bu gün artıq şansınızı istifadə etmisiniz.\n\n"
-                "Növbəti şans:\n"
-                f"📅 {available_at.strftime('%d.%m.%Y')}\n"
-                f"⏰ {available_at.strftime('%H:%M')}"
-            ),
-        )
-        return
+    last_used_at = parse_dt_safe(record.get("chance_last_used_at")) if record else None
+    if last_used_at:
+        delta = now - last_used_at
+        if delta < timedelta(hours=24):
+            available_at = last_used_at + timedelta(hours=24)
+            bot.send_message(
+                chat_id,
+                (
+                    "⏳ Bu gün artıq şansınızı istifadə etmisiniz.\n\n"
+                    "Növbəti şans:\n"
+                    f"📅 {available_at.strftime('%d.%m.%Y')}\n"
+                    f"⏰ {available_at.strftime('%H:%M')}"
+                ),
+            )
+            return
 
     entitlement_type, _ = resolve_user_entitlement(chat_id)
     bonus_days = pick_bonus_days()
