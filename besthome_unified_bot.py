@@ -2134,9 +2134,9 @@ def init_local_db():
         CREATE TABLE IF NOT EXISTS keyword_alert_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
-            listing_id INTEGER NOT NULL,
-            keyword TEXT NOT NULL,
-            created_at DATETIME NOT NULL
+            listing_id INTEGER,
+            keyword TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
@@ -9955,22 +9955,29 @@ def fetch_keyword_alert_hits_page(user_id: int, period: str, page: int = 1):
 def fetch_keyword_alert_hits(user_id: int, period: str) -> List[dict]:
     conn = get_local_conn()
     cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM keyword_alert_history WHERE user_id=?", (user_id,))
-    total = cur.fetchone()[0] or 0
-    period_clause, period_params = build_period_filter(period, "kah.created_at")
-    params = [user_id] + period_params
-    cur.execute(
-        f"""
-        SELECT kah.*, ka.keywords, ka.regions
-        FROM keyword_alert_history kah
-        LEFT JOIN keyword_alerts ka ON ka.id=kah.alert_id
-        WHERE kah.user_id=? {period_clause}
-        ORDER BY datetime(kah.created_at) DESC
-        """,
-        params,
-    )
-    rows = [dict(r) for r in cur.fetchall()]
-    conn.close()
+    try:
+        cur.execute(
+            "SELECT COUNT(*) FROM keyword_alert_history WHERE user_id=?", (user_id,)
+        )
+        total = cur.fetchone()[0] or 0
+        period_clause, period_params = build_period_filter(period, "kah.created_at")
+        params = [user_id] + period_params
+        cur.execute(
+            f"""
+            SELECT kah.*, ka.keywords, ka.regions
+            FROM keyword_alert_history kah
+            LEFT JOIN keyword_alerts ka ON ka.id=kah.alert_id
+            WHERE kah.user_id=? {period_clause}
+            ORDER BY datetime(kah.created_at) DESC
+            """,
+            params,
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    except sqlite3.OperationalError:
+        rows = []
+        total = 0
+    finally:
+        conn.close()
     return rows, total
 
 
