@@ -10053,7 +10053,7 @@ def fetch_keyword_alert_hits_page(user_id: int, period: str, page: int = 1):
     where += period_clause
     params.extend(period_params)
     cur.execute(
-        f"SELECT COUNT(*) FROM keyword_alert_hits kah WHERE {where}",
+        f"SELECT COUNT(DISTINCT kah.target_id) FROM keyword_alert_hits kah WHERE {where}",
         params,
     )
     total = cur.fetchone()[0] or 0
@@ -10063,16 +10063,32 @@ def fetch_keyword_alert_hits_page(user_id: int, period: str, page: int = 1):
     offset = (page - 1) * PAGE_SIZE_NOTIFICATIONS
     cur.execute(
         f"""
-        SELECT kah.*, ka.keywords, ka.regions
+        SELECT kah.target_id as listing_id, kah.source, kah.created_at
         FROM keyword_alert_hits kah
-        JOIN keyword_alerts ka ON ka.id = kah.alert_id
-        WHERE {where}
+        JOIN (
+            SELECT target_id, MAX(datetime(created_at)) as max_created_at
+            FROM keyword_alert_hits
+            WHERE {where}
+            GROUP BY target_id
+        ) latest ON latest.target_id = kah.target_id
+        WHERE {where} AND datetime(kah.created_at) = latest.max_created_at
         ORDER BY datetime(kah.created_at) DESC
         LIMIT ? OFFSET ?
         """,
-        params + [PAGE_SIZE_NOTIFICATIONS, offset],
+        params + params + [PAGE_SIZE_NOTIFICATIONS, offset],
     )
-    rows = [dict(r) for r in cur.fetchall()]
+    rows_raw = [dict(r) for r in cur.fetchall()]
+    rows = []
+    seen_ids: Set[str] = set()
+    for r in rows_raw:
+        listing_id = r.get("listing_id") or r.get("target_id")
+        if listing_id is None:
+            continue
+        key = str(listing_id)
+        if key in seen_ids:
+            continue
+        seen_ids.add(key)
+        rows.append(r)
     conn.close()
     return rows, total, total_pages, page
 
@@ -10081,23 +10097,36 @@ def fetch_keyword_alert_hits(user_id: int, period: str) -> List[dict]:
     conn = get_local_conn()
     cur = conn.cursor()
     try:
-        cur.execute(
-            "SELECT COUNT(*) FROM keyword_alert_history WHERE user_id=?", (user_id,)
-        )
-        total = cur.fetchone()[0] or 0
+        where = "kah.user_id=? AND kah.target_type='listing'"
         period_clause, period_params = build_period_filter(period, "kah.created_at")
         params = [user_id] + period_params
+        where += period_clause
+        cur.execute(
+            f"SELECT COUNT(DISTINCT kah.target_id) FROM keyword_alert_hits kah WHERE {where}",
+            params,
+        )
+        total = cur.fetchone()[0] or 0
         cur.execute(
             f"""
-            SELECT kah.*, ka.keywords, ka.regions
-            FROM keyword_alert_history kah
-            LEFT JOIN keyword_alerts ka ON ka.id=kah.alert_id
-            WHERE kah.user_id=? {period_clause}
+            SELECT kah.target_id as listing_id, kah.source, kah.created_at
+            FROM keyword_alert_hits kah
+            WHERE {where}
             ORDER BY datetime(kah.created_at) DESC
             """,
             params,
         )
-        rows = [dict(r) for r in cur.fetchall()]
+        rows_raw = [dict(r) for r in cur.fetchall()]
+        rows: List[dict] = []
+        seen_ids: Set[str] = set()
+        for r in rows_raw:
+            listing_id = r.get("listing_id") or r.get("target_id")
+            if listing_id is None:
+                continue
+            key = str(listing_id)
+            if key in seen_ids:
+                continue
+            seen_ids.add(key)
+            rows.append(r)
     except sqlite3.OperationalError:
         rows = []
         total = 0
@@ -10111,10 +10140,10 @@ def load_notification_listings(chat_id: int, notif_type: str, period: str) -> Li
     if notif_type == "keyword":
         rows, _ = fetch_keyword_alert_hits(chat_id, period)
         for row in rows:
-            if _row_value_safe(row, "target_type") != "listing":
-                continue
             source = _row_value_safe(row, "source") or "main"
-            target_id = _row_value_safe(row, "target_id")
+            target_id = _row_value_safe(row, "listing_id") or _row_value_safe(
+                row, "target_id"
+            )
             try:
                 target_id_int = int(target_id)
             except Exception:
