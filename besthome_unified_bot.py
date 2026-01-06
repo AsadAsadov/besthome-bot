@@ -54,6 +54,10 @@ SUBSCRIPTION_PLANS = {
     "30": {"title": "30 gün", "price": "9 AZN", "days": 30},
 }
 
+MANUAL_PAYMENT_PENDING = "PENDING"
+MANUAL_PAYMENT_APPROVED = "APPROVED"
+MANUAL_PAYMENT_REJECTED = "REJECTED"
+
 # Kapital Bank hazır olduqda URL-ı burada təyin etmək kifayətdir (məsələn,
 # https://pay.kapitalbank.az/merchant/XXXX).
 CARD_PAYMENT_URL = os.getenv("CARD_PAYMENT_URL")
@@ -599,10 +603,12 @@ FINANCIAL_REPORTS_MENU = [
     TEXTS_AZ["financial_reports_monthly"],
     FINANCIAL_REPORTS_BACK,
 ]
+ADMIN_PAYMENTS_BUTTON = "💳 Ödənişlər"
 ADMIN_PANEL_BUTTONS = [
     TEXTS_AZ["admin_panel_stats"],
     "📊 QR Statistikası",
     FINANCIAL_REPORTS_BUTTON,
+    ADMIN_PAYMENTS_BUTTON,
     TEXTS_AZ["admin_panel_bonus_stats"],
     TEXTS_AZ["admin_panel_agents_notify"],
     TEXTS_AZ["admin_panel_user_search"],
@@ -1660,6 +1666,8 @@ def init_local_db():
             demo_end_at TEXT,
             paid_until TEXT,
             last_status_change_at TEXT,
+            payment_type TEXT,
+            last_payment_at TEXT,
             customer_requests_enabled INTEGER DEFAULT 0,
             source_type TEXT,
             source_area TEXT,
@@ -1713,6 +1721,8 @@ def init_local_db():
         "ALTER TABLE users ADD COLUMN last_error TEXT",
         "ALTER TABLE users ADD COLUMN is_active INTEGER DEFAULT 1",
         "ALTER TABLE users ADD COLUMN deleted_at TEXT",
+        "ALTER TABLE users ADD COLUMN payment_type TEXT",
+        "ALTER TABLE users ADD COLUMN last_payment_at TEXT",
     ]:
         try:
             cur.execute(alter_stmt)
@@ -1821,6 +1831,28 @@ def init_local_db():
             approved_at TEXT DEFAULT (CURRENT_TIMESTAMP)
         )
         """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS manual_payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            payment_code TEXT,
+            selected_package TEXT,
+            plan_key TEXT,
+            created_at TEXT,
+            status TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_manual_payments_status ON manual_payments(status)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_manual_payments_user ON manual_payments(user_id)"
     )
 
     cur.execute(
@@ -3473,6 +3505,85 @@ def log_approved_payment(chat_id: int, plan: str, amount: int):
     conn.close()
 
 
+def create_manual_payment_request(
+    user_id: int, payment_code: str, selected_package: str, plan_key: Optional[str]
+) -> int:
+    now = datetime.utcnow().isoformat()
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO manual_payments (user_id, payment_code, selected_package, plan_key, created_at, status, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            user_id,
+            payment_code,
+            selected_package,
+            plan_key,
+            now,
+            MANUAL_PAYMENT_PENDING,
+            now,
+        ),
+    )
+    conn.commit()
+    request_id = cur.lastrowid
+    conn.close()
+    return request_id
+
+
+def get_manual_payment_request(request_id: int) -> Optional[dict]:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, user_id, payment_code, selected_package, plan_key, created_at, status
+        FROM manual_payments
+        WHERE id=?
+        """,
+        (request_id,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def update_manual_payment_status(request_id: int, status: str) -> bool:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE manual_payments SET status=?, updated_at=? WHERE id=?",
+        (status, datetime.utcnow().isoformat(), request_id),
+    )
+    conn.commit()
+    updated = cur.rowcount > 0
+    conn.close()
+    return updated
+
+
+def resolve_plan_key_from_request(req: dict) -> Optional[str]:
+    if not req:
+        return None
+    plan_key = req.get("plan_key")
+    if plan_key in SUBSCRIPTION_PLANS:
+        return plan_key
+    selected_package = (req.get("selected_package") or "").lower()
+    for key, info in SUBSCRIPTION_PLANS.items():
+        if info["title"].lower() in selected_package:
+            return key
+    return None
+
+
+def format_display_time(dt_raw: Optional[str]) -> str:
+    if not dt_raw:
+        return "-"
+    try:
+        parsed = datetime.fromisoformat(str(dt_raw).replace(" ", "T"))
+        return (parsed + timedelta(hours=4)).strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        return str(dt_raw)
+
+
 def parse_subscription_expiry(sub) -> Optional[datetime]:
     if sub and sub.get("expires_at"):
         try:
@@ -4080,7 +4191,15 @@ def build_payment_action_markup(
 
 
 def build_payment_menu_markup(chat_id: int):
-    mk = types.InlineKeyboardMarkup()
+    mk = types.InlineKeyboardMarkup(row_width=2)
+    mk.row(
+        types.InlineKeyboardButton(
+            "💳 Kartla ödəniş (tezliklə)", callback_data="paytype:card"
+        ),
+        types.InlineKeyboardButton(
+            "📲 Manual ödəniş", callback_data="paytype:manual"
+        ),
+    )
     for key, info in SUBSCRIPTION_PLANS.items():
         mk.add(
             types.InlineKeyboardButton(
@@ -7751,6 +7870,40 @@ def cb_open_pay_menu(c):
         pass
 
 
+@bot.callback_query_handler(func=lambda c: c.data == "paytype:card")
+@callback_guard
+def cb_paytype_card(c):
+    chat_id = c.message.chat.id
+    bot.send_message(
+        chat_id,
+        "💳 Kartla ödəniş çox yaxında aktiv olacaq.\n"
+        "Hazırda ödənişi manual şəkildə edə bilərsiniz.",
+    )
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+    try:
+        bot.send_message(ADMIN_ID, f"⚠️ User clicked card payment placeholder: {chat_id}")
+    except Exception:
+        logger.warning("Admin notification for card placeholder failed chat_id=%s", chat_id)
+    send_payment_menu(chat_id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "paytype:manual")
+@callback_guard
+def cb_paytype_manual(c):
+    chat_id = c.message.chat.id
+    bot.send_message(
+        chat_id,
+        "📲 Manual ödəniş seçildi. Paketini seç və aşağıdakı kanallardan istifadə et.",
+    )
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
 @bot.callback_query_handler(func=lambda c: c.data == "payinfo")
 @callback_guard
 def cb_payinfo(c):
@@ -7983,23 +8136,28 @@ def cb_paydone(c):
     plan = SUBSCRIPTION_PLANS.get(plan_key)
     if not plan:
         return
-    sub = get_subscription(chat_id) or {}
-    demo_status = "Bəli" if sub.get("is_demo") else "Xeyr"
+    payment_code = subscription_payment_code(chat_id)
+    try:
+        selected_package = f"{plan['title']} ({plan['price']})"
+    except Exception:
+        selected_package = plan.get("title") if plan else "-"
+    request_id = create_manual_payment_request(
+        chat_id, payment_code, selected_package, plan_key
+    )
 
     admin_text = (
-        "🆕 Ödəniş sorğusu\n"
-        f"👤 chat_id: {chat_id}\n"
-        f"🆔 Kod: {subscription_payment_code(chat_id)}\n"
-        f"📦 Plan: {plan['title']} ({plan['price']})\n"
-        f"🎁 Demo: {demo_status}"
+        "🟡 Yeni manual ödəniş sorğusu:\n"
+        f"ID: {chat_id}\n"
+        f"Kod: {payment_code}\n"
+        f"Paket: {selected_package}"
     )
     mk = types.InlineKeyboardMarkup()
     mk.add(
         types.InlineKeyboardButton(
-            "✅ Təsdiqlə", callback_data=f"payadm|ok|{chat_id}|{plan_key}"
+            "✅ Təsdiqlə", callback_data=f"manualpay|approve|{request_id}"
         ),
         types.InlineKeyboardButton(
-            "❌ Ləğv et", callback_data=f"payadm|rej|{chat_id}|{plan_key}"
+            "❌ Rədd et", callback_data=f"manualpay|reject|{request_id}"
         ),
     )
     bot.send_message(ADMIN_ID, admin_text, reply_markup=mk)
@@ -8013,6 +8171,59 @@ def cb_paydone(c):
         pass
 
 
+def approve_manual_payment(chat_id: int, plan_key: str, request_id: Optional[int] = None):
+    plan = SUBSCRIPTION_PLANS.get(plan_key)
+    if not plan:
+        return False
+    sub_before = get_subscription(chat_id)
+    base = resolve_extension_base(chat_id)
+    expires = base + timedelta(days=plan["days"])
+    insert_subscription(chat_id, plan["title"], expires, is_demo=0, note=f"plan:{plan_key}")
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE users
+        SET approved=1,
+            payment_type=COALESCE(payment_type, ?),
+            paid_until=?,
+            last_payment_at=?
+        WHERE chat_id=?
+        """,
+        ("manual", expires.isoformat(), datetime.utcnow().isoformat(), chat_id),
+    )
+    conn.commit()
+    conn.close()
+    amount_val = parse_price_value(plan.get("price")) or 0
+    if amount_val > 0:
+        log_approved_payment(chat_id, plan["title"], amount_val)
+    process_referral_on_payment(chat_id, sub_before, amount_val)
+    try:
+        bot.send_message(
+            chat_id,
+            "✅ Hesabınız aktivləşdirildi\n"
+            f"📅 Bitmə tarixi: {(expires + timedelta(hours=4)).strftime('%d.%m.%Y')}",
+        )
+    except Exception:
+        pass
+    if request_id:
+        update_manual_payment_status(request_id, MANUAL_PAYMENT_APPROVED)
+    return True
+
+
+def reject_manual_payment(chat_id: int, request_id: Optional[int] = None):
+    if request_id:
+        update_manual_payment_status(request_id, MANUAL_PAYMENT_REJECTED)
+    try:
+        bot.send_message(
+            chat_id,
+            " ödəniş təsdiqlənmədi. Zəhmət olmasa adminlə əlaqə saxlayın. @esedovesed",
+        )
+    except Exception:
+        pass
+    return True
+
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith("payadm|"))
 @callback_guard
 def cb_pay_admin(c):
@@ -8022,47 +8233,75 @@ def cb_pay_admin(c):
     if len(parts) < 4:
         return
     action, uid_raw, plan_key = parts[1], parts[2], parts[3]
+    request_id = None
+    if len(parts) > 4:
+        try:
+            request_id = int(parts[4])
+        except Exception:
+            request_id = None
     try:
         uid = int(uid_raw)
     except Exception:
         return
-    sub = get_subscription(uid)
     plan = SUBSCRIPTION_PLANS.get(plan_key)
     if not plan:
         return
 
     if action == "ok":
-        base = resolve_extension_base(uid)
-        expires = base + timedelta(days=plan["days"])
-        insert_subscription(
-            uid, plan["title"], expires, is_demo=0, note=f"plan:{plan_key}"
-        )
-        conn = get_local_conn()
-        cur = conn.cursor()
-        cur.execute("UPDATE users SET approved=1 WHERE chat_id=?", (uid,))
-        conn.commit()
-        conn.close()
-        amount_val = parse_price_value(plan.get("price")) or 0
-        if amount_val > 0:
-            log_approved_payment(uid, plan["title"], amount_val)
-        process_referral_on_payment(uid, sub, amount_val)
-        try:
-            bot.send_message(
-                uid,
-                "✅ Hesabınız aktivləşdirildi\n"
-                f"📅 Bitmə tarixi: {(expires + timedelta(hours=4)).strftime('%d.%m.%Y')}",
-            )
-        except Exception:
-            pass
+        approve_manual_payment(uid, plan_key, request_id=request_id)
         bot.answer_callback_query(c.id, "? Aktiv edildi")
     elif action == "rej":
+        reject_manual_payment(uid, request_id=request_id)
+        bot.answer_callback_query(c.id, "?mtina edildi")
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("manualpay|"))
+@callback_guard
+def cb_manual_payment_admin(c):
+    if not is_admin(c.from_user.id):
+        return
+    parts = c.data.split("|")
+    if len(parts) < 3:
+        return
+    action, req_id_raw = parts[1], parts[2]
+    page = None
+    if len(parts) > 3:
         try:
-            bot.send_message(
-                uid, " ödəniş təsdiqlənmədi. Zəhmət olmasa adminlə əlaqə saxlayın. @esedovesed"
-            )
+            page = int(parts[3])
+        except Exception:
+            page = None
+    try:
+        request_id = int(req_id_raw)
+    except Exception:
+        return
+    request = get_manual_payment_request(request_id)
+    if not request:
+        try:
+            bot.answer_callback_query(c.id, "Sorğu tapılmadı")
         except Exception:
             pass
-        bot.answer_callback_query(c.id, "?mtina edildi")
+        return
+    plan_key = resolve_plan_key_from_request(request)
+    if action == "approve":
+        if not plan_key:
+            try:
+                bot.answer_callback_query(c.id, "Plan tapılmadı")
+            except Exception:
+                pass
+            return
+        approve_manual_payment(request["user_id"], plan_key, request_id=request_id)
+        try:
+            bot.answer_callback_query(c.id, "Təsdiqləndi")
+        except Exception:
+            pass
+    elif action == "reject":
+        reject_manual_payment(request["user_id"], request_id=request_id)
+        try:
+            bot.answer_callback_query(c.id, "Rədd edildi")
+        except Exception:
+            pass
+    if page:
+        show_manual_payment_requests(c.message.chat.id, page=page)
 
 
 def new_listing_keyboard(extra=None):
@@ -14763,6 +15002,8 @@ def _handle_admin_panel_action(chat_id: int, action_text: str):
         send_qr_stats_menu(chat_id)
     elif action_text == FINANCIAL_REPORTS_BUTTON:
         send_financial_reports_menu(chat_id)
+    elif action_text == ADMIN_PAYMENTS_BUTTON:
+        send_admin_payments_menu(chat_id)
     elif action_text == TEXTS_AZ["admin_panel_agents_notify"]:
         msg = bot.send_message(chat_id, "✍️ Vasitəçilərə göndəriləcək mətni yaz:")
         bot.register_next_step_handler(msg, admin_agents_broadcast)
@@ -16381,6 +16622,218 @@ def send_financial_reports_menu(chat_id: int):
     bot.send_message(chat_id, "💰 Maliyyə hesabatları:", reply_markup=mk)
 
 
+def send_admin_payments_menu(chat_id: int):
+    if not is_admin(chat_id):
+        return
+
+    mk = types.InlineKeyboardMarkup(row_width=2)
+    mk.row(
+        types.InlineKeyboardButton(
+            "🟢 Avtomatik kart ödənişləri",
+            callback_data="admpayments:card:1",
+        ),
+        types.InlineKeyboardButton(
+            "🟡 Manual ödəniş sorğuları",
+            callback_data="admpayments:manual:1",
+        ),
+    )
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="adm_back:main"))
+    bot.send_message(chat_id, "💳 Ödənişlər", reply_markup=mk)
+
+
+def show_card_payments(chat_id: int, page: int = 1):
+    if not is_admin(chat_id):
+        return
+    PAGE_SIZE = 10
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM users WHERE payment_type='card'")
+    count_row = cur.fetchone()
+    total = count_row[0] if count_row else 0
+    if isinstance(total, sqlite3.Row):
+        total = total[0]
+    total = total or 0
+    if total == 0:
+        mk = types.InlineKeyboardMarkup()
+        mk.add(
+            types.InlineKeyboardButton(
+                "⬅️ Ödənişlər", callback_data="admpayments:menu"
+            )
+        )
+        bot.send_message(chat_id, "Kart ödənişi qeydi yoxdur.", reply_markup=mk)
+        conn.close()
+        return
+
+    total_pages = max(1, math.ceil(total / PAGE_SIZE))
+    page = max(1, min(page, total_pages))
+    offset = (page - 1) * PAGE_SIZE
+    cur.execute(
+        """
+        SELECT u.chat_id, u.username, u.full_name, u.first_name, u.last_payment_at,
+               u.paid_until, s.plan, s.expires_at
+        FROM users u
+        LEFT JOIN subscriptions s
+            ON s.chat_id = u.chat_id AND s.is_active = 1
+        WHERE u.payment_type='card'
+        ORDER BY COALESCE(u.last_payment_at, u.joined_at, u.created_at) DESC
+        LIMIT ? OFFSET ?
+        """,
+        (PAGE_SIZE, offset),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    lines = ["🟢 Avtomatik kart ödənişləri:", ""]
+    now = datetime.utcnow()
+    for idx, row in enumerate(rows, start=offset + 1):
+        username = row["username"] or ""
+        full_name = row["full_name"] or row["first_name"] or "-"
+        user_display = f"@{username}" if username else full_name
+        paid_at = format_display_time(row["last_payment_at"])
+        active_until_raw = row["expires_at"] or row["paid_until"]
+        status_text = "BİTİB"
+        active_until_display = format_display_time(active_until_raw)
+        try:
+            expires_dt = (
+                datetime.fromisoformat(str(active_until_raw)) if active_until_raw else None
+            )
+        except Exception:
+            expires_dt = None
+        if expires_dt and expires_dt > now:
+            status_text = "AKTİV"
+        package_name = row["plan"] or "-"
+
+        lines.append(
+            f"{idx}) {row['chat_id']} — {user_display}\n"
+            f"Paket: {package_name}\n"
+            f"Ödəniş tarixi: {paid_at}\n"
+            f"Aktivlik: {active_until_display}\n"
+            f"Status: {status_text}"
+        )
+        lines.append("")
+
+    text = "\n".join(lines).strip() + f"\n\nSəhifə: {page}/{total_pages}"
+
+    mk = types.InlineKeyboardMarkup()
+    nav = []
+    if page > 1:
+        nav.append(
+            types.InlineKeyboardButton(
+                TEXTS_AZ["admin_promo_nav_prev"],
+                callback_data=f"admpayments:card:{page-1}",
+            )
+        )
+    if page < total_pages:
+        nav.append(
+            types.InlineKeyboardButton(
+                TEXTS_AZ["admin_promo_nav_next"],
+                callback_data=f"admpayments:card:{page+1}",
+            )
+        )
+    if nav:
+        mk.row(*nav)
+    mk.add(types.InlineKeyboardButton("⬅️ Ödənişlər", callback_data="admpayments:menu"))
+    bot.send_message(chat_id, text, reply_markup=mk)
+
+
+def show_manual_payment_requests(chat_id: int, page: int = 1):
+    if not is_admin(chat_id):
+        return
+    PAGE_SIZE = 10
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM manual_payments")
+    count_row = cur.fetchone()
+    total = count_row[0] if count_row else 0
+    if isinstance(total, sqlite3.Row):
+        total = total[0]
+    total = total or 0
+    if total == 0:
+        mk = types.InlineKeyboardMarkup()
+        mk.add(
+            types.InlineKeyboardButton(
+                "⬅️ Ödənişlər", callback_data="admpayments:menu"
+            )
+        )
+        bot.send_message(chat_id, "Manual ödəniş sorğusu yoxdur.", reply_markup=mk)
+        conn.close()
+        return
+
+    total_pages = max(1, math.ceil(total / PAGE_SIZE))
+    page = max(1, min(page, total_pages))
+    offset = (page - 1) * PAGE_SIZE
+    cur.execute(
+        """
+        SELECT mp.id, mp.user_id, mp.payment_code, mp.selected_package, mp.plan_key,
+               mp.created_at, mp.status, u.username, u.full_name, u.first_name
+        FROM manual_payments mp
+        LEFT JOIN users u ON u.chat_id = mp.user_id
+        ORDER BY mp.id DESC
+        LIMIT ? OFFSET ?
+        """,
+        (PAGE_SIZE, offset),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    status_map = {
+        MANUAL_PAYMENT_PENDING: "GÖZLƏYİR",
+        MANUAL_PAYMENT_APPROVED: "TƏSDİQLƏNDİ",
+        MANUAL_PAYMENT_REJECTED: "RƏDD EDİLDİ",
+    }
+
+    mk = types.InlineKeyboardMarkup()
+    lines = ["🟡 Manual ödəniş sorğuları:", ""]
+    for idx, row in enumerate(rows, start=offset + 1):
+        username = row["username"] or ""
+        full_name = row["full_name"] or row["first_name"] or "-"
+        user_display = f"@{username}" if username else full_name
+        status_text = status_map.get(row["status"], row["status"] or "-")
+        request_time = format_display_time(row["created_at"])
+        lines.append(
+            f"{idx}) ID: {row['user_id']} — {user_display}\n"
+            f"Kod: {row['payment_code']}\n"
+            f"Paket: {row['selected_package']}\n"
+            f"Tarix: {request_time}\n"
+            f"Status: {status_text}"
+        )
+        if row["status"] == MANUAL_PAYMENT_PENDING:
+            mk.row(
+                types.InlineKeyboardButton(
+                    "✅ Təsdiqlə",
+                    callback_data=f"manualpay|approve|{row['id']}|{page}",
+                ),
+                types.InlineKeyboardButton(
+                    "❌ Rədd et",
+                    callback_data=f"manualpay|reject|{row['id']}|{page}",
+                ),
+            )
+        lines.append("")
+
+    text = "\n".join(lines).strip() + f"\n\nSəhifə: {page}/{total_pages}"
+
+    nav = []
+    if page > 1:
+        nav.append(
+            types.InlineKeyboardButton(
+                TEXTS_AZ["admin_promo_nav_prev"],
+                callback_data=f"admpayments:manual:{page-1}",
+            )
+        )
+    if page < total_pages:
+        nav.append(
+            types.InlineKeyboardButton(
+                TEXTS_AZ["admin_promo_nav_next"],
+                callback_data=f"admpayments:manual:{page+1}",
+            )
+        )
+    if nav:
+        mk.row(*nav)
+    mk.add(types.InlineKeyboardButton("⬅️ Ödənişlər", callback_data="admpayments:menu"))
+
+    bot.send_message(chat_id, text, reply_markup=mk)
+
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith("finrep:"))
 @callback_guard
 def handle_financial_reports_menu(c):
@@ -16397,6 +16850,31 @@ def handle_financial_reports_menu(c):
     elif action == "back":
         page = admin_panel_page_state.get(chat_id, 1)
         send_admin_panel(chat_id, page=page)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("admpayments:"))
+@callback_guard
+def handle_admin_payments_menu(c):
+    if not is_admin(c.from_user.id):
+        return
+    parts = c.data.split(":")
+    section = parts[1] if len(parts) > 1 else ""
+    page = 1
+    if len(parts) > 2:
+        try:
+            page = int(parts[2])
+        except Exception:
+            page = 1
+    if section == "card":
+        show_card_payments(c.message.chat.id, page=page)
+    elif section == "manual":
+        show_manual_payment_requests(c.message.chat.id, page=page)
+    else:
+        send_admin_payments_menu(c.message.chat.id)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_period:"))
