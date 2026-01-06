@@ -445,6 +445,7 @@ TEXTS_AZ = {
     "admin_panel_user_search": "🆔 İstifadəçi ID ilə axtar",
     "admin_panel_users": "👥 İstifadəçilər",
     "admin_panel_promos": "🎟 Promo kodlar",
+    "admin_panel_feature_flags": "⚙️ Funksiyaları idarə et",
     "admin_panel_reset_limits": "♻️ Limitləri sıfırla",
     "admin_panel_send_update": "🚀 Yeniləmə göndər",
     "admin_panel_topviews": "🔥 Ən çox baxılan elanlar",
@@ -613,6 +614,7 @@ ADMIN_PANEL_BUTTONS = [
     TEXTS_AZ["admin_panel_agents_notify"],
     TEXTS_AZ["admin_panel_user_search"],
     TEXTS_AZ["admin_panel_users"],
+    TEXTS_AZ["admin_panel_feature_flags"],
     TEXTS_AZ["admin_panel_promos"],
     TEXTS_AZ["admin_panel_send_update"],
     TEXTS_AZ["admin_panel_topviews"],
@@ -627,6 +629,37 @@ ADMIN_PANEL_ACTION_KEYS = {
     text: str(idx) for idx, text in enumerate(ADMIN_PANEL_ACTIONS)
 }
 ADMIN_PANEL_ACTION_LOOKUP = {v: k for k, v in ADMIN_PANEL_ACTION_KEYS.items()}
+
+FEATURE_FLAG_DEFAULTS = {
+    "main_search": 1,
+    "last_24_hours": 1,
+    "account": 1,
+    "statistics": 1,
+    "try_your_luck": 1,
+    "payment": 1,
+    "about": 1,
+    "complaints": 1,
+    "notifications": 1,
+}
+
+FEATURE_FLAG_KEYS = list(FEATURE_FLAG_DEFAULTS.keys())
+
+FEATURE_FLAG_LABELS = {
+    "main_search": "Axtarış sistemi",
+    "last_24_hours": "Son 24 saat",
+    "account": "Hesabım",
+    "statistics": "Statistika",
+    "try_your_luck": "Şansını sına",
+    "payment": "Ödəniş",
+    "about": "Haqqında",
+    "complaints": "Şikayət və təkliflər",
+    "notifications": "Bildirişlər",
+}
+
+FEATURE_DISABLED_MESSAGE = (
+    "⛔ Bu funksiya hazırda deaktiv edilib.\n"
+    "Zəhmət olmasa bir az sonra yenidən yoxlayın."
+)
 
 QR_SOURCE_AREAS = {
     "mehle": "Məhəllə",
@@ -826,6 +859,112 @@ def callback_guard(handler):
                 recover_main_menu(chat_id, getattr(call, "message", None))
 
     return wrapper
+
+
+def ensure_feature_flag_tables(cur: sqlite3.Cursor):
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS feature_flags (
+            key TEXT PRIMARY KEY,
+            is_enabled INTEGER DEFAULT 1
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_feature_overrides (
+            user_id INTEGER,
+            key TEXT,
+            is_enabled INTEGER DEFAULT 1,
+            PRIMARY KEY(user_id, key)
+        )
+        """
+    )
+
+    for key, enabled in FEATURE_FLAG_DEFAULTS.items():
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO feature_flags (key, is_enabled)
+            VALUES (?, ?)
+            """,
+            (key, int(enabled)),
+        )
+
+
+def is_feature_enabled(key: str, user_id: Optional[int] = None) -> bool:
+    conn = get_local_conn()
+    try:
+        cur = conn.cursor()
+        if user_id is not None:
+            cur.execute(
+                "SELECT is_enabled FROM user_feature_overrides WHERE user_id=? AND key=?",
+                (user_id, key),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                return bool(row[0])
+
+        cur.execute("SELECT is_enabled FROM feature_flags WHERE key=?", (key,))
+        row = cur.fetchone()
+        if row is not None:
+            return bool(row[0])
+        return bool(FEATURE_FLAG_DEFAULTS.get(key, 1))
+    finally:
+        conn.close()
+
+
+def set_feature_flag_state(
+    key: str, enabled: bool, user_ids: Optional[List[int]] = None
+) -> None:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    try:
+        if user_ids:
+            for uid in user_ids:
+                cur.execute(
+                    """
+                    INSERT INTO user_feature_overrides (user_id, key, is_enabled)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(user_id, key)
+                    DO UPDATE SET is_enabled=excluded.is_enabled
+                    """,
+                    (uid, key, int(enabled)),
+                )
+        else:
+            cur.execute(
+                """
+                INSERT INTO feature_flags (key, is_enabled)
+                VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET is_enabled=excluded.is_enabled
+                """,
+                (key, int(enabled)),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_feature_state_for_scope(key: str, user_ids: Optional[List[int]] = None) -> bool:
+    if user_ids:
+        return all(is_feature_enabled(key, uid) for uid in user_ids)
+    return is_feature_enabled(key)
+
+
+def ensure_feature_available(chat_id: int, key: str) -> bool:
+    if is_feature_enabled(key, chat_id):
+        return True
+    bot.send_message(chat_id, FEATURE_DISABLED_MESSAGE)
+    return False
+
+
+def ensure_feature_available_cb(c, key: str) -> bool:
+    chat_id = c.message.chat.id if getattr(c, "message", None) else c.from_user.id
+    if is_feature_enabled(key, chat_id):
+        return True
+    bot.send_message(chat_id, FEATURE_DISABLED_MESSAGE)
+    safe_answer_callback_query(getattr(c, "id", None))
+    return False
 
 
 def set_user_state(chat_id: int, state: str):
@@ -1533,6 +1672,8 @@ def init_local_db():
     os.makedirs(BASE_DATA_DIR, exist_ok=True)
     conn = get_local_conn()
     cur = conn.cursor()
+
+    ensure_feature_flag_tables(cur)
 
     # Yeni elanlar
     cur.execute(
@@ -3416,12 +3557,16 @@ def handle_chance_request(user_id: int) -> None:
     if bonus_days > 0:
         apply_bonus_days(user_id, bonus_days, entitlement_type)
         log_chance_bonus(user_id, bonus_days, now)
+        message_text = (
+            f"🎁 Təbriklər!\nBu gün üçün **{bonus_days} gün** qazandınız 🎉"
+        )
+    else:
+        message_text = (
+            "📌 Bu gün bonus aktiv olmadı.\n"
+            "Sabah yenidən cəhd edə bilərsiniz — hər gün yeni şans mövcuddur."
+        )
 
-    bot.send_message(
-        chat_id,
-        f"🎁 Təbriklər!\nBu gün üçün **{bonus_days} gün** qazandınız 🎉",
-        parse_mode="Markdown",
-    )
+    bot.send_message(chat_id, message_text, parse_mode="Markdown")
 
 
 
@@ -4192,14 +4337,6 @@ def build_payment_action_markup(
 
 def build_payment_menu_markup(chat_id: int):
     mk = types.InlineKeyboardMarkup(row_width=2)
-    mk.row(
-        types.InlineKeyboardButton(
-            "💳 Kartla ödəniş (tezliklə)", callback_data="paytype:card"
-        ),
-        types.InlineKeyboardButton(
-            "📲 Manual ödəniş", callback_data="paytype:manual"
-        ),
-    )
     for key, info in SUBSCRIPTION_PLANS.items():
         mk.add(
             types.InlineKeyboardButton(
@@ -4213,11 +4350,15 @@ def build_payment_menu_markup(chat_id: int):
             )
         )
     mk.add(build_promo_button(chat_id))
-    mk.add(types.InlineKeyboardButton("ℹ️ Haqqında", callback_data="payinfo"))
+    if is_feature_enabled("about", chat_id):
+        mk.add(types.InlineKeyboardButton("ℹ️ Haqqında", callback_data="payinfo"))
     return mk
 
 
 def send_payment_menu(chat_id: int):
+    if not is_feature_enabled("payment", chat_id):
+        bot.send_message(chat_id, FEATURE_DISABLED_MESSAGE)
+        return
     mk = build_payment_menu_markup(chat_id)
     bot.send_message(
         chat_id,
@@ -4229,7 +4370,8 @@ def send_payment_menu(chat_id: int):
 
 def send_blocked_prompt(chat_id: int):
     mk = types.InlineKeyboardMarkup()
-    mk.add(types.InlineKeyboardButton("💳 Ödəniş et", callback_data="open_pay_menu"))
+    if is_feature_enabled("payment", chat_id):
+        mk.add(types.InlineKeyboardButton("💳 Ödəniş et", callback_data="open_pay_menu"))
     if is_demo_available(chat_id):
         mk.add(
             types.InlineKeyboardButton(
@@ -5573,6 +5715,7 @@ def send_with_reply_keyboard(
 
 
 def build_main_menu(
+    chat_id: int,
     is_admin_user: bool,
     has_customer_access: bool = False,
     show_bonus_button: bool = False,
@@ -5590,26 +5733,32 @@ def build_main_menu(
             )
         )
 
-    buttons.extend(
-        [
-            "🔎 Axtarış sistemi",
-            "🕒 Son 24 saat",
-            "👤 Hesabım",
-            "📊 Statistika",
-        ]
-    )
+    if is_feature_enabled("main_search", chat_id):
+        buttons.append("🔎 Axtarış sistemi")
 
-    if show_bonus_button:
+    if is_feature_enabled("last_24_hours", chat_id):
+        buttons.append("🕒 Son 24 saat")
+
+    if is_feature_enabled("account", chat_id):
+        buttons.append("👤 Hesabım")
+
+    if is_feature_enabled("statistics", chat_id):
+        buttons.append("📊 Statistika")
+
+    if show_bonus_button and is_feature_enabled("try_your_luck", chat_id):
         buttons.append("🎁 Şansını sına")
 
-    buttons.append("💳 Ödəniş")
+    if is_feature_enabled("payment", chat_id):
+        buttons.append("💳 Ödəniş")
 
-    if is_admin_user:
+    if not is_admin_user:
+        buttons.append("🤝 Dostunu dəvət et")
+
+    if is_feature_enabled("about", chat_id):
         buttons.append("ℹ️ Haqqında")
-    else:
-        buttons.extend(["🤝 Dostunu dəvət et", "ℹ️ Haqqında"])
 
-    buttons.append("📩 Şikayət və təkliflər")
+    if is_feature_enabled("complaints", chat_id):
+        buttons.append("📩 Şikayət və təkliflər")
 
     if is_admin_user:
         buttons.append(TEXTS_AZ["admin_panel_button"])
@@ -5645,6 +5794,7 @@ def send_main_menu(
         return
     set_ui_context(chat_id, UI_CONTEXT_MAIN)
     kb = build_main_menu(
+        chat_id,
         is_admin(chat_id),
         has_customer_requests_access(chat_id),
         should_show_bonus_button(chat_id),
@@ -5658,17 +5808,20 @@ def send_main_menu(
     )
 
 
-def build_search_menu_keyboard():
+def build_search_menu_keyboard(chat_id: int):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("🏠 Satılır", "🏢 Kirayə verilir")
     kb.row("🔍 Açar sözlə axtar", "📞 Nömrə ilə axtar")
-    kb.row("⭐ Favorilərim", "🔔 Bildirişlər")
+    row = ["⭐ Favorilərim"]
+    if is_feature_enabled("notifications", chat_id):
+        row.append("🔔 Bildirişlər")
+    kb.row(*row)
     kb.row("⬅️ Geri")
     return kb
 
 
 def send_search_menu(chat_id: int):
-    kb = build_search_menu_keyboard()
+    kb = build_search_menu_keyboard(chat_id)
     send_with_reply_keyboard(chat_id, "\u2063", kb)
 
 
@@ -7369,7 +7522,10 @@ def handle_request_phone(message):
 
 
 def is_complaint_access_allowed(chat_id: int) -> bool:
-    return True
+    if is_feature_enabled("complaints", chat_id):
+        return True
+    bot.send_message(chat_id, FEATURE_DISABLED_MESSAGE)
+    return False
 
 
 def build_complaint_categories_keyboard():
@@ -7471,6 +7627,7 @@ def complaint_category_handler(message):
             chat_id,
             "✅ Şikayət göndərmə ləğv edildi.",
             build_main_menu(
+                chat_id,
                 is_admin(chat_id),
                 has_customer_requests_access(chat_id),
                 should_show_bonus_button(chat_id),
@@ -7520,6 +7677,7 @@ def complaint_message_handler(message):
         chat_id,
         "✅ Mesajınız qəbul edildi.\nTəşəkkür edirik! 🙏",
         build_main_menu(
+            chat_id,
             is_admin(chat_id),
             has_customer_requests_access(chat_id),
             should_show_bonus_button(chat_id),
@@ -7614,6 +7772,8 @@ def show_account_status(message):
     if message.text and message.text.startswith('/'):
         return
 
+    if not ensure_feature_available(message.chat.id, "account"):
+        return
     if not ensure_allowed(message, allow_blocked=True):
         return
     chat_id = message.chat.id
@@ -7788,6 +7948,8 @@ def show_global_statistics(message):
     if message.text and message.text.startswith('/'):
         return
 
+    if not ensure_feature_available(message.chat.id, "statistics"):
+        return
     if not ensure_allowed(message, allow_blocked=True):
         return
     chat_id = message.chat.id
@@ -7798,6 +7960,8 @@ def show_global_statistics(message):
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("stats:"))
 @callback_guard
 def handle_user_stats_callback(c):
+    if not ensure_feature_available_cb(c, "statistics"):
+        return
     period = c.data.split(":", 1)[1] if c.data else "all"
     if not ensure_allowed_cb(c, allow_blocked=True):
         return
@@ -7819,6 +7983,8 @@ def about(message):
     if message.text and message.text.startswith('/'):
         return
 
+    if not ensure_feature_available(message.chat.id, "about"):
+        return
     text = (
         "🏠 BestHome Əmlak Botu\n\n"
         "BestHome — Azərbaycanda satılan və kirayə verilən daşınmaz əmlak elanlarını rahat və sürətli tapmaq üçün hazırlanmış ağıllı Telegram botudur.\n\n"
@@ -7856,6 +8022,8 @@ def payment_menu_entry(message):
     if message.text and message.text.startswith('/'):
         return
 
+    if not ensure_feature_available(message.chat.id, "payment"):
+        return
     send_payment_menu(message.chat.id)
 
 
@@ -7863,6 +8031,8 @@ def payment_menu_entry(message):
 @callback_guard
 def cb_open_pay_menu(c):
     chat_id = c.message.chat.id
+    if not ensure_feature_available_cb(c, "payment"):
+        return
     send_payment_menu(chat_id)
     try:
         bot.answer_callback_query(c.id)
@@ -7873,12 +8043,9 @@ def cb_open_pay_menu(c):
 @bot.callback_query_handler(func=lambda c: c.data == "paytype:card")
 @callback_guard
 def cb_paytype_card(c):
+    if not ensure_feature_available_cb(c, "payment"):
+        return
     chat_id = c.message.chat.id
-    bot.send_message(
-        chat_id,
-        "💳 Kartla ödəniş çox yaxında aktiv olacaq.\n"
-        "Hazırda ödənişi manual şəkildə edə bilərsiniz.",
-    )
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -7893,11 +8060,9 @@ def cb_paytype_card(c):
 @bot.callback_query_handler(func=lambda c: c.data == "paytype:manual")
 @callback_guard
 def cb_paytype_manual(c):
+    if not ensure_feature_available_cb(c, "payment"):
+        return
     chat_id = c.message.chat.id
-    bot.send_message(
-        chat_id,
-        "📲 Manual ödəniş seçildi. Paketini seç və aşağıdakı kanallardan istifadə et.",
-    )
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -7970,6 +8135,8 @@ def promo_code_entry_step(message):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("payplan|"))
 @callback_guard
 def cb_payplan(c):
+    if not ensure_feature_available_cb(c, "payment"):
+        return
     chat_id = c.message.chat.id
     plan_key = c.data.split("|")[1]
     plan = SUBSCRIPTION_PLANS.get(plan_key)
@@ -7985,20 +8152,20 @@ def cb_payplan(c):
     mk = build_payment_action_markup(plan_key, plan or {}, payment_code)
 
     pay_text = (
-        "🎁 BONUS İMKAN\n\n"
-        "Hər 24 saatda 1 dəfə\n"
-        "əsas menyudakı 🎁 Şansını sına\n"
-        "düyməsindən istifadə edərək\n"
+        "🎁 BONUS İMKAN  \n"
+        "Hər 24 saatda 1 dəfə  \n"
+        "əsas menyudakı 🎁 Şansını sına düyməsi ilə  \n"
         "pulsuz gün qazana bilərsiniz.\n\n"
         "━━━━━━━━━━━━━━━\n\n"
-        "💳 ÖDƏNİŞ\n\n"
-        "Planı seçin və\n"
-        "aşağıdakı düymələrdən biri ilə\n"
-        "birbaşa yazın 👇\n\n"
-        "🆔 Ödəniş kodu:\n"
+        "💳 ÖDƏNİŞ  \n"
+        "Planınızı seçin və ödənişi edin.  \n"
+        "Ödənişdən sonra mütləq  \n"
+        "✅ **“Ödəniş etdim”** düyməsinə klikləyin.  \n"
+        "Yalnız bundan sonra hesabınız aktivləşdirilir.\n\n"
+        "🆔 Ödəniş kodu:  \n"
         f"{payment_code}"
     )
-    bot.send_message(chat_id, pay_text, reply_markup=mk)
+    bot.send_message(chat_id, pay_text, reply_markup=mk, parse_mode="Markdown")
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -8008,6 +8175,8 @@ def cb_payplan(c):
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("cardpay|"))
 @callback_guard
 def cb_card_payment_info(c):
+    if not ensure_feature_available_cb(c, "payment"):
+        return
     chat_id = c.message.chat.id
     plan_key = c.data.split("|", 1)[1] if c.data and "|" in c.data else ""
     plan = SUBSCRIPTION_PLANS.get(plan_key) or {}
@@ -8117,6 +8286,7 @@ def cb_demo_activate(c):
         chat_id,
         "🏠 Əsas menyu açıqdır.",
         build_main_menu(
+            chat_id,
             is_admin(chat_id),
             has_customer_requests_access(chat_id),
             should_show_bonus_button(chat_id),
@@ -8131,6 +8301,8 @@ def cb_demo_activate(c):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("paydone|"))
 @callback_guard
 def cb_paydone(c):
+    if not ensure_feature_available_cb(c, "payment"):
+        return
     chat_id = c.message.chat.id
     plan_key = c.data.split("|")[1]
     plan = SUBSCRIPTION_PLANS.get(plan_key)
@@ -8323,6 +8495,7 @@ def handle_common_nav(message):
             chat_id,
             "❌ Əməliyyat ləğv edildi.",
             build_main_menu(
+                chat_id,
                 is_admin(chat_id),
                 has_customer_requests_access(chat_id),
                 should_show_bonus_button(chat_id),
@@ -8944,6 +9117,8 @@ def search_system_menu(message):
     if message.text and message.text.startswith('/'):
         return
 
+    if not ensure_feature_available(message.chat.id, "main_search"):
+        return
     if not ensure_allowed(message):
         return
     send_search_menu(message.chat.id)
@@ -8954,6 +9129,8 @@ def handle_bonus_spin_request(message):
     if message.text and message.text.startswith('/'):
         return
 
+    if not ensure_feature_available(message.chat.id, "try_your_luck"):
+        return
     handle_chance_request(message.from_user.id)
 
 
@@ -9127,6 +9304,8 @@ def start_today_flow(chat_id: int):
 
 @bot.message_handler(func=lambda m: m.text == "🕒 Son 24 saat")
 def handle_today_menu(message):
+    if not ensure_feature_available(message.chat.id, "last_24_hours"):
+        return
     if not ensure_allowed(message):
         return
     start_today_flow(message.chat.id)
@@ -9135,6 +9314,8 @@ def handle_today_menu(message):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("td|"))
 @callback_guard
 def handle_today_callbacks(c):
+    if not ensure_feature_available_cb(c, "last_24_hours"):
+        return
     if not ensure_allowed_cb(c):
         return
     parts = c.data.split("|")
@@ -9463,6 +9644,9 @@ def format_saved_search_entry(row: dict) -> str:
 
 
 def show_notifications_menu(chat_id: int, message=None):
+    if not is_feature_enabled("notifications", chat_id):
+        bot.send_message(chat_id, FEATURE_DISABLED_MESSAGE)
+        return
     mk = types.InlineKeyboardMarkup()
     mk.add(
         types.InlineKeyboardButton(
@@ -10678,6 +10862,8 @@ def show_saved_notifications(message):
     if message.text and message.text.startswith('/'):
         return
 
+    if not ensure_feature_available(message.chat.id, "notifications"):
+        return
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -11010,6 +11196,8 @@ def cb_save_search(c):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_open:"))
 @callback_guard
 def cb_open_notifications(c):
+    if not ensure_feature_available_cb(c, "notifications"):
+        return
     if not ensure_allowed_cb(c):
         return
     parts = c.data.split(":")
@@ -11041,6 +11229,8 @@ def cb_open_notifications(c):
 @bot.callback_query_handler(func=lambda c: c.data == "kw_notif_view")
 @callback_guard
 def cb_keyword_notification_view(c):
+    if not ensure_feature_available_cb(c, "notifications"):
+        return
     chat_id = c.message.chat.id if c.message else None
     ctx = keyword_notification_state.get(chat_id or 0, {}) if chat_id else {}
     items = ctx.get("items") or []
@@ -11053,6 +11243,8 @@ def cb_keyword_notification_view(c):
 @bot.callback_query_handler(func=lambda c: c.data == "notif_menu")
 @callback_guard
 def cb_notifications_menu(c):
+    if not ensure_feature_available_cb(c, "notifications"):
+        return
     if not ensure_allowed_cb(c):
         return
     show_notifications_menu(c.message.chat.id, message=c.message)
@@ -11065,6 +11257,8 @@ def cb_notifications_menu(c):
 @bot.callback_query_handler(func=lambda c: c.data == "notif_back")
 @callback_guard
 def cb_notifications_back(c):
+    if not ensure_feature_available_cb(c, "notifications"):
+        return
     if not ensure_allowed_cb(c):
         return
     return_to_main_menu(c.message.chat.id)
@@ -11077,6 +11271,8 @@ def cb_notifications_back(c):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_period:"))
 @callback_guard
 def cb_notifications_period(c):
+    if not ensure_feature_available_cb(c, "notifications"):
+        return
     if not ensure_allowed_cb(c):
         return
     period = c.data.split(":", 1)[1]
@@ -11093,6 +11289,8 @@ def cb_notifications_period(c):
 @bot.callback_query_handler(func=lambda c: c.data == "notif_kw_hits")
 @callback_guard
 def cb_notifications_keyword_hits(c):
+    if not ensure_feature_available_cb(c, "notifications"):
+        return
     if not ensure_allowed_cb(c):
         return
     show_keyword_alert_menu(c.message.chat.id, message=c.message)
@@ -11105,6 +11303,8 @@ def cb_notifications_keyword_hits(c):
 @bot.callback_query_handler(func=lambda c: c.data == "notif_cust_req")
 @callback_guard
 def cb_notifications_customer_requests(c):
+    if not ensure_feature_available_cb(c, "notifications"):
+        return
     return
     if not ensure_allowed_cb(c):
         return
@@ -11130,6 +11330,8 @@ def cb_notifications_customer_requests(c):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_view:"))
 @callback_guard
 def cb_notifications_view_listing(c):
+    if not ensure_feature_available_cb(c, "notifications"):
+        return
     if not ensure_allowed_cb(c):
         return
     parts = c.data.split(":")
@@ -11159,6 +11361,8 @@ def cb_notifications_view_listing(c):
 @bot.callback_query_handler(func=lambda c: c.data == "notif_noop")
 @callback_guard
 def cb_notification_noop(c):
+    if not ensure_feature_available_cb(c, "notifications"):
+        return
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -11168,6 +11372,8 @@ def cb_notification_noop(c):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("agent_notif:"))
 @callback_guard
 def cb_agent_notifications(c):
+    if not ensure_feature_available_cb(c, "notifications"):
+        return
     if not ensure_allowed_cb(c):
         return
     bot.send_message(c.message.chat.id, "🔔 Sorğu bildirişləri deaktiv edilib.")
@@ -11180,6 +11386,8 @@ def cb_agent_notifications(c):
 @bot.callback_query_handler(func=lambda c: c.data == "notif_crit")
 @callback_guard
 def cb_notif_criteria(c):
+    if not ensure_feature_available_cb(c, "notifications"):
+        return
     if not ensure_allowed_cb(c):
         return
     show_criteria_alert_menu(c.message.chat.id, message=c.message)
@@ -11192,6 +11400,8 @@ def cb_notif_criteria(c):
 @bot.callback_query_handler(func=lambda c: c.data == "notif_rule_new")
 @callback_guard
 def cb_notif_rule_new(c):
+    if not ensure_feature_available_cb(c, "notifications"):
+        return
     if not ensure_allowed_cb(c):
         return
     start_notification_rule_flow(c.message.chat.id)
@@ -11205,6 +11415,8 @@ def cb_notif_rule_new(c):
     func=lambda m: notification_rule_state.get(m.chat.id, {}).get("step") == "operation"
 )
 def handle_notification_rule_operation(message):
+    if not ensure_feature_available(message.chat.id, "notifications"):
+        return
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
@@ -11228,6 +11440,8 @@ def handle_notification_rule_operation(message):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_rule_rayon_"))
 @callback_guard
 def cb_notification_rule_rayon(c):
+    if not ensure_feature_available_cb(c, "notifications"):
+        return
     if not ensure_allowed_cb(c):
         return
     chat_id = c.message.chat.id
@@ -11272,6 +11486,8 @@ def cb_notification_rule_rayon(c):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_rule_prop"))
 @callback_guard
 def cb_notification_rule_prop(c):
+    if not ensure_feature_available_cb(c, "notifications"):
+        return
     if not ensure_allowed_cb(c):
         return
     chat_id = c.message.chat.id
@@ -11415,6 +11631,7 @@ def finalize_notification_rule(chat_id: int):
         chat_id,
         "🏠 Əsas menyu açıqdır.",
         build_main_menu(
+            chat_id,
             is_admin(chat_id),
             has_customer_requests_access(chat_id),
             should_show_bonus_button(chat_id),
@@ -14969,6 +15186,44 @@ def send_admin_panel(
     bot.send_message(chat_id, text, reply_markup=mk)
 
 
+def send_feature_flags_menu(chat_id: int, message: Optional[types.Message] = None):
+    if not is_admin(chat_id):
+        return
+
+    selected_ids = sorted(get_selected_users(chat_id))
+    scope_users = selected_ids if selected_ids else None
+    mk = types.InlineKeyboardMarkup(row_width=1)
+
+    for key in FEATURE_FLAG_KEYS:
+        enabled = get_feature_state_for_scope(key, scope_users)
+        icon = "🟢" if enabled else "🔴"
+        label = FEATURE_FLAG_LABELS.get(key, key)
+        mk.add(
+            types.InlineKeyboardButton(
+                f"{icon} {label}", callback_data=f"featflag:{key}"
+            )
+        )
+
+    mk.add(types.InlineKeyboardButton(ADMIN_PANEL_BACK_MAIN, callback_data="adm_back:main"))
+
+    mode_text = (
+        "🌐 Qlobal rejim — bütün istifadəçilər"
+        if not selected_ids
+        else f"👥 Seçilmiş istifadəçilər: {len(selected_ids)} nəfər"
+    )
+    text = "⚙️ Funksiyaları idarə et\n" f"{mode_text}"
+
+    try:
+        if message:
+            bot.edit_message_text(
+                text, chat_id=chat_id, message_id=message.message_id, reply_markup=mk
+            )
+        else:
+            bot.send_message(chat_id, text, reply_markup=mk)
+    except Exception:
+        bot.send_message(chat_id, text, reply_markup=mk)
+
+
 @bot.message_handler(func=lambda m: m.text == TEXTS_AZ["admin_panel_button"])
 @bot.message_handler(commands=["admin"])
 def open_admin_panel(message):
@@ -15014,6 +15269,8 @@ def _handle_admin_panel_action(chat_id: int, action_text: str):
         show_admin_promo_menu(chat_id)
     elif action_text == TEXTS_AZ["admin_panel_users"]:
         show_users_menu(chat_id)
+    elif action_text == TEXTS_AZ["admin_panel_feature_flags"]:
+        send_feature_flags_menu(chat_id)
     elif action_text == TEXTS_AZ["admin_panel_send_update"]:
         broadcast_bot_update(chat_id)
     elif action_text == TEXTS_AZ["admin_panel_topviews"]:
@@ -15052,6 +15309,23 @@ def cb_admin_panel(c):
         action_text = ADMIN_PANEL_ACTION_LOOKUP.get(action_key)
         if action_text:
             _handle_admin_panel_action(chat_id, action_text)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("featflag:"))
+@callback_guard
+def cb_feature_flag_toggle(c):
+    chat_id = c.message.chat.id if c.message else None
+    if not is_admin(chat_id):
+        return
+    key = c.data.split(":", 1)[1]
+    if key not in FEATURE_FLAG_DEFAULTS:
+        return
+
+    selected_ids = sorted(get_selected_users(chat_id))
+    scope_users = selected_ids if selected_ids else None
+    current_state = get_feature_state_for_scope(key, scope_users)
+    set_feature_flag_state(key, not current_state, user_ids=scope_users)
+    send_feature_flags_menu(chat_id, message=c.message)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("bonusprob:"))
