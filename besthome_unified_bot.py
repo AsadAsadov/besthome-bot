@@ -5543,7 +5543,7 @@ def build_search_menu_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("🏠 Satılır", "🏢 Kirayə verilir")
     kb.row("🔍 Açar sözlə axtar", "📞 Nömrə ilə axtar")
-    kb.row("⭐ Favorilərim", "🔔 Bildirişlərim")
+    kb.row("⭐ Favorilərim", "🔔 Bildirişlər")
     kb.row("⬅️ Geri")
     return kb
 
@@ -9224,21 +9224,19 @@ def format_saved_search_entry(row: dict) -> str:
 
 
 def show_notifications_menu(chat_id: int, message=None):
-    notification_menu_state.setdefault(chat_id, {"period": "today"})
     mk = types.InlineKeyboardMarkup()
-    mk.row(
-        types.InlineKeyboardButton("📅 Bu gün", callback_data="notif_period:today"),
-        types.InlineKeyboardButton("📅 Bu həftə", callback_data="notif_period:week"),
-        types.InlineKeyboardButton("📅 Bu ay", callback_data="notif_period:month"),
+    mk.add(
+        types.InlineKeyboardButton(
+            "📌 Açar söz bildirişləri", callback_data="notif_kw_hits"
+        )
     )
     mk.add(
         types.InlineKeyboardButton(
-            "🔔 Açar söz bildirişləri", callback_data="notif_kw_hits"
+            "🎯 Kriteriya bildirişləri", callback_data="notif_crit"
         )
     )
-    mk.add(types.InlineKeyboardButton("⚙️ Kriteriyalar", callback_data="notif_crit"))
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="notif_back"))
-    text = "🔔 Bildirişlərim"
+    text = "🔔 Bildirişlər"
     try:
         if message:
             bot.edit_message_text(
@@ -9317,6 +9315,45 @@ def fetch_notification_listings(chat_id: int, period: str) -> List[dict]:
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return rows
+
+
+def fetch_notification_listings_page(
+    chat_id: int, period: str, page: int = 1
+) -> Tuple[List[dict], int, int, int]:
+    page = max(1, int(page or 1))
+    conn = get_local_conn()
+    cur = conn.cursor()
+    where = "chat_id=?"
+    params = [chat_id]
+    period_clause, period_params = build_period_filter(period, "created_at")
+    where += period_clause
+    params.extend(period_params)
+
+    cur.execute(f"SELECT COUNT(*) FROM user_notifications WHERE {where}", params)
+    total = cur.fetchone()[0] or 0
+    total_pages = max(1, math.ceil(total / PAGE_SIZE_NOTIFICATIONS)) if total else 1
+    if page > total_pages:
+        page = total_pages
+
+    cur.execute(
+        f"UPDATE user_notifications SET status='seen' WHERE {where} AND status='new'",
+        params,
+    )
+    conn.commit()
+
+    offset = (page - 1) * PAGE_SIZE_NOTIFICATIONS
+    cur.execute(
+        f"""
+        SELECT * FROM user_notifications
+        WHERE {where}
+        ORDER BY datetime(created_at) DESC
+        LIMIT ? OFFSET ?
+        """,
+        params + [PAGE_SIZE_NOTIFICATIONS, offset],
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows, total, total_pages, page
 
 
 def show_notifications_inbox(chat_id: int, period: str, page: int = 1, message=None):
@@ -9549,7 +9586,7 @@ def send_criteria_list(chat_id: int, message=None):
         )
     )
     if not rows:
-        mk.add(types.InlineKeyboardButton("⬅️ Bildirişlər", callback_data="notif_menu"))
+        mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="crit_alert_menu"))
         try:
             if message:
                 bot.edit_message_text(
@@ -9581,7 +9618,7 @@ def send_criteria_list(chat_id: int, message=None):
         )
         mk.add(types.InlineKeyboardButton("🗑 Sil", callback_data=f"crit_del:{cid}"))
 
-    mk.add(types.InlineKeyboardButton("⬅️ Bildirişlər", callback_data="notif_menu"))
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="crit_alert_menu"))
     try:
         if message:
             bot.edit_message_text(
@@ -9724,9 +9761,35 @@ def show_keyword_alert_menu(chat_id: int, message=None):
     mk.add(
         types.InlineKeyboardButton("📋 Açar sözlərim", callback_data="kw_alert_list:1")
     )
-    mk.add(types.InlineKeyboardButton("🔔 Bildirişlər", callback_data="kw_hits_menu"))
+    mk.add(
+        types.InlineKeyboardButton("🔔 Gələn bildirişlər", callback_data="kw_hits_menu")
+    )
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kw_alert_back"))
-    text = "🔔 Açar söz bildirişləri"
+    text = "📌 Açar söz bildirişləri"
+    try:
+        if message:
+            bot.edit_message_text(
+                text,
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=mk,
+            )
+        else:
+            bot.send_message(chat_id, text, reply_markup=mk)
+    except Exception:
+        pass
+
+
+def show_criteria_alert_menu(chat_id: int, message=None):
+    mk = types.InlineKeyboardMarkup()
+    mk.add(
+        types.InlineKeyboardButton("⚙️ Kriteriyalarım", callback_data="crit_alert_list")
+    )
+    mk.add(
+        types.InlineKeyboardButton("🔔 Gələn bildirişlər", callback_data="crit_hits_menu")
+    )
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="notif_menu"))
+    text = "🎯 Kriteriya bildirişləri"
     try:
         if message:
             bot.edit_message_text(
@@ -10044,35 +10107,29 @@ def fetch_keyword_alert_hits(user_id: int, period: str) -> List[dict]:
 
 
 def show_keyword_alert_hits(chat_id: int, period: str, page: int = 1, message=None):
-    rows, total = fetch_keyword_alert_hits(chat_id, period)
+    rows, total, total_pages, current_page = fetch_keyword_alert_hits_page(
+        chat_id, period, page
+    )
     period_labels = {
         "today": "Bu gün",
         "week": "Bu həftə",
         "month": "Bu ay",
-        "older": "Arxiv",
     }
     period_label = period_labels.get(period, "Bu gün")
     if total == 0:
         mk = types.InlineKeyboardMarkup()
-        if keyword_hits_context.get(chat_id, {}).get("back") == "notif_menu":
-            mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="notif_menu"))
-        else:
-            mk.add(
-                types.InlineKeyboardButton("🗓 Filtr seç", callback_data="kw_hits_menu")
-            )
-            mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kw_alert_menu"))
+        mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kw_hits_menu"))
+        text = f"🔔 {period_label} üçün bildiriş yoxdur."
         try:
             if message:
                 bot.edit_message_text(
-                    f"🔔 {period_label} üçün bildiriş yoxdur.",
+                    text,
                     chat_id=message.chat.id,
                     message_id=message.message_id,
                     reply_markup=mk,
                 )
             else:
-                bot.send_message(
-                    chat_id, f"🔔 {period_label} üçün bildiriş yoxdur.", reply_markup=mk
-                )
+                bot.send_message(chat_id, text, reply_markup=mk)
         except Exception:
             pass
         return
@@ -10094,11 +10151,7 @@ def show_keyword_alert_hits(chat_id: int, period: str, page: int = 1, message=No
 
     if not listings:
         mk = types.InlineKeyboardMarkup()
-        if keyword_hits_context.get(chat_id, {}).get("back") == "notif_menu":
-            mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="notif_menu"))
-        else:
-            mk.add(types.InlineKeyboardButton("🗓 Filtr seç", callback_data="kw_hits_menu"))
-            mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kw_alert_menu"))
+        mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kw_hits_menu"))
         try:
             if message:
                 bot.edit_message_text(
@@ -10117,34 +10170,63 @@ def show_keyword_alert_hits(chat_id: int, period: str, page: int = 1, message=No
             pass
         return
 
-    start_index = max(
-        0,
-        min((page - 1) * PAGE_SIZE_NOTIFICATIONS, len(listings) - 1),
-    )
-    loading_ref = (message.chat.id, message.message_id) if message else None
-    start_listing_session(
-        chat_id,
-        mode="keyword_hits",
-        params={"period": period},
-        items=listings,
-        start_index=start_index,
-        loading_ref=loading_ref,
-        track_view=False,
-    )
+    mk = types.InlineKeyboardMarkup()
+    header = f"🔔 Açar söz bildirişləri — {period_label}\nSəhifə: {current_page} / {total_pages}"
+    for idx, listing in enumerate(listings, start=1 + (current_page - 1) * PAGE_SIZE_NOTIFICATIONS):
+        listing_id = (
+            listing.get("id")
+            or listing.get("ID")
+            or listing.get("Elan_kodu")
+            or listing.get("Kod")
+        )
+        title = listing.get("title") or listing.get("Emlakin_novu") or listing.get("prop_type")
+        short_title = str(title or "-")[:40]
+        source = listing.get("__source") or "main"
+        mk.add(
+            types.InlineKeyboardButton(
+                f"{idx}️⃣ Elan #{listing_id} — {short_title}",
+                callback_data=f"kw_hit_view:listing:{source}:{listing_id}",
+            )
+        )
+
+    nav_buttons = []
+    if current_page > 1:
+        nav_buttons.append(
+            types.InlineKeyboardButton(
+                "⬅️ Əvvəlki", callback_data=f"kw_hits:{period}:{current_page - 1}"
+            )
+        )
+    if current_page < total_pages:
+        nav_buttons.append(
+            types.InlineKeyboardButton(
+                "Növbəti ➡️", callback_data=f"kw_hits:{period}:{current_page + 1}"
+            )
+        )
+    if nav_buttons:
+        mk.row(*nav_buttons)
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kw_hits_menu"))
+
+    try:
+        if message:
+            bot.edit_message_text(
+                header,
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=mk,
+            )
+        else:
+            bot.send_message(chat_id, header, reply_markup=mk)
+    except Exception:
+        pass
 
 
 def show_keyword_hits_filter_menu(chat_id: int, message=None):
     mk = types.InlineKeyboardMarkup()
-    mk.row(
-        types.InlineKeyboardButton("Bu gün", callback_data="kw_hits:today:1"),
-        types.InlineKeyboardButton("Bu həftə", callback_data="kw_hits:week:1"),
-    )
-    mk.row(
-        types.InlineKeyboardButton("Bu ay", callback_data="kw_hits:month:1"),
-        types.InlineKeyboardButton("Arxiv", callback_data="kw_hits:older:1"),
-    )
+    mk.add(types.InlineKeyboardButton("Bu gün", callback_data="kw_hits:today:1"))
+    mk.add(types.InlineKeyboardButton("Bu həftə", callback_data="kw_hits:week:1"))
+    mk.add(types.InlineKeyboardButton("Bu ay", callback_data="kw_hits:month:1"))
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kw_alert_menu"))
-    text = "🗓 Bildirişlər üçün tarix filteri seçin:"
+    text = "🔔 Açar söz bildirişləri\n\n🗓 Zaman aralığı seç:"
     try:
         if message:
             bot.edit_message_text(
@@ -10155,6 +10237,127 @@ def show_keyword_hits_filter_menu(chat_id: int, message=None):
             )
         else:
             bot.send_message(chat_id, text, reply_markup=mk)
+    except Exception:
+        pass
+
+
+def show_criteria_hits_filter_menu(chat_id: int, message=None):
+    mk = types.InlineKeyboardMarkup()
+    mk.add(types.InlineKeyboardButton("Bu gün", callback_data="crit_hits:today:1"))
+    mk.add(types.InlineKeyboardButton("Bu həftə", callback_data="crit_hits:week:1"))
+    mk.add(types.InlineKeyboardButton("Bu ay", callback_data="crit_hits:month:1"))
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="crit_alert_menu"))
+    text = "🎯 Kriteriya bildirişləri\n\n🗓 Zaman aralığı seç:"
+    try:
+        if message:
+            bot.edit_message_text(
+                text,
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=mk,
+            )
+        else:
+            bot.send_message(chat_id, text, reply_markup=mk)
+    except Exception:
+        pass
+
+
+def show_criteria_alert_hits(chat_id: int, period: str, page: int = 1, message=None):
+    rows, total, total_pages, current_page = fetch_notification_listings_page(
+        chat_id, period, page
+    )
+    period_labels = {
+        "today": "Bu gün",
+        "week": "Bu həftə",
+        "month": "Bu ay",
+    }
+    period_label = period_labels.get(period, "Bu gün")
+
+    if total == 0:
+        mk = types.InlineKeyboardMarkup()
+        mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="crit_hits_menu"))
+        text = f"🔔 {period_label} üçün bildiriş yoxdur."
+        try:
+            if message:
+                bot.edit_message_text(
+                    text,
+                    chat_id=message.chat.id,
+                    message_id=message.message_id,
+                    reply_markup=mk,
+                )
+            else:
+                bot.send_message(chat_id, text, reply_markup=mk)
+        except Exception:
+            pass
+        return
+
+    listings = []
+    for row in rows:
+        listing = fetch_listing_for_notification(row.get("listing_id"))
+        if listing:
+            listings.append(listing)
+
+    if not listings:
+        mk = types.InlineKeyboardMarkup()
+        mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="crit_hits_menu"))
+        try:
+            if message:
+                bot.edit_message_text(
+                    f"🔔 {period_label} üçün bildiriş elanları tapılmadı.",
+                    chat_id=message.chat.id,
+                    message_id=message.message_id,
+                    reply_markup=mk,
+                )
+            else:
+                bot.send_message(
+                    chat_id,
+                    f"🔔 {period_label} üçün bildiriş elanları tapılmadı.",
+                    reply_markup=mk,
+                )
+        except Exception:
+            pass
+        return
+
+    mk = types.InlineKeyboardMarkup()
+    header = f"🔔 Kriteriya bildirişləri — {period_label}\nSəhifə: {current_page} / {total_pages}"
+    for idx, listing in enumerate(listings, start=1 + (current_page - 1) * PAGE_SIZE_NOTIFICATIONS):
+        listing_id = listing.get("id") or listing.get("Elan_kodu") or listing.get("ID")
+        title = listing.get("title") or listing.get("Emlakin_novu") or listing.get("prop_type")
+        short_title = str(title or "-")[:40]
+        mk.add(
+            types.InlineKeyboardButton(
+                f"{idx}️⃣ Elan #{listing_id} — {short_title}",
+                callback_data=f"notif_view:{listing_id}",
+            )
+        )
+
+    nav_buttons = []
+    if current_page > 1:
+        nav_buttons.append(
+            types.InlineKeyboardButton(
+                "⬅️ Əvvəlki", callback_data=f"crit_hits:{period}:{current_page - 1}"
+            )
+        )
+    if current_page < total_pages:
+        nav_buttons.append(
+            types.InlineKeyboardButton(
+                "Növbəti ➡️", callback_data=f"crit_hits:{period}:{current_page + 1}"
+            )
+        )
+    if nav_buttons:
+        mk.row(*nav_buttons)
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="crit_hits_menu"))
+
+    try:
+        if message:
+            bot.edit_message_text(
+                header,
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=mk,
+            )
+        else:
+            bot.send_message(chat_id, header, reply_markup=mk)
     except Exception:
         pass
 
@@ -10192,7 +10395,9 @@ def public_back_to_main(message):
     return_to_main_menu(message.chat.id)
 
 
-@bot.message_handler(func=lambda m: m.text == "🔔 Bildirişlərim")
+@bot.message_handler(
+    func=lambda m: m.text in {"🔔 Bildirişlər", "🔔 Bildirişlərim"}
+)
 def show_saved_notifications(message):
     if message.text and message.text.startswith('/'):
         return
@@ -10209,6 +10414,30 @@ def cb_keyword_alert_menu(c):
     if not ensure_allowed_cb(c):
         return
     show_keyword_alert_menu(c.message.chat.id, message=c.message)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "crit_alert_menu")
+@callback_guard
+def cb_criteria_alert_menu(c):
+    if not ensure_allowed_cb(c):
+        return
+    show_criteria_alert_menu(c.message.chat.id, message=c.message)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "crit_alert_list")
+@callback_guard
+def cb_criteria_alert_list(c):
+    if not ensure_allowed_cb(c):
+        return
+    send_criteria_list(c.message.chat.id, message=c.message)
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -10367,6 +10596,18 @@ def cb_keyword_hits_menu(c):
         pass
 
 
+@bot.callback_query_handler(func=lambda c: c.data == "crit_hits_menu")
+@callback_guard
+def cb_criteria_hits_menu(c):
+    if not ensure_allowed_cb(c):
+        return
+    show_criteria_hits_filter_menu(c.message.chat.id, message=c.message)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith("kw_hits:"))
 @callback_guard
 def cb_keyword_hits(c):
@@ -10381,6 +10622,26 @@ def cb_keyword_hits(c):
     except Exception:
         page = 1
     show_keyword_alert_hits(c.message.chat.id, period, page=page, message=c.message)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("crit_hits:"))
+@callback_guard
+def cb_criteria_hits(c):
+    if not ensure_allowed_cb(c):
+        return
+    parts = c.data.split(":")
+    if len(parts) < 3:
+        return
+    period = parts[1]
+    try:
+        page = int(parts[2])
+    except Exception:
+        page = 1
+    show_criteria_alert_hits(c.message.chat.id, period, page=page, message=c.message)
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -10687,7 +10948,7 @@ def cb_agent_notifications(c):
 def cb_notif_criteria(c):
     if not ensure_allowed_cb(c):
         return
-    send_criteria_list(c.message.chat.id, message=c.message)
+    show_criteria_alert_menu(c.message.chat.id, message=c.message)
     try:
         bot.answer_callback_query(c.id)
     except Exception:
