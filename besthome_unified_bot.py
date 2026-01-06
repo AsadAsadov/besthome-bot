@@ -6,7 +6,7 @@
 # ©️ 2025 Əsəd Əsədov (@esedovesed)
 # ============================================
 
-CURRENT_VERSION = "v9.1"
+CURRENT_VERSION = "v10"
 
 import os
 import io
@@ -20360,12 +20360,25 @@ def broadcast_bot_update(admin_chat_id):
         bot.send_message(admin_chat_id, "❌ Aktiv istifadəçi tapılmadı.")
         return
 
+    message_text = (
+        "🚀 Best Home Əmlak Axtarış Botu yeniləndi! (v10)\n\n"
+        "Yeniliklər:\n"
+        "🎁 Şansını sına — gündə 1 dəfə pulsuz gün qazan\n"
+        "🔍 Ağıllı axtarış — satılan və kirayə evlər\n"
+        "💳 Kartla ödəniş — çox yaxında aktiv olacaq\n\n"
+        "Yenilikləri görmək üçün yenilə düyməsinə kliklə 👇"
+    )
+
+    mk = types.InlineKeyboardMarkup()
+    mk.add(types.InlineKeyboardButton("🔄 Yenilə və davam et", callback_data="refresh_bot"))
+
     sent = 0
     for (uid,) in rows:
         try:
             bot.send_message(
                 uid,
-                f"🚀 Bot yeniləndi ({CURRENT_VERSION}). Davam etmək üçün /start yazın.",
+                message_text,
+                reply_markup=mk,
             )
             sent += 1
         except Exception as exc:
