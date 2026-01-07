@@ -385,6 +385,7 @@ complaint_records = {}
 admin_reply_state = {}
 last_complaint_time = {}
 admin_stats_period = {}
+admin_bonus_stats_period = {}
 admin_direct_message_state = {}
 admin_user_message_state = {}
 admin_user_extend_state = {}
@@ -420,14 +421,12 @@ STATUS_REJECTED = "rejected"
 ACTIVE_STATUSES = {STATUS_ACTIVE_PAID, STATUS_ACTIVE_DEMO, STATUS_ACTIVE_FREE}
 
 DEMO_DAYS = 3
-BONUS_SPIN_COOLDOWN_HOURS = 24
+BONUS_SPIN_COOLDOWN_HOURS = 72
 BONUS_DEFAULT_PROBABILITIES = {
-    0: 30,
-    1: 30,
+    0: 40,
+    1: 35,
     2: 20,
-    3: 10,
-    5: 7,
-    7: 3,
+    3: 5,
 }
 DEFAULT_DAILY_CHANCE_LIMIT = 1
 TEXTS_AZ = {
@@ -3284,6 +3283,7 @@ def get_bonus_probabilities() -> Dict[int, int]:
     cur.execute("SELECT days, weight FROM bonus_probabilities ORDER BY days")
     rows = cur.fetchall()
     conn.close()
+    allowed_days = set(BONUS_DEFAULT_PROBABILITIES.keys())
     if not rows:
         return dict(BONUS_DEFAULT_PROBABILITIES)
     weights: Dict[int, int] = {}
@@ -3293,19 +3293,31 @@ def get_bonus_probabilities() -> Dict[int, int]:
             weight = int(row[1])
         except Exception:
             continue
-        weights[day] = weight
-    return weights or dict(BONUS_DEFAULT_PROBABILITIES)
+        if day in allowed_days:
+            weights[day] = weight
+    if not weights:
+        return dict(BONUS_DEFAULT_PROBABILITIES)
+    for day in allowed_days:
+        weights.setdefault(day, BONUS_DEFAULT_PROBABILITIES[day])
+    if weights != BONUS_DEFAULT_PROBABILITIES:
+        update_bonus_probabilities(BONUS_DEFAULT_PROBABILITIES)
+        return dict(BONUS_DEFAULT_PROBABILITIES)
+    return weights
 
 
 def update_bonus_probabilities(new_weights: Dict[int, int]) -> Dict[int, int]:
     normalized: Dict[int, int] = {}
+    allowed_days = set(BONUS_DEFAULT_PROBABILITIES.keys())
     for day, weight in new_weights.items():
         try:
             normalized[int(day)] = max(0, int(weight))
         except Exception:
             continue
+    normalized = {day: weight for day, weight in normalized.items() if day in allowed_days}
     if not normalized:
         normalized = dict(BONUS_DEFAULT_PROBABILITIES)
+    for day in allowed_days:
+        normalized.setdefault(day, BONUS_DEFAULT_PROBABILITIES[day])
     conn = get_local_conn()
     cur = conn.cursor()
     ensure_bonus_tables(cur)
@@ -3319,46 +3331,96 @@ def update_bonus_probabilities(new_weights: Dict[int, int]) -> Dict[int, int]:
     return normalized
 
 
-def fetch_bonus_stats() -> dict:
-    now = datetime.utcnow()
-    start_of_today = datetime(now.year, now.month, now.day)
+def bonus_stats_period_range(period: str) -> Tuple[datetime, datetime, str]:
+    start_date, end_date, label = stats_period_range(period)
+    start_dt = datetime.combine(start_date, datetime.min.time())
+    end_dt = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
+    return start_dt, end_dt, label
+
+
+def fetch_bonus_stats(period: str) -> dict:
+    start_dt, end_dt, label = bonus_stats_period_range(period)
     conn = get_local_conn()
     cur = conn.cursor()
     ensure_bonus_tables(cur)
 
     cur.execute(
-        "SELECT COUNT(*), COALESCE(SUM(granted_days), 0) FROM chance_bonus_logs"
-    )
-    total_spins, total_days = cur.fetchone()
-
-    cur.execute(
         """
         SELECT COUNT(*), COALESCE(SUM(granted_days), 0)
         FROM chance_bonus_logs
-        WHERE created_at >= ?
+        WHERE created_at >= ? AND created_at < ?
         """,
-        (start_of_today.isoformat(),),
+        (start_dt.isoformat(), end_dt.isoformat()),
     )
-    today_spins, today_days = cur.fetchone()
+    period_spins, period_days = cur.fetchone()
 
     cur.execute(
         """
-        SELECT user_id, granted_days, created_at
+        SELECT granted_days, COUNT(*)
         FROM chance_bonus_logs
-        ORDER BY created_at DESC
-        LIMIT 5
-        """
+        WHERE created_at >= ? AND created_at < ?
+        GROUP BY granted_days
+        """,
+        (start_dt.isoformat(), end_dt.isoformat()),
     )
-    recent = cur.fetchall()
+    day_rows = cur.fetchall()
+
+    cur.execute(
+        """
+        SELECT COUNT(DISTINCT user_id)
+        FROM chance_bonus_logs
+        WHERE created_at >= ? AND created_at < ?
+        """,
+        (start_dt.isoformat(), end_dt.isoformat()),
+    )
+    unique_users = cur.fetchone()[0] or 0
+
+    cur.execute(
+        """
+        SELECT plan
+        FROM payments
+        WHERE approved_at >= ? AND approved_at < ?
+        """,
+        (start_dt.isoformat(), end_dt.isoformat()),
+    )
+    paid_plan_rows = cur.fetchall()
 
     conn.close()
 
+    counts = {day: 0 for day in BONUS_DEFAULT_PROBABILITIES.keys()}
+    for row in day_rows or []:
+        try:
+            day_val = int(row[0])
+            count_val = int(row[1] or 0)
+        except Exception:
+            continue
+        if day_val in counts:
+            counts[day_val] = count_val
+
+    paid_days = 0
+    for row in paid_plan_rows or []:
+        plan_val = row[0]
+        if plan_val is None:
+            continue
+        plan_key = str(plan_val)
+        if plan_key in SUBSCRIPTION_PLANS:
+            paid_days += int(SUBSCRIPTION_PLANS[plan_key]["days"])
+            continue
+        if plan_key.isdigit():
+            paid_days += int(plan_key)
+
+    avg_bonus_per_user = 0.0
+    if unique_users > 0:
+        avg_bonus_per_user = (period_days or 0) / unique_users
+
     return {
-        "today_spins": today_spins or 0,
-        "today_days": today_days or 0,
-        "total_spins": total_spins or 0,
-        "total_days": total_days or 0,
-        "recent": recent,
+        "label": label,
+        "period_spins": period_spins or 0,
+        "period_days": period_days or 0,
+        "counts": counts,
+        "unique_users": unique_users,
+        "avg_bonus_per_user": avg_bonus_per_user,
+        "paid_days": paid_days,
     }
 
 
@@ -3436,8 +3498,12 @@ def apply_bonus_days(user_id: int, bonus_days: int, entitlement_type: Optional[s
 
 def pick_bonus_days() -> int:
     probabilities = get_bonus_probabilities()
-    options = list(probabilities.keys())
-    weights = [max(0, int(probabilities[o])) for o in options]
+    allowed_days = set(BONUS_DEFAULT_PROBABILITIES.keys())
+    filtered = {day: weight for day, weight in probabilities.items() if day in allowed_days}
+    if not filtered:
+        filtered = dict(BONUS_DEFAULT_PROBABILITIES)
+    options = list(filtered.keys())
+    weights = [max(0, int(filtered[o])) for o in options]
     if not any(weights):
         options = list(BONUS_DEFAULT_PROBABILITIES.keys())
         weights = list(BONUS_DEFAULT_PROBABILITIES.values())
@@ -3498,7 +3564,7 @@ def can_use_chance(record: Optional[dict], now: datetime) -> Tuple[bool, Optiona
     last_used_at = parse_dt_safe(record.get("chance_last_used_at")) if record else None
     if not last_used_at:
         return True, None
-    next_available = last_used_at + timedelta(hours=24)
+    next_available = last_used_at + timedelta(hours=BONUS_SPIN_COOLDOWN_HOURS)
     return now >= next_available, next_available
 
 
@@ -3531,16 +3597,12 @@ def handle_chance_request(user_id: int) -> None:
         return
 
     last_used_at = parse_dt_safe(record.get("chance_last_used_at")) if record else None
-    if last_used_at is not None and now - last_used_at < timedelta(hours=24):
-        available_at = last_used_at + timedelta(hours=24)
-        display_time = available_at + timedelta(hours=4)
+    if last_used_at is not None and now - last_used_at < timedelta(hours=BONUS_SPIN_COOLDOWN_HOURS):
         bot.send_message(
             chat_id,
             (
-                "⏳ Bu gün artıq şansınızı istifadə etmisiniz.\n\n"
-                "Növbəti şans:\n"
-                f"📅 {display_time.strftime('%d.%m.%Y')}\n"
-                f"⏰ {display_time.strftime('%H:%M')}"
+                "⏳ Bu funksiyanı artıq istifadə etmisiniz.\n"
+                "3 gün sonra yenidən şansınızı sınaya bilərsiniz."
             ),
         )
         return
@@ -3556,14 +3618,18 @@ def handle_chance_request(user_id: int) -> None:
 
     if bonus_days > 0:
         apply_bonus_days(user_id, bonus_days, entitlement_type)
-        log_chance_bonus(user_id, bonus_days, now)
-        message_text = (
-            f"🎁 Təbriklər!\nBu gün üçün **{bonus_days} gün** qazandınız 🎉"
-        )
+    log_chance_bonus(user_id, bonus_days, now)
+
+    if bonus_days == 1:
+        message_text = "🎉 Təbriklər! Sizə 1 gün bonus verildi."
+    elif bonus_days == 2:
+        message_text = "🎉 Əla! Siz 2 gün bonus qazandınız."
+    elif bonus_days == 3:
+        message_text = "🔥 Möhtəşəm! Sizə 3 gün bonus verildi."
     else:
         message_text = (
-            "📌 Bu gün bonus aktiv olmadı.\n"
-            "Sabah yenidən cəhd edə bilərsiniz — hər gün yeni şans mövcuddur."
+            "Bu dəfə bonus çıxmadı 🙂\n"
+            "Bəxtinizi 3 gün sonra yenidən sınaya bilərsiniz."
         )
 
     bot.send_message(chat_id, message_text, parse_mode="Markdown")
@@ -15335,13 +15401,12 @@ def cb_bonus_probability_controls(c):
         return
     action = c.data.split(":", 1)[1] if ":" in c.data else ""
     if action == "edit":
-        bonus_probability_edit_state[c.message.chat.id] = True
         bot.send_message(
             c.message.chat.id,
-            "Yeni ehtimalları bu formatda göndərin: 0=30,1=30,2=20,3=10,5=7,7=3",
+            "⚠️ Şans ehtimal modeli sabitdir və dəyişdirilmir.",
         )
     elif action == "refresh":
-        show_bonus_stats(c.message.chat.id)
+        show_bonus_stats(c.message.chat.id, message_id=c.message.message_id)
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -15372,7 +15437,7 @@ def handle_bonus_probability_edit(message):
     if not new_weights:
         bot.send_message(
             message.chat.id,
-            "⚠️ Düzgün format: 0=30,1=30,2=20,3=10,5=7,7=3",
+            "⚠️ Düzgün format: 0=40,1=35,2=20,3=5",
         )
         show_bonus_stats(message.chat.id)
         return
@@ -17653,8 +17718,8 @@ def show_user_profile(chat_id: int, user_id: int):
             f"⏳ Qalan gün: {format_remaining_days_for_ui(computed_status, effective_raw)}",
             f"🎡 Son klik: {last_spin_text}",
             f"🕒 Son şans istifadəsi: {last_chance_text}",
-            "🎁 Şans: 24 saata 1 dəfə",
-            f"🚦 Bugün istifadə: {'Bəli' if used_today else 'Xeyr'}",
+            "🎁 Şans: 3 günə 1 dəfə",
+            f"🚦 Son 3 gün istifadə: {'Bəli' if used_today else 'Xeyr'}",
         ]
     )
 
@@ -18754,8 +18819,8 @@ def admin_show_user_panel(
         f"⛔ Bloklu: {blocked_state}\n"
         f"🎡 Son klik: {html.escape(last_spin_text)}\n"
         f"🕒 Son şans istifadəsi: {html.escape(last_chance_text)}\n"
-        "🎁 Şans: 24 saata 1 dəfə\n"
-        f"🚦 Bugün istifadə: {'Bəli' if used_today else 'Xeyr'}\n"
+        "🎁 Şans: 3 günə 1 dəfə\n"
+        f"🚦 Son 3 gün istifadə: {'Bəli' if used_today else 'Xeyr'}\n"
         f"🆔 Ödəniş kodu: {html.escape(subscription_payment_code(target_id))}"
     )
     if last_error:
@@ -21115,7 +21180,7 @@ def broadcast_bot_update(admin_chat_id):
     message_text = (
         "🚀 Best Home Əmlak Axtarış Botu yeniləndi! (v10)\n\n"
         "Yeniliklər:\n"
-        "🎁 Şansını sına — gündə 1 dəfə pulsuz gün qazan\n"
+        "🎁 Şansını sına — 3 gündə 1 dəfə pulsuz gün qazan\n"
         "🔍 Ağıllı axtarış — satılan və kirayə evlər\n"
         "💳 Kartla ödəniş — çox yaxında aktiv olacaq\n\n"
         "Yenilikləri görmək üçün yenilə düyməsinə kliklə 👇"
@@ -22482,6 +22547,33 @@ def handle_stats_period_callback(c):
         show_admin_stats(chat_id, period=period, message_id=c.message.message_id)
 
 
+@bot.callback_query_handler(
+    func=lambda c: c.data and c.data.startswith("bonus_stats_period:")
+)
+@callback_guard
+def handle_bonus_stats_period_callback(c):
+    period = c.data.split(":", 1)[1] if c.data else "day"
+    if period not in STATS_PERIOD_MAP:
+        period = "day"
+
+    chat_id = c.message.chat.id if c.message else c.from_user.id
+    if not is_admin(chat_id):
+        try:
+            bot.answer_callback_query(c.id, "❌ Yalnız adminlər üçün.")
+        except Exception:
+            pass
+        return
+
+    admin_bonus_stats_period[chat_id] = period
+    try:
+        bot.answer_callback_query(c.id, f"📆 {STATS_PERIOD_MAP.get(period, 'Bu gün')}")
+    except Exception:
+        pass
+
+    if c.message:
+        show_bonus_stats(chat_id, period=period, message_id=c.message.message_id)
+
+
 def show_referral_stats(chat_id: int):
     if not is_admin(chat_id):
         return
@@ -22535,72 +22627,76 @@ def show_referral_stats(chat_id: int):
 
 
 
-def show_bonus_stats(chat_id: int):
+def bonus_stats_period_keyboard(selected: str) -> types.InlineKeyboardMarkup:
+    mk = types.InlineKeyboardMarkup()
+    buttons = [
+        types.InlineKeyboardButton(
+            TEXTS_AZ["admin_stats_period_day"], callback_data="bonus_stats_period:day"
+        ),
+        types.InlineKeyboardButton(
+            TEXTS_AZ["admin_stats_period_week"], callback_data="bonus_stats_period:week"
+        ),
+        types.InlineKeyboardButton(
+            TEXTS_AZ["admin_stats_period_month"],
+            callback_data="bonus_stats_period:month",
+        ),
+    ]
+    mk.row(*buttons)
+    mk.add(types.InlineKeyboardButton("🔄 Yenilə", callback_data="bonusprob:refresh"))
+    mk.add(types.InlineKeyboardButton(ADMIN_PANEL_BACK_MAIN, callback_data="adm_back:main"))
+    return mk
+
+
+def show_bonus_stats(chat_id: int, period: Optional[str] = None, message_id: Optional[int] = None):
     if not is_admin(chat_id):
         return
 
-    stats = fetch_bonus_stats()
+    period = period or admin_bonus_stats_period.get(chat_id, "day")
+    if period not in STATS_PERIOD_MAP:
+        period = "day"
+    admin_bonus_stats_period[chat_id] = period
+
+    stats = fetch_bonus_stats(period)
     probabilities = get_bonus_probabilities()
 
-    def build_bar(percent: int, max_percent: int) -> str:
-        total_blocks = 10
-        if max_percent <= 0:
-            max_percent = 1
-        filled = 0
-        if percent > 0:
-            filled = max(1, round((percent / max_percent) * total_blocks))
-        filled = min(total_blocks, filled)
-        return "▓" * filled + "░" * (total_blocks - filled)
+    counts = stats.get("counts", {})
+    total_spins = stats.get("period_spins", 0)
+    total_days = stats.get("period_days", 0)
+    unique_users = stats.get("unique_users", 0)
+    avg_bonus = stats.get("avg_bonus_per_user", 0.0)
+    paid_days = stats.get("paid_days", 0)
+    label = stats.get("label", STATS_PERIOD_MAP.get(period, "Bu gün"))
 
-    lines = ["🎁 ŞANS STATİSTİKASI", ""]
-    lines.append("📊 Bu gün")
-    lines.append(f"• Klik edənlər: {stats.get('today_spins', 0)}")
-    lines.append(f"• Verilən bonus: {stats.get('today_days', 0)} gün")
+    lines = ["🎁 ŞANS STATİSTİKASI", f"📅 Dövr: {label}", ""]
+    lines.append("📊 Ümumi göstəricilər")
+    lines.append(f"• Ümumi cəhd: {total_spins}")
+    lines.append(f"• 0 gün: {counts.get(0, 0)}")
+    lines.append(f"• 1 gün: {counts.get(1, 0)}")
+    lines.append(f"• 2 gün: {counts.get(2, 0)}")
+    lines.append(f"• 3 gün: {counts.get(3, 0)}")
+    lines.append(f"• Orta bonus / istifadəçi: {avg_bonus:.2f} gün")
+    lines.append(
+        f"• Təxmini qənaət: {total_days} gün / Ödəniş: {paid_days} gün"
+    )
     lines.append("")
 
-    lines.append("📈 Ümumi")
-    lines.append(f"• Toplam klik: {stats.get('total_spins', 0)}")
-    lines.append(f"• Toplam bonus gün: {stats.get('total_days', 0)}")
-    lines.append("")
+    lines.append("🎯 Paylama modeli")
+    for day, weight in sorted(probabilities.items()):
+        lines.append(f"• {day} gün — {weight}%")
 
-    lines.append("🎯 Ehtimallar")
-    if probabilities:
-        max_weight = max(probabilities.values()) if probabilities else 1
-        max_weight = max(max_weight, 1)
-        for day, weight in sorted(probabilities.items()):
-            bar = build_bar(int(weight), int(max_weight))
-            lines.append(f"{day} gün  {bar} {weight}%")
-    else:
-        lines.append("• Ehtimal tapılmadı")
-
-    recent = stats.get("recent") or []
-    if recent:
-        lines.append("\n🕒 Son kliklər (latest first, limit 5):")
-        for row in recent[:5]:
-            user_id = _row_value_safe(row, "user_id", "-")
-            days_won = _row_value_safe(row, "granted_days", _row_value_safe(row, "days_won", 0)) or 0
-            created_raw = _row_value_safe(row, "created_at")
-            created_dt = parse_dt_safe(created_raw)
-            display_time = created_dt + timedelta(hours=4) if created_dt else None
-            time_text = (
-                display_time.strftime("%H:%M") if display_time else str(created_raw or "-")
+    mk = bonus_stats_period_keyboard(period)
+    if message_id:
+        try:
+            bot.edit_message_text(
+                "\n".join(lines),
+                chat_id,
+                message_id,
+                reply_markup=mk,
             )
-            lines.append(f"• {time_text} — {user_id} → {days_won} gün")
-
-    mk = types.InlineKeyboardMarkup()
-    mk.add(
-        types.InlineKeyboardButton(
-            "⚙️ Ehtimalları dəyiş", callback_data="bonusprob:edit"
-        )
-    )
-    mk.add(
-        types.InlineKeyboardButton("🔄 Yenilə", callback_data="bonusprob:refresh")
-    )
-    mk.add(
-        types.InlineKeyboardButton(ADMIN_PANEL_BACK_MAIN, callback_data="adm_back:main")
-    )
-
-    bot.send_message(chat_id, "\n".join(lines), reply_markup=mk)
+        except Exception:
+            bot.send_message(chat_id, "\n".join(lines), reply_markup=mk)
+    else:
+        bot.send_message(chat_id, "\n".join(lines), reply_markup=mk)
 
 
 
