@@ -3375,16 +3375,6 @@ def fetch_bonus_stats(period: str) -> dict:
     )
     unique_users = cur.fetchone()[0] or 0
 
-    cur.execute(
-        """
-        SELECT plan
-        FROM payments
-        WHERE approved_at >= ? AND approved_at < ?
-        """,
-        (start_dt.isoformat(), end_dt.isoformat()),
-    )
-    paid_plan_rows = cur.fetchall()
-
     conn.close()
 
     counts = {day: 0 for day in BONUS_DEFAULT_PROBABILITIES.keys()}
@@ -3397,31 +3387,39 @@ def fetch_bonus_stats(period: str) -> dict:
         if day_val in counts:
             counts[day_val] = count_val
 
-    paid_days = 0
-    for row in paid_plan_rows or []:
-        plan_val = row[0]
-        if plan_val is None:
-            continue
-        plan_key = str(plan_val)
-        if plan_key in SUBSCRIPTION_PLANS:
-            paid_days += int(SUBSCRIPTION_PLANS[plan_key]["days"])
-            continue
-        if plan_key.isdigit():
-            paid_days += int(plan_key)
-
-    avg_bonus_per_user = 0.0
-    if unique_users > 0:
-        avg_bonus_per_user = (period_days or 0) / unique_users
-
     return {
         "label": label,
         "period_spins": period_spins or 0,
         "period_days": period_days or 0,
         "counts": counts,
         "unique_users": unique_users,
-        "avg_bonus_per_user": avg_bonus_per_user,
-        "paid_days": paid_days,
     }
+
+
+def fetch_recent_bonus_usage(limit: int = 10) -> List[Tuple[int, Optional[datetime]]]:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    ensure_bonus_tables(cur)
+    cur.execute(
+        """
+        SELECT user_id, created_at
+        FROM chance_bonus_logs
+        ORDER BY datetime(created_at) DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    recent: List[Tuple[int, Optional[datetime]]] = []
+    for row in rows or []:
+        try:
+            user_id = int(row[0])
+        except Exception:
+            continue
+        created_at = parse_dt_safe(row[1])
+        recent.append((user_id, created_at))
+    return recent
 
 
 def set_bonus_allowed(user_id: int, allowed: bool) -> bool:
@@ -3596,13 +3594,16 @@ def handle_chance_request(user_id: int) -> None:
         )
         return
 
-    last_used_at = parse_dt_safe(record.get("chance_last_used_at")) if record else None
-    if last_used_at is not None and now - last_used_at < timedelta(hours=BONUS_SPIN_COOLDOWN_HOURS):
+    allowed, next_available = can_use_chance(record, now)
+    if not allowed:
+        display_next = (next_available + timedelta(hours=4)) if next_available else now
+        date_label = display_next.strftime("%d.%m.%Y")
+        time_label = display_next.strftime("%H:%M")
         bot.send_message(
             chat_id,
             (
                 "⏳ Bu funksiyanı artıq istifadə etmisiniz.\n"
-                "3 gün sonra yenidən şansınızı sınaya bilərsiniz."
+                f"Növbəti şans: {date_label} saat {time_label}"
             ),
         )
         return
@@ -3620,19 +3621,15 @@ def handle_chance_request(user_id: int) -> None:
         apply_bonus_days(user_id, bonus_days, entitlement_type)
     log_chance_bonus(user_id, bonus_days, now)
 
-    if bonus_days == 1:
-        message_text = "🎉 Təbriklər! Sizə 1 gün bonus verildi."
-    elif bonus_days == 2:
-        message_text = "🎉 Əla! Siz 2 gün bonus qazandınız."
-    elif bonus_days == 3:
-        message_text = "🔥 Möhtəşəm! Sizə 3 gün bonus verildi."
+    if bonus_days > 0:
+        message_text = f"🎉 Təbriklər!\nSizə {bonus_days} gün əlavə edildi."
     else:
         message_text = (
-            "Bu dəfə bonus çıxmadı 🙂\n"
+            "🙂 Bu dəfə bonus çıxmadı.\n"
             "Bəxtinizi 3 gün sonra yenidən sınaya bilərsiniz."
         )
 
-    bot.send_message(chat_id, message_text, parse_mode="Markdown")
+    bot.send_message(chat_id, message_text)
 
 
 
@@ -8218,18 +8215,15 @@ def cb_payplan(c):
     mk = build_payment_action_markup(plan_key, plan or {}, payment_code)
 
     pay_text = (
-        "🎁 BONUS İMKAN  \n"
-        "Hər 24 saatda 1 dəfə  \n"
-        "əsas menyudakı 🎁 Şansını sına düyməsi ilə  \n"
-        "pulsuz gün qazana bilərsiniz.\n\n"
-        "━━━━━━━━━━━━━━━\n\n"
-        "💳 ÖDƏNİŞ  \n"
-        "Planınızı seçin və ödənişi edin.  \n"
-        "Ödənişdən sonra mütləq  \n"
-        "✅ **“Ödəniş etdim”** düyməsinə klikləyin.  \n"
+        "🎁 BONUS İMKAN\n"
+        "Hər 3 gündə 1 dəfə əsas menyudakı 🎁 Şansını sına düyməsi ilə pulsuz gün qazana bilərsiniz.\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "💳 ÖDƏNİŞ Planınızı seçin və ödənişi edin.\n"
+        "Ödənişdən sonra mütləq\n"
+        "✅ “Ödəniş etdim” düyməsinə klikləyin.\n"
         "Yalnız bundan sonra hesabınız aktivləşdirilir.\n\n"
-        "🆔 Ödəniş kodu:  \n"
-        f"{payment_code}"
+        "🆔 Ödəniş kodu:\n"
+        f"BH-{chat_id}"
     )
     bot.send_message(chat_id, pay_text, reply_markup=mk, parse_mode="Markdown")
     try:
@@ -15401,9 +15395,10 @@ def cb_bonus_probability_controls(c):
         return
     action = c.data.split(":", 1)[1] if ":" in c.data else ""
     if action == "edit":
+        bonus_probability_edit_state[c.message.chat.id] = True
         bot.send_message(
             c.message.chat.id,
-            "⚠️ Şans ehtimal modeli sabitdir və dəyişdirilmir.",
+            "✏️ Yeni ehtimalları yazın (format: 0=40,1=35,2=20,3=5):",
         )
     elif action == "refresh":
         show_bonus_stats(c.message.chat.id, message_id=c.message.message_id)
@@ -22116,11 +22111,6 @@ def stats_period_keyboard(selected: str) -> types.InlineKeyboardMarkup:
         ),
     ]
     mk.row(*buttons)
-    mk.add(
-        types.InlineKeyboardButton(
-            TEXTS_AZ["admin_stats_customer_requests"], callback_data="adm_req_types"
-        )
-    )
     return mk
 
 
@@ -22642,6 +22632,7 @@ def bonus_stats_period_keyboard(selected: str) -> types.InlineKeyboardMarkup:
         ),
     ]
     mk.row(*buttons)
+    mk.add(types.InlineKeyboardButton("✏️ Ehtimalları dəyiş", callback_data="bonusprob:edit"))
     mk.add(types.InlineKeyboardButton("🔄 Yenilə", callback_data="bonusprob:refresh"))
     mk.add(types.InlineKeyboardButton(ADMIN_PANEL_BACK_MAIN, callback_data="adm_back:main"))
     return mk
@@ -22661,10 +22652,7 @@ def show_bonus_stats(chat_id: int, period: Optional[str] = None, message_id: Opt
 
     counts = stats.get("counts", {})
     total_spins = stats.get("period_spins", 0)
-    total_days = stats.get("period_days", 0)
-    unique_users = stats.get("unique_users", 0)
-    avg_bonus = stats.get("avg_bonus_per_user", 0.0)
-    paid_days = stats.get("paid_days", 0)
+    recent_usage = fetch_recent_bonus_usage()
     label = stats.get("label", STATS_PERIOD_MAP.get(period, "Bu gün"))
 
     lines = ["🎁 ŞANS STATİSTİKASI", f"📅 Dövr: {label}", ""]
@@ -22674,15 +22662,21 @@ def show_bonus_stats(chat_id: int, period: Optional[str] = None, message_id: Opt
     lines.append(f"• 1 gün: {counts.get(1, 0)}")
     lines.append(f"• 2 gün: {counts.get(2, 0)}")
     lines.append(f"• 3 gün: {counts.get(3, 0)}")
-    lines.append(f"• Orta bonus / istifadəçi: {avg_bonus:.2f} gün")
-    lines.append(
-        f"• Təxmini qənaət: {total_days} gün / Ödəniş: {paid_days} gün"
-    )
     lines.append("")
 
     lines.append("🎯 Paylama modeli")
     for day, weight in sorted(probabilities.items()):
         lines.append(f"• {day} gün — {weight}%")
+    lines.append("")
+
+    lines.append("🧾 Son istifadə edənlər")
+    if recent_usage:
+        for user_id, created_at in recent_usage:
+            display_time = created_at + timedelta(hours=4) if created_at else None
+            time_label = display_time.strftime("%H:%M %d.%m.%Y") if display_time else "-"
+            lines.append(f'• <a href="tg://user?id={user_id}">{user_id}</a> — {time_label}')
+    else:
+        lines.append("• Heç bir istifadə yoxdur.")
 
     mk = bonus_stats_period_keyboard(period)
     if message_id:
@@ -22692,11 +22686,12 @@ def show_bonus_stats(chat_id: int, period: Optional[str] = None, message_id: Opt
                 chat_id,
                 message_id,
                 reply_markup=mk,
+                parse_mode="HTML",
             )
         except Exception:
-            bot.send_message(chat_id, "\n".join(lines), reply_markup=mk)
+            bot.send_message(chat_id, "\n".join(lines), reply_markup=mk, parse_mode="HTML")
     else:
-        bot.send_message(chat_id, "\n".join(lines), reply_markup=mk)
+        bot.send_message(chat_id, "\n".join(lines), reply_markup=mk, parse_mode="HTML")
 
 
 
