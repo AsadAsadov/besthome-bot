@@ -609,11 +609,8 @@ FINANCIAL_REPORTS_MENU = [
 ADMIN_PAYMENTS_BUTTON = "💳 Ödənişlər"
 ADMIN_PANEL_BUTTONS = [
     TEXTS_AZ["admin_panel_stats"],
-    TEXTS_AZ["admin_panel_activity_stats"],
-    "📊 QR Statistikası",
     FINANCIAL_REPORTS_BUTTON,
     ADMIN_PAYMENTS_BUTTON,
-    TEXTS_AZ["admin_panel_bonus_stats"],
     TEXTS_AZ["admin_panel_agents_notify"],
     TEXTS_AZ["admin_panel_user_search"],
     TEXTS_AZ["admin_panel_users"],
@@ -626,6 +623,13 @@ ADMIN_PANEL_BUTTONS = [
 ]
 ADMIN_PANEL_BACK_MAIN = TEXTS_AZ["admin_panel_back_main"]
 admin_panel_page_state = {}
+ADMIN_STATS_MENU_BUTTONS = [
+    "📊 Ümumi statistika",
+    "⚡ Aktivlik statistikası",
+    "🎁 Şans statistikası",
+    "📷 QR statistikası",
+]
+ADMIN_STATS_MENU_BACK = "⬅️ Geri"
 ADMIN_PANEL_ACTIONS = list(ADMIN_PANEL_BUTTONS)
 ADMIN_PANEL_ACTION_SET = set(ADMIN_PANEL_ACTIONS)
 ADMIN_PANEL_ACTION_KEYS = {
@@ -15289,6 +15293,47 @@ def show_admin_activity_stats_menu(
         bot.send_message(chat_id, text, reply_markup=mk)
 
 
+def show_admin_stats_menu(chat_id: int, message: Optional[types.Message] = None):
+    if not is_admin(chat_id):
+        return
+    mk = types.InlineKeyboardMarkup()
+    mk.row(
+        types.InlineKeyboardButton(
+            ADMIN_STATS_MENU_BUTTONS[0], callback_data="admin_stats_menu:overall"
+        )
+    )
+    mk.row(
+        types.InlineKeyboardButton(
+            ADMIN_STATS_MENU_BUTTONS[1], callback_data="admin_stats_menu:activity"
+        )
+    )
+    mk.row(
+        types.InlineKeyboardButton(
+            ADMIN_STATS_MENU_BUTTONS[2], callback_data="admin_stats_menu:bonus"
+        )
+    )
+    mk.row(
+        types.InlineKeyboardButton(
+            ADMIN_STATS_MENU_BUTTONS[3], callback_data="admin_stats_menu:qr"
+        )
+    )
+    mk.row(
+        types.InlineKeyboardButton(
+            ADMIN_STATS_MENU_BACK, callback_data="admin_stats_menu:back"
+        )
+    )
+    text = TEXTS_AZ["admin_panel_stats"]
+    try:
+        if message:
+            bot.edit_message_text(
+                text, chat_id=chat_id, message_id=message.message_id, reply_markup=mk
+            )
+        else:
+            bot.send_message(chat_id, text, reply_markup=mk)
+    except Exception:
+        bot.send_message(chat_id, text, reply_markup=mk)
+
+
 def show_inactive_users_summary(
     chat_id: int, days: int = 10, message: Optional[types.Message] = None
 ):
@@ -15410,8 +15455,7 @@ def _handle_admin_panel_action(chat_id: int, action_text: str):
     if action_text == TEXTS_AZ["admin_panel_pending_listings"]:
         show_pending_listings(chat_id)
     elif action_text == TEXTS_AZ["admin_panel_stats"]:
-        admin_stats_period[chat_id] = "day"
-        show_admin_stats(chat_id)
+        show_admin_stats_menu(chat_id)
     elif action_text == TEXTS_AZ["admin_panel_bonus_stats"]:
         show_bonus_stats(chat_id)
     elif action_text == TEXTS_AZ["admin_panel_activity_stats"]:
@@ -15474,6 +15518,31 @@ def cb_admin_panel(c):
         action_text = ADMIN_PANEL_ACTION_LOOKUP.get(action_key)
         if action_text:
             _handle_admin_panel_action(chat_id, action_text)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("admin_stats_menu:"))
+@callback_guard
+def cb_admin_stats_menu(c):
+    if not is_admin(c.from_user.id):
+        return
+    chat_id = c.message.chat.id
+    action = c.data.split(":", 1)[1]
+    if action == "back":
+        send_admin_panel(chat_id, page=admin_panel_page_state.get(chat_id, 1))
+        return
+    if action == "overall":
+        admin_stats_period[chat_id] = "day"
+        show_admin_stats(chat_id)
+        return
+    if action == "activity":
+        show_admin_activity_stats_menu(chat_id)
+        return
+    if action == "bonus":
+        show_bonus_stats(chat_id)
+        return
+    if action == "qr":
+        send_qr_stats_menu(chat_id)
+        return
 
 
 @bot.callback_query_handler(
@@ -15755,7 +15824,7 @@ def send_qr_stats(chat_id: int, range_key: str):
         return
     rows, total, area_counts = fetch_qr_stats(range_key)
     label = QR_STATS_RANGE_LABELS.get(range_key, QR_STATS_RANGE_LABELS["all"])
-    lines = [f"📊 QR Statistikası ({label})", ""]
+    lines = [f"📷 QR Statistikası — {label}", ""]
     area_groups: Dict[str, List[Any]] = {area: [] for area in QR_STATS_AREAS}
     for row in rows:
         area_code = row["join_source"] if "join_source" in row.keys() else row[2]
@@ -15765,11 +15834,12 @@ def send_qr_stats(chat_id: int, range_key: str):
     for area_code in QR_STATS_AREAS:
         area_rows = area_groups.get(area_code, [])
         count = area_counts.get(area_code, 0)
-        lines.append(
-            f"📍 Mənbə: {format_qr_area_label(area_code)} — {count} istifadəçi"
-        )
+        area_label = format_qr_area_label(area_code)
         if area_rows:
-            lines.append("👤 İstifadəçilər:")
+            lines.append(f"📍 {area_label} ({count} nəfər)")
+        else:
+            lines.append(f"📍 {area_label}")
+        if area_rows:
             for idx, r in enumerate(area_rows, start=1):
                 user_id = r["user_id"] if "user_id" in r.keys() else r[0]
                 username = r["username"] if "username" in r.keys() else r[1]
@@ -15782,14 +15852,13 @@ def send_qr_stats(chat_id: int, range_key: str):
                     join_time = display_time.strftime("%Y-%m-%d %H:%M")
                 except Exception:
                     pass
-                lines.append(f"{idx}) ID: {user_id}")
-                lines.append(f"   👤 {username_display}")
+                lines.append(f"{idx}) ID: {user_id} — {username_display}")
                 lines.append(f"   🕒 {join_time}")
                 lines.append("")
         else:
-            lines.append("👤 İstifadəçi yoxdur.")
+            lines.append("— istifadəçi yoxdur")
             lines.append("")
-    lines.append(f"👥 Cəmi QR ilə qoşulanlar: {total}")
+    lines.append(f"👥 Cəmi QR ilə qoşulanlar: {total} nəfər")
     bot.send_message(chat_id, "\n".join(lines))
 
 
@@ -22324,7 +22393,7 @@ def format_ranked_lines(items, name_key: str, count_key: str):
 
 def normalize_rayon_label(name_raw: str) -> str:
     name = str(name_raw or "").strip()
-    return name or "Açar sözlə axtarış"
+    return name or "Açar söz"
 
 
 def format_rayon_stats(rayons):
@@ -22356,7 +22425,7 @@ def get_profile_url_for_user(user_id: int) -> str:
 
 
 def format_active_user_stats(users):
-    blocks = []
+    lines = []
     buttons = []
 
     for row in users:
@@ -22392,17 +22461,14 @@ def format_active_user_stats(users):
         except Exception:
             profile_url = None
 
-        block_lines = []
-        if display_name != "—":
-            block_lines.append(f"👤 {html.escape(display_name)}")
-        block_lines.append(
-            f'🆔 ID: <a href="tg://user?id={chat_id}">{chat_id}</a>'
+        name_text = html.escape(display_name)
+        lines.append(
+            "• {name} — ID: <a href=\"tg://user?id={chat_id}\">{chat_id}</a> — 🔍 {count}".format(
+                name=name_text, chat_id=chat_id, count=cnt
+            )
         )
-        block_lines.append(f"🔍 Axtarış sayı: {cnt}")
 
-        blocks.append("\n".join(block_lines))
-
-    return blocks, buttons
+    return lines, buttons
 
 
 def show_admin_stats(
@@ -22618,7 +22684,7 @@ def show_admin_stats(
     today_new_listings = today_new_main + today_new_local
 
     lines = [f"📊 BestHome Statistikalar — {period_label}", ""]
-    lines.append("👥 İstifadəçilər:")
+    lines.append("👥 İstifadəçilər")
     lines.append(f"• Cəmi: {total_users}")
     lines.append(f"• Aktiv: {active_users}")
     lines.append(f"• Demo: {demo_users}")
@@ -22627,36 +22693,33 @@ def show_admin_stats(
     lines.append(f"• Təsdiqsiz: {pending_users}")
     lines.append("")
 
-    lines.append("🏠 Elanlar:")
+    lines.append("🏠 Elanlar")
     lines.append(f"• Ümumi: {total_listings}")
     lines.append(f"• Satılır: {sale_total}")
     lines.append(f"• Kirayə: {rent_total}")
-    lines.append(f"📈 Bu gün əlavə olunan yeni elanlar: {today_new_listings}")
+    lines.append(f"📈 Bu gün əlavə olunan: {today_new_listings}")
     lines.append("")
 
-    lines.append(f"📍 Rayonlar üzrə axtarışlar ({period_label}):")
+    lines.append("📍 Rayonlar üzrə axtarışlar")
     if search_stats_available and top_rayons:
         lines.extend(format_rayon_stats(top_rayons))
     else:
         lines.append("• Məlumat yoxdur")
     lines.append("")
 
-    lines.append(f"🔍 Axtarışlar ({period_label}):")
+    lines.append("🔍 Axtarışlar")
     if search_stats_available and period_searches > 0:
         lines.append(f"• Cəmi: {period_searches}")
     else:
         lines.append("• Məlumat yoxdur")
     lines.append("")
 
-    lines.append(f"⚡ Aktiv istifadəçilər ({period_label}):")
+    lines.append("⚡ Aktiv istifadəçilər")
     active_user_blocks, profile_buttons = (
         format_active_user_stats(top_users) if search_stats_available else ([], [])
     )
     if search_stats_available and active_user_blocks:
-        for idx, block in enumerate(active_user_blocks):
-            lines.append(block)
-            if idx != len(active_user_blocks) - 1:
-                lines.append("")
+        lines.extend(active_user_blocks)
     else:
         lines.append("• Məlumat yoxdur")
 
