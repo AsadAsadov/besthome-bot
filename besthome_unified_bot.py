@@ -15824,43 +15824,47 @@ def send_qr_stats(chat_id: int, range_key: str):
         return
     rows, total, area_counts = fetch_qr_stats(range_key)
     label = QR_STATS_RANGE_LABELS.get(range_key, QR_STATS_RANGE_LABELS["all"])
-    separator = "━━━━━━━━━━━━━━━━━━━━"
-    lines = [f"📷 QR Statistikası — {label}", separator, ""]
+    separator = "────────────────"
+    lines = [f"📷 QR Statistikası — {label}", separator]
     area_groups: Dict[str, List[Any]] = {area: [] for area in QR_STATS_AREAS}
     for row in rows:
         area_code = row["join_source"] if "join_source" in row.keys() else row[2]
         if area_code in area_groups:
             area_groups[area_code].append(row)
 
-    for area_code in QR_STATS_AREAS:
+    active_area_codes = [area for area in QR_STATS_AREAS if area_counts.get(area, 0) > 0]
+    passive_area_codes = [
+        area for area in QR_STATS_AREAS if area_counts.get(area, 0) == 0
+    ]
+
+    for area_code in active_area_codes:
         area_rows = area_groups.get(area_code, [])
         count = area_counts.get(area_code, 0)
         area_label = format_qr_area_label(area_code)
         lines.append(f"📍 {area_label} — {count} nəfər")
-        if count > 0 and area_rows:
-            for r in area_rows:
-                user_id = r["user_id"] if "user_id" in r.keys() else r[0]
-                username = r["username"] if "username" in r.keys() else r[1]
-                username_text = username or "username yoxdur"
-                created_value = r["created_at"] if "created_at" in r.keys() else r[3]
-                join_time = str(created_value)
-                try:
-                    join_dt = datetime.fromisoformat(str(created_value))
-                    display_time = join_dt + timedelta(hours=4)
-                    join_time = display_time.strftime("%Y-%m-%d %H:%M")
-                except Exception:
-                    pass
-                lines.append(f"ID: {user_id}")
-                lines.append(f"@{username_text}")
-                lines.append(f"🕒 {join_time}")
-                lines.append("")
-        else:
-            lines.append("0")
-            lines.append("")
+        for r in area_rows:
+            user_id = r["user_id"] if "user_id" in r.keys() else r[0]
+            username = r["username"] if "username" in r.keys() else r[1]
+            username_text = username or "-"
+            created_value = r["created_at"] if "created_at" in r.keys() else r[3]
+            join_time = str(created_value)
+            try:
+                join_dt = datetime.fromisoformat(str(created_value))
+                display_time = join_dt + timedelta(hours=4)
+                join_time = display_time.strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                pass
+            lines.append(
+                f"• ID:{user_id} — @{username_text} — 🕒 {join_time}"
+            )
+    if active_area_codes:
         lines.append(separator)
-        lines.append("")
-    lines.append(f"👥 Cəmi: {total} nəfər")
+    lines.append("📍 Passiv ərazilər")
+    for area_code in passive_area_codes:
+        area_label = format_qr_area_label(area_code)
+        lines.append(f"• {area_label} — 0 nəfər")
     lines.append(separator)
+    lines.append(f"👥 Cəmi: {total} nəfər")
     bot.send_message(chat_id, "\n".join(lines))
 
 
@@ -22464,13 +22468,11 @@ def format_active_user_stats(users):
             profile_url = None
 
         name_text = html.escape(display_name)
-        lines.append(name_text)
         lines.append(
-            "ID: <a href=\"tg://user?id={chat_id}\">{chat_id}</a> — 🔍 {count}".format(
-                chat_id=chat_id, count=cnt
+            "• {name} — ID:{chat_id} — 🔍 {count}".format(
+                name=name_text, chat_id=chat_id, count=cnt
             )
         )
-        lines.append("")
 
     return lines, buttons
 
@@ -22687,7 +22689,7 @@ def show_admin_stats(
     rent_total = main_rent + local_rent
     today_new_listings = today_new_main + today_new_local
 
-    separator = "━━━━━━━━━━━━━━━━━━━━"
+    separator = "────────────────"
     keyword_count = 0
     narimanov_count = 0
     absheron_count = 0
@@ -22721,34 +22723,52 @@ def show_admin_stats(
     lines = [
         f"📊 BestHome Statistikalar — {period_label}",
         separator,
-        "",
         "👥 İstifadəçilər",
-        f"Cəmi: {total_users}",
-        f"Aktiv: {active_users}",
-        f"Demo: {demo_users}",
-        f"Vaxtı bitmiş: {expired_users}",
-        f"Bloklanan: {blocked_users}",
-        f"Təsdiqsiz: {pending_users}",
-        "",
+        (
+            "Cəmi: {total} | Aktiv: {active} | Demo: {demo} | Vaxtı bitmiş: {expired} | "
+            "Bloklanan: {blocked} | Təsdiqsiz: {pending}"
+        ).format(
+            total=total_users,
+            active=active_users,
+            demo=demo_users,
+            expired=expired_users,
+            blocked=blocked_users,
+            pending=pending_users,
+        ),
         separator,
         "🏠 Elanlar",
-        f"Ümumi: {total_listings}",
-        f"Satılır: {sale_total}",
-        f"Kirayə: {rent_total}",
-        f"Bu gün əlavə olunan: {today_new_listings}",
-        "",
+        (
+            "Ümumi: {total} | Satılır: {sale} | Kirayə: {rent} | Bu gün əlavə olunan: {today}"
+        ).format(
+            total=total_listings,
+            sale=sale_total,
+            rent=rent_total,
+            today=today_new_listings,
+        ),
         separator,
-        "📍 Axtarışlar",
-        f"Açar söz: {keyword_count}",
-        f"Nərimanov: {narimanov_count}",
-        f"Abşeron: {absheron_count}",
-        f"Xətai: {xetai_count}",
-        f"Digər: {other_count}",
-        "",
-        separator,
-        "⚡ Aktiv istifadəçilər",
-        separator,
+        "🔎 Axtarışlar",
     ]
+    search_lines = []
+    if keyword_count > 0:
+        search_lines.append(f"• Açar söz — {keyword_count}")
+    if narimanov_count > 0:
+        search_lines.append(f"• Nərimanov — {narimanov_count}")
+    if absheron_count > 0:
+        search_lines.append(f"• Abşeron — {absheron_count}")
+    if xetai_count > 0:
+        search_lines.append(f"• Xətai — {xetai_count}")
+    if other_count > 0:
+        search_lines.append(f"• Digər — {other_count}")
+    if search_lines:
+        lines.extend(search_lines)
+    else:
+        lines.append("Məlumat yoxdur")
+    lines.extend(
+        [
+            separator,
+            "⚡ Aktiv istifadəçilər",
+        ]
+    )
     active_user_blocks, profile_buttons = (
         format_active_user_stats(top_users) if search_stats_available else ([], [])
     )
