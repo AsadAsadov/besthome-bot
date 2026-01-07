@@ -15824,7 +15824,8 @@ def send_qr_stats(chat_id: int, range_key: str):
         return
     rows, total, area_counts = fetch_qr_stats(range_key)
     label = QR_STATS_RANGE_LABELS.get(range_key, QR_STATS_RANGE_LABELS["all"])
-    lines = [f"📷 QR Statistikası — {label}", ""]
+    separator = "━━━━━━━━━━━━━━━━━━━━"
+    lines = [f"📷 QR Statistikası — {label}", separator, ""]
     area_groups: Dict[str, List[Any]] = {area: [] for area in QR_STATS_AREAS}
     for row in rows:
         area_code = row["join_source"] if "join_source" in row.keys() else row[2]
@@ -15835,15 +15836,12 @@ def send_qr_stats(chat_id: int, range_key: str):
         area_rows = area_groups.get(area_code, [])
         count = area_counts.get(area_code, 0)
         area_label = format_qr_area_label(area_code)
-        if area_rows:
-            lines.append(f"📍 {area_label} ({count} nəfər)")
-        else:
-            lines.append(f"📍 {area_label}")
-        if area_rows:
-            for idx, r in enumerate(area_rows, start=1):
+        lines.append(f"📍 {area_label} — {count} nəfər")
+        if count > 0 and area_rows:
+            for r in area_rows:
                 user_id = r["user_id"] if "user_id" in r.keys() else r[0]
                 username = r["username"] if "username" in r.keys() else r[1]
-                username_display = f"@{username}" if username else "username yoxdur"
+                username_text = username or "username yoxdur"
                 created_value = r["created_at"] if "created_at" in r.keys() else r[3]
                 join_time = str(created_value)
                 try:
@@ -15852,13 +15850,17 @@ def send_qr_stats(chat_id: int, range_key: str):
                     join_time = display_time.strftime("%Y-%m-%d %H:%M")
                 except Exception:
                     pass
-                lines.append(f"{idx}) ID: {user_id} — {username_display}")
-                lines.append(f"   🕒 {join_time}")
+                lines.append(f"ID: {user_id}")
+                lines.append(f"@{username_text}")
+                lines.append(f"🕒 {join_time}")
                 lines.append("")
         else:
-            lines.append("— istifadəçi yoxdur")
+            lines.append("0")
             lines.append("")
-    lines.append(f"👥 Cəmi QR ilə qoşulanlar: {total} nəfər")
+        lines.append(separator)
+        lines.append("")
+    lines.append(f"👥 Cəmi: {total} nəfər")
+    lines.append(separator)
     bot.send_message(chat_id, "\n".join(lines))
 
 
@@ -22462,11 +22464,13 @@ def format_active_user_stats(users):
             profile_url = None
 
         name_text = html.escape(display_name)
+        lines.append(name_text)
         lines.append(
-            "• {name} — ID: <a href=\"tg://user?id={chat_id}\">{chat_id}</a> — 🔍 {count}".format(
-                name=name_text, chat_id=chat_id, count=cnt
+            "ID: <a href=\"tg://user?id={chat_id}\">{chat_id}</a> — 🔍 {count}".format(
+                chat_id=chat_id, count=cnt
             )
         )
+        lines.append("")
 
     return lines, buttons
 
@@ -22683,45 +22687,75 @@ def show_admin_stats(
     rent_total = main_rent + local_rent
     today_new_listings = today_new_main + today_new_local
 
-    lines = [f"📊 BestHome Statistikalar — {period_label}", ""]
-    lines.append("👥 İstifadəçilər")
-    lines.append(f"• Cəmi: {total_users}")
-    lines.append(f"• Aktiv: {active_users}")
-    lines.append(f"• Demo: {demo_users}")
-    lines.append(f"• Vaxtı bitmiş: {expired_users}")
-    lines.append(f"• Bloklanan: {blocked_users}")
-    lines.append(f"• Təsdiqsiz: {pending_users}")
-    lines.append("")
+    separator = "━━━━━━━━━━━━━━━━━━━━"
+    keyword_count = 0
+    narimanov_count = 0
+    absheron_count = 0
+    xetai_count = 0
+    other_count = 0
 
-    lines.append("🏠 Elanlar")
-    lines.append(f"• Ümumi: {total_listings}")
-    lines.append(f"• Satılır: {sale_total}")
-    lines.append(f"• Kirayə: {rent_total}")
-    lines.append(f"📈 Bu gün əlavə olunan: {today_new_listings}")
-    lines.append("")
-
-    lines.append("📍 Rayonlar üzrə axtarışlar")
     if search_stats_available and top_rayons:
-        lines.extend(format_rayon_stats(top_rayons))
-    else:
-        lines.append("• Məlumat yoxdur")
-    lines.append("")
+        for row in top_rayons:
+            try:
+                cnt = int(row["cnt"] or 0)
+            except Exception:
+                cnt = 0
+            try:
+                rn = row["rn"]
+            except Exception:
+                rn = row[0] if len(row) > 0 else ""
+            rn_clean = str(rn or "").strip().lower()
+            if rn_clean in ("", "açar söz", "acar soz"):
+                keyword_count += cnt
+            elif rn_clean in ("nərimanov", "narimanov"):
+                narimanov_count += cnt
+            elif rn_clean in ("abşeron", "absheron"):
+                absheron_count += cnt
+            elif rn_clean in ("xətai", "xetai"):
+                xetai_count += cnt
+            else:
+                other_count += cnt
+    elif search_stats_available:
+        other_count = max(int(period_searches or 0), 0)
 
-    lines.append("🔍 Axtarışlar")
-    if search_stats_available and period_searches > 0:
-        lines.append(f"• Cəmi: {period_searches}")
-    else:
-        lines.append("• Məlumat yoxdur")
-    lines.append("")
-
-    lines.append("⚡ Aktiv istifadəçilər")
+    lines = [
+        f"📊 BestHome Statistikalar — {period_label}",
+        separator,
+        "",
+        "👥 İstifadəçilər",
+        f"Cəmi: {total_users}",
+        f"Aktiv: {active_users}",
+        f"Demo: {demo_users}",
+        f"Vaxtı bitmiş: {expired_users}",
+        f"Bloklanan: {blocked_users}",
+        f"Təsdiqsiz: {pending_users}",
+        "",
+        separator,
+        "🏠 Elanlar",
+        f"Ümumi: {total_listings}",
+        f"Satılır: {sale_total}",
+        f"Kirayə: {rent_total}",
+        f"Bu gün əlavə olunan: {today_new_listings}",
+        "",
+        separator,
+        "📍 Axtarışlar",
+        f"Açar söz: {keyword_count}",
+        f"Nərimanov: {narimanov_count}",
+        f"Abşeron: {absheron_count}",
+        f"Xətai: {xetai_count}",
+        f"Digər: {other_count}",
+        "",
+        separator,
+        "⚡ Aktiv istifadəçilər",
+        separator,
+    ]
     active_user_blocks, profile_buttons = (
         format_active_user_stats(top_users) if search_stats_available else ([], [])
     )
     if search_stats_available and active_user_blocks:
         lines.extend(active_user_blocks)
     else:
-        lines.append("• Məlumat yoxdur")
+        lines.append("Məlumat yoxdur")
 
     text = "\n".join(lines)
     keyboard = stats_period_keyboard(selected_period)
