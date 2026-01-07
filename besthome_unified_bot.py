@@ -290,7 +290,7 @@ def handle_start(message):
             "📌 Ödəniş bölməsindən uyğun paketi seçə bilərsiniz.",
         )
 
-    send_main_menu(chat_id)
+    send_menu_visibility_hint(chat_id)
 
 
 def handle_start_attribution_and_demo(message, start_arg: str):
@@ -5772,9 +5772,8 @@ def send_logo_if_exists(chat_id: int):
         pass
 
 
-MENU_BUTTON = "☰ Menü"
 MENU_REFRESH_BUTTON = "🔄 Botu yenilə"
-MENU_VISIBILITY_HINT_TEXT = "ℹ️ Əsas menyu görünmür?\n" "➡️ /start yazın."
+MENU_VISIBILITY_HINT_TEXT = "ℹ️ Əsas menyu görünmür?\n" "➡️ /menu yazın."
 MENU_VISIBILITY_HINT_COOLDOWN_SECONDS = 300
 menu_visibility_hint_last_sent = {}
 menu_message_state: Dict[int, int] = {}
@@ -5830,15 +5829,6 @@ def send_with_reply_keyboard(
     parse_mode: Optional[str] = None,
     disable_preview: Optional[bool] = None,
 ):
-    try:
-        if getattr(keyboard, "keyboard", None) is not None:
-            has_menu = any(
-                MENU_BUTTON in row for row in getattr(keyboard, "keyboard", [])
-            )
-            if not has_menu:
-                keyboard.row(MENU_BUTTON)
-    except Exception:
-        pass
     bot.send_message(
         chat_id,
         text,
@@ -5940,24 +5930,34 @@ def send_or_edit_menu_message(
     menu_message_state[chat_id] = msg.message_id
 
 
-def show_user_menu(chat_id: int, message: Optional[types.Message] = None):
+def show_user_menu(
+    chat_id: int,
+    message: Optional[types.Message] = None,
+    text: str = "📋 Əsas menyu:",
+):
     set_ui_context(chat_id, UI_CONTEXT_MAIN)
-    send_or_edit_menu_message(chat_id, "📋 Əsas menyu:", build_user_menu_markup(), message)
+    send_or_edit_menu_message(chat_id, text, build_user_menu_markup(), message)
 
 
-def show_admin_menu(chat_id: int, message: Optional[types.Message] = None):
+def show_admin_menu(
+    chat_id: int,
+    message: Optional[types.Message] = None,
+    text: str = "🛠 Admin Panel:",
+):
     if not is_admin(chat_id):
         show_user_menu(chat_id, message)
         return
     set_ui_context(chat_id, UI_CONTEXT_MAIN)
-    send_or_edit_menu_message(chat_id, "🛠 Admin Panel:", build_admin_menu_markup(), message)
+    send_or_edit_menu_message(chat_id, text, build_admin_menu_markup(), message)
 
 
-def show_role_menu(chat_id: int, message: Optional[types.Message] = None):
+def show_role_menu(
+    chat_id: int, message: Optional[types.Message] = None, text: Optional[str] = None
+):
     if is_admin(chat_id):
-        show_admin_menu(chat_id, message)
+        show_admin_menu(chat_id, message, text or "🛠 Admin Panel:")
         return
-    show_user_menu(chat_id, message)
+    show_user_menu(chat_id, message, text or "📋 Əsas menyu:")
 
 
 def build_main_menu(
@@ -5965,14 +5965,8 @@ def build_main_menu(
     is_admin_user: bool,
     has_customer_access: bool = False,
     show_bonus_button: bool = False,
-) -> types.ReplyKeyboardMarkup:
-    kb = types.ReplyKeyboardMarkup(
-        resize_keyboard=True, one_time_keyboard=False, is_persistent=True, row_width=2
-    )
-
-    kb.row(MENU_BUTTON)
-
-    return kb
+) -> types.ReplyKeyboardRemove:
+    return types.ReplyKeyboardRemove()
 
 
 def should_show_bonus_button(chat_id: int) -> bool:
@@ -5997,25 +5991,10 @@ def send_main_menu(
         )
         return
     set_ui_context(chat_id, UI_CONTEXT_MAIN)
-    kb = build_main_menu(
-        chat_id,
-        is_admin(chat_id),
-        has_customer_requests_access(chat_id),
-        should_show_bonus_button(chat_id),
-    )
-    send_with_reply_keyboard(
-        chat_id,
-        text or "🏠 Əsas menyu:",
-        kb,
-        parse_mode=parse_mode,
-        disable_preview=disable_preview,
-    )
+    show_role_menu(chat_id, text=text)
 
-
-@bot.message_handler(func=lambda m: m.text == MENU_BUTTON)
-def open_role_menu_button(message):
-    if message.text and message.text.startswith("/"):
-        return
+@bot.message_handler(commands=["menu"])
+def handle_menu_command(message):
     show_role_menu(message.chat.id)
 
 
@@ -6082,9 +6061,13 @@ def cb_user_menu(c):
         return
     if c.data == "u_invite":
         if not is_user_allowed(chat_id):
-            bot.send_message(
-                chat_id,
+            mk = types.InlineKeyboardMarkup()
+            mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="menu_back"))
+            bot.edit_message_text(
                 "🛑 Botdan istifadə üçün admin təsdiqi tələb olunur.",
+                chat_id,
+                c.message.message_id,
+                reply_markup=mk,
             )
             return
         text = build_referral_text(chat_id)
@@ -15694,8 +15677,7 @@ def send_feature_flags_menu(chat_id: int, message: Optional[types.Message] = Non
         bot.send_message(chat_id, text, reply_markup=mk)
 
 
-@bot.message_handler(func=lambda m: m.text == TEXTS_AZ["admin_panel_button"])
-@bot.message_handler(commands=["admin", "adminpanel"])
+@bot.message_handler(commands=["adminpanel"])
 def open_admin_panel(message):
     if not is_admin(message.chat.id):
         bot.send_message(message.chat.id, "❌ Bu bölməyə yalnız admin daxil ola bilər.")
