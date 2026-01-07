@@ -393,6 +393,8 @@ admin_user_action_state = {}
 admin_message_state = {}
 admin_update_state = {}
 admin_state: Dict[int, str] = {}
+admin_inactive_message_state: Dict[int, Dict[str, Any]] = {}
+admin_inactive_users_cache: Dict[int, List[int]] = {}
 ui_state = defaultdict(list)
 customer_request_rule_state = {}
 keyword_alert_state = {}
@@ -440,6 +442,7 @@ TEXTS_AZ = {
     "admin_panel_customer_requests": "📌 Müştəri istəkləri",
     "admin_panel_financial_reports": "💰 Maliyyə hesabatları",
     "admin_panel_bonus_stats": "📊 Şans Statistikası",
+    "admin_panel_activity_stats": "📊 Aktivlik statistikası",
     "admin_panel_agents_notify": "📢 Vasitəçilərə bildiriş",
     "admin_panel_user_search": "🆔 İstifadəçi ID ilə axtar",
     "admin_panel_users": "👥 İstifadəçilər",
@@ -606,6 +609,7 @@ FINANCIAL_REPORTS_MENU = [
 ADMIN_PAYMENTS_BUTTON = "💳 Ödənişlər"
 ADMIN_PANEL_BUTTONS = [
     TEXTS_AZ["admin_panel_stats"],
+    TEXTS_AZ["admin_panel_activity_stats"],
     "📊 QR Statistikası",
     FINANCIAL_REPORTS_BUTTON,
     ADMIN_PAYMENTS_BUTTON,
@@ -1295,6 +1299,51 @@ def restore_main_db_from_backup(backup_path: Optional[str]):
     shutil.copy2(backup_path, MAIN_DB)
 
 
+def get_inactive_users(days: int = 10) -> List[int]:
+    activity_sources = [
+        ("search_logs", "chat_id", "created_at"),
+        ("keyword_alert_hits", "user_id", "created_at"),
+        ("user_view_logs", "chat_id", "created_at"),
+        ("user_notifications", "chat_id", "created_at"),
+        ("customer_requests", "chat_id", "created_at"),
+        ("saved_searches", "chat_id", "created_at"),
+        ("agent_activity", "chat_id", "last_activity"),
+        ("user_activity", "chat_id", "last_seen"),
+        ("agent_notifications", "agent_chat_id", "created_at"),
+        ("agent_interests", "agent_chat_id", "created_at"),
+    ]
+    cutoff = f"-{int(days)} days"
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT chat_id FROM users")
+            all_ids = {row[0] for row in cur.fetchall() if row and row[0] is not None}
+            active_ids: set = set()
+            for table, id_col, time_col in activity_sources:
+                cols = _table_columns(conn, table)
+                if id_col not in cols or time_col not in cols:
+                    continue
+                try:
+                    cur.execute(
+                        (
+                            f"SELECT DISTINCT {id_col} FROM {table} "
+                            f"WHERE {id_col} IS NOT NULL AND {id_col} != '' "
+                            f"AND {time_col} IS NOT NULL AND {time_col} != '' "
+                            f"AND datetime({time_col}) >= datetime('now', ?)"
+                        ),
+                        (cutoff,),
+                    )
+                    active_ids.update(
+                        row[0] for row in cur.fetchall() if row and row[0] is not None
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to load active users from %s.%s", table, time_col
+                    )
+            return sorted(uid for uid in all_ids if uid not in active_ids)
+    except Exception:
+        logger.exception("Failed to compute inactive users")
+        return []
 def restart_bot_safely(delay: int = 2):
     time.sleep(delay)
     os._exit(0)
@@ -15215,6 +15264,60 @@ def send_agent_card(chat_id, ev):
 # =============== 📊 ADMIN PANEL (MENYU + CALLBACK) ===============
 
 
+def show_admin_activity_stats_menu(
+    chat_id: int, message: Optional[types.Message] = None
+):
+    if not is_admin(chat_id):
+        return
+    mk = types.InlineKeyboardMarkup()
+    mk.row(
+        types.InlineKeyboardButton(
+            "💤 Passiv istifadəçilər (10 gün)",
+            callback_data="adm_activity_inactive_10",
+        )
+    )
+    mk.row(types.InlineKeyboardButton(TEXTS_AZ["admin_back_button"], callback_data="adm_activity_back"))
+    text = TEXTS_AZ["admin_panel_activity_stats"]
+    try:
+        if message:
+            bot.edit_message_text(
+                text, chat_id=chat_id, message_id=message.message_id, reply_markup=mk
+            )
+        else:
+            bot.send_message(chat_id, text, reply_markup=mk)
+    except Exception:
+        bot.send_message(chat_id, text, reply_markup=mk)
+
+
+def show_inactive_users_summary(
+    chat_id: int, days: int = 10, message: Optional[types.Message] = None
+):
+    if not is_admin(chat_id):
+        return
+    inactive_users = get_inactive_users(days=days)
+    admin_inactive_users_cache[chat_id] = inactive_users
+    text = (
+        "🧊 Son 10 gündə aktiv olmayan istifadəçilər\n"
+        f"Tapılan istifadəçi sayı: {len(inactive_users)}"
+    )
+    mk = types.InlineKeyboardMarkup()
+    mk.row(
+        types.InlineKeyboardButton(
+            "📩 Hamısına mesaj göndər", callback_data="adm_inactive_send_all"
+        ),
+        types.InlineKeyboardButton(TEXTS_AZ["admin_back_button"], callback_data="adm_activity_stats"),
+    )
+    try:
+        if message:
+            bot.edit_message_text(
+                text, chat_id=chat_id, message_id=message.message_id, reply_markup=mk
+            )
+        else:
+            bot.send_message(chat_id, text, reply_markup=mk)
+    except Exception:
+        bot.send_message(chat_id, text, reply_markup=mk)
+
+
 def build_admin_panel_keyboard(chat_id: int, page: int = 1):
     buttons = ADMIN_PANEL_BUTTONS
     mk = types.InlineKeyboardMarkup()
@@ -15311,6 +15414,8 @@ def _handle_admin_panel_action(chat_id: int, action_text: str):
         show_admin_stats(chat_id)
     elif action_text == TEXTS_AZ["admin_panel_bonus_stats"]:
         show_bonus_stats(chat_id)
+    elif action_text == TEXTS_AZ["admin_panel_activity_stats"]:
+        show_admin_activity_stats_menu(chat_id)
     elif action_text == TEXTS_AZ["admin_panel_customer_requests"]:
         show_customer_requests_overview(chat_id, "day")
     elif action_text == "📊 QR Statistikası":
@@ -15371,6 +15476,45 @@ def cb_admin_panel(c):
             _handle_admin_panel_action(chat_id, action_text)
 
 
+@bot.callback_query_handler(
+    func=lambda c: c.data
+    in {
+        "adm_activity_back",
+        "adm_activity_stats",
+        "adm_activity_inactive_10",
+        "adm_inactive_send_all",
+    }
+)
+@callback_guard
+def cb_admin_activity_stats(c):
+    chat_id = c.message.chat.id
+    if not is_admin(chat_id):
+        return
+    if c.data == "adm_activity_back":
+        send_admin_panel(chat_id, page=admin_panel_page_state.get(chat_id, 1))
+        return
+    if c.data == "adm_activity_stats":
+        show_admin_activity_stats_menu(chat_id, message=c.message)
+        return
+    if c.data == "adm_activity_inactive_10":
+        show_inactive_users_summary(chat_id, days=10, message=c.message)
+        return
+    if c.data == "adm_inactive_send_all":
+        inactive_users = admin_inactive_users_cache.get(chat_id) or get_inactive_users(
+            days=10
+        )
+        if not inactive_users:
+            safe_admin_step(chat_id, "⚠️ Aktiv olmayan istifadəçi tapılmadı.")
+            show_admin_activity_stats_menu(chat_id)
+            return
+        admin_inactive_message_state[chat_id] = {
+            "awaiting": True,
+            "user_ids": inactive_users,
+            "days": 10,
+        }
+        bot.send_message(chat_id, "✍️ Göndərmək istədiyiniz mətni yazın:")
+
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith("featflag:"))
 @callback_guard
 def cb_feature_flag_toggle(c):
@@ -15386,6 +15530,33 @@ def cb_feature_flag_toggle(c):
     current_state = get_feature_state_for_scope(key, scope_users)
     set_feature_flag_state(key, not current_state, user_ids=scope_users)
     send_feature_flags_menu(chat_id, message=c.message)
+
+
+@bot.message_handler(
+    func=lambda m: admin_inactive_message_state.get(m.chat.id, {}).get("awaiting")
+)
+def admin_inactive_bulk_message_input(message):
+    chat_id = message.chat.id
+    if not is_admin(chat_id):
+        admin_inactive_message_state.pop(chat_id, None)
+        return
+    state = admin_inactive_message_state.pop(chat_id, {})
+    user_ids = state.get("user_ids") or []
+    text = (message.text or "").strip()
+    if not text:
+        bot.send_message(chat_id, "⚠️ Mesaj boş ola bilməz.")
+        show_admin_activity_stats_menu(chat_id)
+        return
+    sent = 0
+    failed = 0
+    for uid in user_ids:
+        try:
+            bot.send_message(uid, text)
+            sent += 1
+        except Exception as exc:
+            failed += 1
+            mark_user_delivery_failure(uid, str(exc))
+    bot.send_message(chat_id, f"✅ Göndərildi: {sent}\n❌ Çatmadı: {failed}")
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("bonusprob:"))
@@ -21220,6 +21391,8 @@ def handle_bot_refresh(message):
     admin_direct_message_state.pop(chat_id, None)
     admin_user_message_state.pop(chat_id, None)
     admin_message_state.pop(chat_id, None)
+    admin_inactive_message_state.pop(chat_id, None)
+    admin_inactive_users_cache.pop(chat_id, None)
     admin_panel_page_state.pop(chat_id, None)
     admin_user_page_state.pop(chat_id, None)
     admin_navigation_state.pop(chat_id, None)
