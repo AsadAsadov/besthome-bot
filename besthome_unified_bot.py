@@ -24,6 +24,7 @@ import logging
 import json
 import hashlib
 import glob
+import uuid
 from datetime import datetime, date, timedelta, timezone
 from collections import Counter, defaultdict
 from functools import wraps
@@ -172,6 +173,13 @@ DATA_DIR = BASE_DATA_DIR
 MAIN_DB = os.path.join(BASE_DATA_DIR, "besthome.db")
 LOCAL_DB = os.path.join(BASE_DATA_DIR, "local_data.db")
 AGENTS_DB = os.path.join(BASE_DATA_DIR, "agents.db")
+SUPPORT_SESSIONS_PATH = os.path.join(BASE_DATA_DIR, "support_sessions.json")
+
+SUPPORT_SESSION_STATUS_OPEN = "open"
+SUPPORT_SESSION_STATUS_CLOSED = "closed"
+
+support_sessions_lock = threading.Lock()
+support_admin_state: Dict[int, Dict[str, Optional[str]]] = {}
 
 
 def _load_bot_token():
@@ -471,6 +479,7 @@ TEXTS_AZ = {
     "admin_panel_direct_message": "📨 İstifadəçiyə mesaj göndər",
     "admin_panel_customer_requests_access": "📌 Müştəri istəkləri icazəsi",
     "admin_panel_archived_requests": "🗄 Arxivlənmiş müştəri istəkləri",
+    "admin_panel_support_chats": "💬 Ödəniş çatları",
     "financial_reports_back": "⬅️ Geri (Admin Panel)",
     "financial_reports_history": "📜 Ödəniş tarixçəsi",
     "financial_reports_referral": "🤝 Referral statistikası",
@@ -627,6 +636,7 @@ ADMIN_PANEL_BUTTONS = [
     TEXTS_AZ["admin_panel_stats"],
     FINANCIAL_REPORTS_BUTTON,
     ADMIN_PAYMENTS_BUTTON,
+    TEXTS_AZ["admin_panel_support_chats"],
     TEXTS_AZ["admin_panel_agents_notify"],
     TEXTS_AZ["admin_panel_user_search"],
     TEXTS_AZ["admin_panel_users"],
@@ -1118,6 +1128,126 @@ def save_last_update_max_id(max_id: int) -> None:
     data["last_max_id"] = int(max_id)
     data["updated_at"] = now_utc().isoformat()
     _save_db_update_state_file(data)
+
+
+def _load_support_sessions_file() -> Dict[str, Any]:
+    if not os.path.exists(SUPPORT_SESSIONS_PATH):
+        return {"sessions": {}}
+    try:
+        with open(SUPPORT_SESSIONS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if not isinstance(data, dict):
+                return {"sessions": {}}
+            sessions = data.get("sessions")
+            if not isinstance(sessions, dict):
+                data["sessions"] = {}
+            return data
+    except Exception:
+        logger.exception("Failed to read support sessions file")
+        return {"sessions": {}}
+
+
+def _save_support_sessions_file(data: Dict[str, Any]) -> None:
+    try:
+        with open(SUPPORT_SESSIONS_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception:
+        logger.exception("Failed to write support sessions file")
+
+
+def _build_support_display_name(
+    user_id: int, fallback_name: Optional[str] = None
+) -> str:
+    record = get_user_record(user_id) or {}
+    name = record.get("full_name") or record.get("name") or record.get("username")
+    if not name and fallback_name:
+        name = fallback_name
+    return name or f"User {user_id}"
+
+
+def get_support_session_by_user(
+    user_id: int, status: str = SUPPORT_SESSION_STATUS_OPEN
+) -> Optional[dict]:
+    with support_sessions_lock:
+        data = _load_support_sessions_file()
+        for session in data.get("sessions", {}).values():
+            if (
+                session.get("user_id") == user_id
+                and session.get("status") == status
+            ):
+                return session
+    return None
+
+
+def get_support_session(session_id: str) -> Optional[dict]:
+    with support_sessions_lock:
+        data = _load_support_sessions_file()
+        return data.get("sessions", {}).get(session_id)
+
+
+def save_support_session(session: dict) -> None:
+    session_id = session.get("session_id")
+    if not session_id:
+        return
+    with support_sessions_lock:
+        data = _load_support_sessions_file()
+        data.setdefault("sessions", {})[session_id] = session
+        _save_support_sessions_file(data)
+
+
+def create_or_get_support_session(
+    user_id: int, fallback_name: Optional[str] = None
+) -> dict:
+    existing = get_support_session_by_user(user_id)
+    if existing:
+        display_name = _build_support_display_name(user_id, fallback_name)
+        if display_name and existing.get("display_name") != display_name:
+            existing["display_name"] = display_name
+            save_support_session(existing)
+        return existing
+    session_id = uuid.uuid4().hex
+    created_at = now_utc().isoformat()
+    session = {
+        "session_id": session_id,
+        "user_id": user_id,
+        "status": SUPPORT_SESSION_STATUS_OPEN,
+        "created_at": created_at,
+        "last_message_at": created_at,
+        "display_name": _build_support_display_name(user_id, fallback_name),
+    }
+    save_support_session(session)
+    return session
+
+
+def touch_support_session(session_id: str) -> None:
+    session = get_support_session(session_id)
+    if not session:
+        return
+    session["last_message_at"] = now_utc().isoformat()
+    save_support_session(session)
+
+
+def close_support_session(session_id: str) -> Optional[dict]:
+    session = get_support_session(session_id)
+    if not session:
+        return None
+    session["status"] = SUPPORT_SESSION_STATUS_CLOSED
+    session["last_message_at"] = now_utc().isoformat()
+    save_support_session(session)
+    return session
+
+
+def list_support_sessions(status: Optional[str] = None) -> List[dict]:
+    with support_sessions_lock:
+        data = _load_support_sessions_file()
+        sessions = list(data.get("sessions", {}).values())
+    if status:
+        sessions = [session for session in sessions if session.get("status") == status]
+    sessions.sort(
+        key=lambda entry: entry.get("last_message_at") or entry.get("created_at") or "",
+        reverse=True,
+    )
+    return sessions
 
 
 def load_last_dropbox_url() -> Optional[str]:
@@ -4545,6 +4675,11 @@ def build_payment_action_markup(
     mk = types.InlineKeyboardMarkup(row_width=1)
     if include_card_button:
         mk.add(build_card_payment_button(plan_key))
+    mk.add(
+        types.InlineKeyboardButton(
+            "💳 Ödəniş etmək istəyirəm", callback_data="supportchat:start"
+        )
+    )
     mk.add(types.InlineKeyboardButton("📲 WhatsApp-da yaz", url=whatsapp_url))
     mk.add(types.InlineKeyboardButton("✈️ Telegram-da yaz", url=telegram_url))
     mk.add(types.InlineKeyboardButton("✅ Ödəniş etdim", callback_data=f"paydone|{plan_key}"))
@@ -4582,6 +4717,83 @@ def send_payment_menu(chat_id: int):
         "✅ Demo bitibsə, yeniləmək üçün plan seçin.",
         reply_markup=mk,
     )
+
+
+def is_support_session_open_for_user(user_id: int) -> bool:
+    return bool(get_support_session_by_user(user_id, SUPPORT_SESSION_STATUS_OPEN))
+
+
+def has_closed_support_session_for_user(user_id: int) -> bool:
+    return bool(get_support_session_by_user(user_id, SUPPORT_SESSION_STATUS_CLOSED))
+
+
+def get_support_admin_active_session_id(admin_id: int) -> Optional[str]:
+    return support_admin_state.get(admin_id, {}).get("active_session_id")
+
+
+def start_support_session(
+    user_id: int, fallback_name: Optional[str] = None
+) -> dict:
+    return create_or_get_support_session(user_id, fallback_name=fallback_name)
+
+
+def notify_admins_new_support_session(session: dict) -> None:
+    name = session.get("display_name") or f"User {session.get('user_id')}"
+    text = (
+        "🆕 Yeni ödəniş çat sorğusu\n"
+        f"👤 {name}\n"
+        f"ID: {session.get('user_id')}\n"
+        f"Sessiya: {session.get('session_id')}"
+    )
+    for admin_id in ADMIN_IDS:
+        bot.send_message(admin_id, text)
+
+
+def notify_admins_support_incoming(session: dict, message: types.Message) -> None:
+    sender_name = session.get("display_name") or f"User {session.get('user_id')}"
+    header = (
+        f"📩 Yeni mesaj — {sender_name}\n"
+        f"ID: {session.get('user_id')}\n"
+        f"Sessiya: {session.get('session_id')}"
+    )
+    for admin_id in ADMIN_IDS:
+        if message.content_type == "text":
+            bot.send_message(admin_id, f"{header}\n\n{message.text}")
+        elif message.content_type == "voice":
+            bot.send_message(admin_id, header)
+            bot.send_voice(admin_id, message.voice.file_id)
+        elif message.content_type == "document":
+            bot.send_message(admin_id, header)
+            bot.send_document(admin_id, message.document.file_id)
+        elif message.content_type == "photo":
+            bot.send_message(admin_id, header)
+            bot.send_photo(admin_id, message.photo[-1].file_id)
+        elif message.content_type == "audio":
+            bot.send_message(admin_id, header)
+            bot.send_audio(admin_id, message.audio.file_id)
+        elif message.content_type == "video":
+            bot.send_message(admin_id, header)
+            bot.send_video(admin_id, message.video.file_id)
+
+
+def send_support_message_to_user_from_admin(
+    admin_message: types.Message, session: dict
+) -> None:
+    user_id = session.get("user_id")
+    if not user_id:
+        return
+    if admin_message.content_type == "text":
+        bot.send_message(user_id, admin_message.text)
+    elif admin_message.content_type == "voice":
+        bot.send_voice(user_id, admin_message.voice.file_id)
+    elif admin_message.content_type == "document":
+        bot.send_document(user_id, admin_message.document.file_id)
+    elif admin_message.content_type == "photo":
+        bot.send_photo(user_id, admin_message.photo[-1].file_id)
+    elif admin_message.content_type == "audio":
+        bot.send_audio(user_id, admin_message.audio.file_id)
+    elif admin_message.content_type == "video":
+        bot.send_video(user_id, admin_message.video.file_id)
 
 
 def send_blocked_prompt(chat_id: int):
@@ -6017,6 +6229,7 @@ def build_main_menu(
         buttons.append("💳 Ödəniş")
 
     if not is_admin_user:
+        buttons.append("💬 Adminlə əlaqə")
         buttons.append("🤝 Dostunu dəvət et")
 
     if is_feature_enabled("about", chat_id):
@@ -8277,6 +8490,31 @@ def payment_menu_entry(message):
     send_payment_menu(message.chat.id)
 
 
+@bot.message_handler(func=lambda m: m.text == "💬 Adminlə əlaqə")
+def open_support_chat_from_menu(message):
+    if message.text and message.text.startswith("/"):
+        return
+    if is_admin(message.chat.id):
+        return
+    reset_user_state(message.chat.id)
+    existing_session = get_support_session_by_user(
+        message.chat.id, SUPPORT_SESSION_STATUS_OPEN
+    )
+    session = start_support_session(
+        message.chat.id,
+        fallback_name=(
+            f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}"
+        ).strip()
+        or message.from_user.username,
+    )
+    if not existing_session:
+        notify_admins_new_support_session(session)
+    bot.send_message(
+        message.chat.id,
+        "📩 Sorğunuz adminə göndərildi. Buradan yaza bilərsiniz.",
+    )
+
+
 @bot.callback_query_handler(func=lambda c: c.data == "open_pay_menu")
 @callback_guard
 def cb_open_pay_menu(c):
@@ -8317,6 +8555,33 @@ def cb_paytype_manual(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "supportchat:start")
+@callback_guard
+def cb_supportchat_start(c):
+    if is_admin(c.from_user.id):
+        safe_answer_callback_query(c.id)
+        return
+    chat_id = c.message.chat.id
+    reset_user_state(chat_id)
+    existing_session = get_support_session_by_user(
+        chat_id, SUPPORT_SESSION_STATUS_OPEN
+    )
+    session = start_support_session(
+        chat_id,
+        fallback_name=(
+            f"{c.from_user.first_name or ''} {c.from_user.last_name or ''}"
+        ).strip()
+        or c.from_user.username,
+    )
+    if not existing_session:
+        notify_admins_new_support_session(session)
+    bot.send_message(
+        chat_id,
+        "📩 Sorğunuz adminə göndərildi. Buradan yaza bilərsiniz.",
+    )
+    safe_answer_callback_query(c.id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "payinfo")
@@ -9846,6 +10111,7 @@ def return_to_main_menu(chat_id: int):
     search_state.pop(chat_id, None)
     admin_panel_page_state.pop(chat_id, None)
     admin_state.pop(chat_id, None)
+    support_admin_state.pop(chat_id, None)
     reset_user_state(chat_id)
     set_user_state(chat_id, "MAIN")
     set_ui_context(chat_id, UI_CONTEXT_MAIN)
@@ -15502,6 +15768,100 @@ def show_inactive_users_summary(
         bot.send_message(chat_id, text, reply_markup=mk)
 
 
+def _format_support_session_label(session: dict) -> str:
+    name = session.get("display_name") or f"User {session.get('user_id')}"
+    return f"{name} — ID {session.get('user_id')}"
+
+
+def build_support_sessions_list_markup() -> types.InlineKeyboardMarkup:
+    mk = types.InlineKeyboardMarkup(row_width=1)
+    sessions = list_support_sessions(status=SUPPORT_SESSION_STATUS_OPEN)
+    for session in sessions:
+        label = _format_support_session_label(session)
+        mk.add(
+            types.InlineKeyboardButton(
+                label, callback_data=f"supportchat:open:{session['session_id']}"
+            )
+        )
+    mk.add(
+        types.InlineKeyboardButton(ADMIN_PANEL_BACK_MAIN, callback_data="adm_back:main")
+    )
+    return mk
+
+
+def build_support_chat_view_markup(session_id: str) -> types.InlineKeyboardMarkup:
+    mk = types.InlineKeyboardMarkup(row_width=2)
+    mk.add(
+        types.InlineKeyboardButton("⬅️ Geri", callback_data="supportchat:list"),
+        types.InlineKeyboardButton(
+            "❌ Çatı bağla", callback_data=f"supportchat:close:{session_id}"
+        ),
+    )
+    return mk
+
+
+def format_support_sessions_text() -> str:
+    sessions = list_support_sessions(status=SUPPORT_SESSION_STATUS_OPEN)
+    if not sessions:
+        return "📩 Açıq sorğular\n────────────────────\n❌ Açıq sorğu yoxdur."
+    lines = ["📩 Açıq sorğular", "────────────────────"]
+    for session in sessions:
+        lines.append(f"• {_format_support_session_label(session)}")
+    return "\n".join(lines)
+
+
+def format_support_chat_header(session: dict) -> str:
+    name = session.get("display_name") or f"User {session.get('user_id')}"
+    status = (session.get("status") or SUPPORT_SESSION_STATUS_OPEN).upper()
+    return f"💬 Çat — {name}\nID: {session.get('user_id')}\nStatus: {status}"
+
+
+def show_support_sessions_list(chat_id: int, message: Optional[types.Message] = None):
+    text = format_support_sessions_text()
+    mk = build_support_sessions_list_markup()
+    if message:
+        try:
+            bot.edit_message_text(
+                text, chat_id=chat_id, message_id=message.message_id, reply_markup=mk
+            )
+            support_admin_state[chat_id] = {
+                "active_session_id": None,
+                "message_id": str(message.message_id),
+            }
+            return
+        except Exception:
+            logger.exception("Failed to edit support sessions list")
+    sent = bot.send_message(chat_id, text, reply_markup=mk)
+    support_admin_state[chat_id] = {
+        "active_session_id": None,
+        "message_id": str(sent.message_id),
+    }
+
+
+def show_support_chat_view(
+    chat_id: int, session: dict, message: Optional[types.Message] = None
+):
+    text = format_support_chat_header(session)
+    mk = build_support_chat_view_markup(session["session_id"])
+    if message:
+        try:
+            bot.edit_message_text(
+                text, chat_id=chat_id, message_id=message.message_id, reply_markup=mk
+            )
+            support_admin_state[chat_id] = {
+                "active_session_id": session["session_id"],
+                "message_id": str(message.message_id),
+            }
+            return
+        except Exception:
+            logger.exception("Failed to edit support chat view")
+    sent = bot.send_message(chat_id, text, reply_markup=mk)
+    support_admin_state[chat_id] = {
+        "active_session_id": session["session_id"],
+        "message_id": str(sent.message_id),
+    }
+
+
 def build_admin_panel_keyboard(chat_id: int, page: int = 1):
     buttons = ADMIN_PANEL_BUTTONS
     mk = types.InlineKeyboardMarkup()
@@ -15585,7 +15945,9 @@ def open_admin_panel(message):
     send_admin_panel(message.chat.id, page=1)
 
 
-def _handle_admin_panel_action(chat_id: int, action_text: str):
+def _handle_admin_panel_action(
+    chat_id: int, action_text: str, message: Optional[types.Message] = None
+):
     if action_text in {
         TEXTS_AZ["admin_panel_customer_requests"],
         TEXTS_AZ["admin_panel_customer_requests_access"],
@@ -15632,6 +15994,8 @@ def _handle_admin_panel_action(chat_id: int, action_text: str):
         )
     elif action_text == TEXTS_AZ["admin_panel_direct_message"]:
         start_direct_user_message_flow(chat_id)
+    elif action_text == TEXTS_AZ["admin_panel_support_chats"]:
+        show_support_sessions_list(chat_id, message=message)
     elif action_text == TEXTS_AZ["admin_panel_customer_requests_access"]:
         show_customer_requests_access_admin(chat_id)
     elif action_text == TEXTS_AZ["admin_panel_archived_requests"]:
@@ -15721,7 +16085,46 @@ def cb_admin_panel(c):
         action_key = c.data.split(":", 1)[1]
         action_text = ADMIN_PANEL_ACTION_LOOKUP.get(action_key)
         if action_text:
-            _handle_admin_panel_action(chat_id, action_text)
+            _handle_admin_panel_action(chat_id, action_text, message=c.message)
+
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("supportchat:"))
+@callback_guard
+def cb_support_chat_admin(c):
+    action = c.data.split(":", 2)[1] if c.data else ""
+    if action == "start":
+        return
+    chat_id = c.message.chat.id
+    if not is_admin(c.from_user.id):
+        safe_answer_callback_query(c.id)
+        return_to_main_menu(chat_id)
+        return
+    if action == "list":
+        show_support_sessions_list(chat_id, message=c.message)
+        safe_answer_callback_query(c.id)
+        return
+    if action == "open":
+        session_id = c.data.split(":", 2)[2]
+        session = get_support_session(session_id)
+        if not session or session.get("status") != SUPPORT_SESSION_STATUS_OPEN:
+            show_support_sessions_list(chat_id, message=c.message)
+            safe_answer_callback_query(c.id)
+            return
+        show_support_chat_view(chat_id, session, message=c.message)
+        safe_answer_callback_query(c.id)
+        return
+    if action == "close":
+        session_id = c.data.split(":", 2)[2]
+        session = close_support_session(session_id)
+        if session and session.get("user_id"):
+            bot.send_message(
+                session["user_id"],
+                "❌ Çat bağlandı. Yeni sorğu üçün 💬 Adminlə əlaqə seçin.",
+            )
+        show_support_sessions_list(chat_id, message=c.message)
+        safe_answer_callback_query(c.id)
+        return
+    safe_answer_callback_query(c.id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "a_lastlink_refresh")
@@ -23482,6 +23885,50 @@ def admin_search_handler(message):
         )
 
 
+@bot.message_handler(
+    content_types=["text", "voice", "document", "photo", "audio", "video"],
+    func=lambda m: not is_admin(m.chat.id) and is_support_session_open_for_user(m.chat.id),
+)
+def support_user_message_router(message):
+    if message.content_type == "text" and message.text and message.text.startswith("/"):
+        return
+    session = get_support_session_by_user(message.chat.id, SUPPORT_SESSION_STATUS_OPEN)
+    if not session:
+        return
+    display_name = (
+        f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}"
+    ).strip() or message.from_user.username
+    if display_name and session.get("display_name") != display_name:
+        session["display_name"] = display_name
+        save_support_session(session)
+    touch_support_session(session["session_id"])
+    notify_admins_support_incoming(session, message)
+
+
+@bot.message_handler(
+    content_types=["text", "voice", "document", "photo", "audio", "video"],
+    func=lambda m: is_admin(m.chat.id) and get_support_admin_active_session_id(m.chat.id),
+)
+def support_admin_message_router(message):
+    if message.content_type == "text" and message.text and message.text.startswith("/"):
+        return
+    session_id = get_support_admin_active_session_id(message.chat.id)
+    if not session_id:
+        return
+    session = get_support_session(session_id)
+    if not session or session.get("status") != SUPPORT_SESSION_STATUS_OPEN:
+        support_admin_state[message.chat.id] = {
+            "active_session_id": None,
+            "message_id": support_admin_state.get(message.chat.id, {}).get("message_id"),
+        }
+        bot.send_message(
+            message.chat.id, "❌ Aktiv sessiya tapılmadı. Siyahıdan seçin."
+        )
+        return
+    touch_support_session(session_id)
+    send_support_message_to_user_from_admin(message, session)
+
+
 def has_active_text_flow(chat_id: int) -> bool:
     flow_states = [
         user_state,
@@ -23514,11 +23961,26 @@ def has_active_text_flow(chat_id: int) -> bool:
     return False
 
 
+def has_active_support_session(chat_id: int) -> bool:
+    if is_admin(chat_id):
+        return bool(get_support_admin_active_session_id(chat_id))
+    return is_support_session_open_for_user(chat_id)
+
+
 @bot.message_handler(content_types=["text"])
 def guard_idle_messages(message):
     if message.text and message.text.startswith("/"):
         return
+    if has_active_support_session(message.chat.id):
+        return
     if has_active_text_flow(message.chat.id):
+        return
+    if not is_admin(message.chat.id) and has_closed_support_session_for_user(
+        message.chat.id
+    ):
+        bot.send_message(
+            message.chat.id, "❌ Çat bağlanıb. Yeni sorğu üçün 💬 Adminlə əlaqə seçin."
+        )
         return
     bot.send_message(
         message.chat.id,
