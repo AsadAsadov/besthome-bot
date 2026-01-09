@@ -297,7 +297,15 @@ def handle_start(message):
             "📌 Ödəniş bölməsindən uyğun paketi seçə bilərsiniz.",
         )
 
+    reset_user_state(chat_id)
     send_main_menu(chat_id)
+
+
+@bot.message_handler(commands=["menu"])
+def handle_menu(message):
+    chat_id = message.chat.id
+    reset_user_state(chat_id)
+    send_main_menu(chat_id, "📋 Əsas menyudan seçim et:", force=True)
 
 
 def handle_start_attribution_and_demo(message, start_arg: str):
@@ -2709,22 +2717,9 @@ def is_admin(chat_id: int) -> bool:
         return False
 
     try:
-        if cid in set(int(x) for x in ADMIN_IDS):
-            return True
+        return cid in set(int(x) for x in ADMIN_IDS)
     except Exception:
         return False
-
-    try:
-        conn = get_local_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT is_admin FROM users WHERE chat_id=?", (cid,))
-        row = cur.fetchone()
-        conn.close()
-        if row and (row[0] == 1 or row[0] == "1"):
-            return True
-    except Exception:
-        logger.exception("Admin check failed for chat_id=%s", chat_id)
-    return False
 
 
 def format_price(v) -> str:
@@ -4665,6 +4660,20 @@ def inc_limit(chat_id: int, key_type: str, inc: int = 1):
 def reset_user_state(chat_id: int):
     user_state.pop(chat_id, None)
     clear_user_state(chat_id)
+    customer_request_state.pop(chat_id, None)
+    agent_request_lookup_state.pop(chat_id, None)
+    admin_customer_request_state.pop(chat_id, None)
+    customer_request_rule_state.pop(chat_id, None)
+    keyword_alert_state.pop(chat_id, None)
+    notification_rule_state.pop(chat_id, None)
+    complaint_flow_state.pop(chat_id, None)
+    admin_reply_state.pop(chat_id, None)
+    admin_direct_message_state.pop(chat_id, None)
+    admin_user_message_state.pop(chat_id, None)
+    admin_user_extend_state.pop(chat_id, None)
+    admin_user_action_state.pop(chat_id, None)
+    admin_message_state.pop(chat_id, None)
+    admin_update_state.pop(chat_id, None)
 
 
 def reset_search_state(chat_id: int):
@@ -4767,6 +4776,14 @@ def detect_user_listings_table(conn) -> Optional[str]:
 def detect_table_date_column(cur, table: str) -> Optional[str]:
     cols = get_table_columns(cur, table)
     for key in ("inserted_at", "created_at", "date_added", "date_read", "added_at"):
+        if key in cols:
+            return cols[key]
+    return None
+
+
+def detect_created_at_column(cur, table: str) -> Optional[str]:
+    cols = get_table_columns(cur, table)
+    for key in ("created_at",):
         if key in cols:
             return cols[key]
     return None
@@ -5066,7 +5083,7 @@ def count_main_active_listings(
         flt, params = build_filters_sql(op_code, prop_code, None, mode="main")
         date_sql, date_params = ("", [])
         if only_today:
-            date_col = detect_table_date_column(cur, "listings")
+            date_col = detect_created_at_column(cur, "listings")
             if date_col:
                 window = get_last_24h_window()
                 date_sql, date_params = build_today_clause(f"l.{date_col}", window)
@@ -5095,7 +5112,7 @@ def count_local_active_listings(
         flt, params = build_filters_sql(op_code, prop_code, None, mode="local")
         date_sql, date_params = ("", [])
         if only_today:
-            date_col = detect_table_date_column(cur, "listings_approved")
+            date_col = detect_created_at_column(cur, "listings_approved")
             if date_col:
                 window = get_last_24h_window()
                 date_sql, date_params = build_today_clause(f"l.{date_col}", window)
@@ -8155,7 +8172,7 @@ def send_user_statistics(chat_id: int, period_key: str, message_id: Optional[int
     user_stats_filter[chat_id] = selected
     base_stats = compute_user_statistics("all")
     period_stats = compute_user_statistics(selected)
-    is_admin = chat_id in set(int(x) for x in ADMIN_IDS)
+    is_admin = is_admin(chat_id)
     text = format_stats_text(base_stats, period_stats, selected, is_admin=is_admin)
     keyboard = build_user_stats_keyboard(selected)
 
@@ -9332,7 +9349,8 @@ def show_top_viewed(message):
         return
 
     if not is_admin(message.chat.id):
-        bot.send_message(message.chat.id, "❌ Bu bölmə yalnız admin üçündür.")
+        reset_user_state(message.chat.id)
+        return_to_main_menu(message.chat.id)
         return
     chat_id = message.chat.id
     reset_search_state(chat_id)
@@ -9828,6 +9846,7 @@ def return_to_main_menu(chat_id: int):
     search_state.pop(chat_id, None)
     admin_panel_page_state.pop(chat_id, None)
     admin_state.pop(chat_id, None)
+    reset_user_state(chat_id)
     set_user_state(chat_id, "MAIN")
     set_ui_context(chat_id, UI_CONTEXT_MAIN)
     if is_admin(chat_id):
@@ -13440,7 +13459,7 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
         cur = conn.cursor()
         base = "SELECT * FROM listings"
         flt, params = build_filters_sql(op_code, prop_code, None, mode="main")
-        date_col = detect_table_date_column(cur, "listings")
+        date_col = detect_created_at_column(cur, "listings")
         date_sql, date_params = build_today_clause(date_col, window)
         rayon_sql, rayon_params = build_rayon_filter_sql(
             cur, "listings", filters.get("rayon"), ""
@@ -13466,7 +13485,7 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
     cur = conn.cursor()
     base = "SELECT * FROM listings_approved"
     flt, params = build_filters_sql(op_code, prop_code, None, mode="local")
-    date_col = detect_table_date_column(cur, "listings_approved")
+    date_col = detect_created_at_column(cur, "listings_approved")
     date_sql, date_params = build_today_clause(date_col, window)
     rayon_sql, rayon_params = build_rayon_filter_sql(
         cur, "listings_approved", filters.get("rayon"), ""
@@ -14355,10 +14374,10 @@ def send_paginated_results(
     }:
         set_ui_context(chat_id, UI_CONTEXT_SEARCH)
     if mode == "topviews" and not is_admin(chat_id):
-        if not replace_loading_message(
-            loading_ref, "❌ Bu bölmə yalnız admin üçündür."
-        ):
-            bot.send_message(chat_id, "❌ Bu bölmə yalnız admin üçündür.")
+        reset_user_state(chat_id)
+        if loading_ref:
+            replace_loading_message(loading_ref, "🏠 Əsas menyu")
+        return_to_main_menu(chat_id)
         return
     items, total = fetch_all_results(chat_id, mode, params)
     if mode == "today":
@@ -14462,6 +14481,7 @@ def cb_listing_nav(c):
     deltas = {"next": 1, "prev": -1, "+5": 5, "-5": -5}
     if action == "home":
         session["timestamp"] = time.time()
+        reset_user_state(chat_id)
         send_main_menu(chat_id, "🏠 Əsas menyu", force=True)
         try:
             bot.answer_callback_query(c.id, "Əsas menyu")
@@ -15557,9 +15577,11 @@ def send_feature_flags_menu(chat_id: int, message: Optional[types.Message] = Non
 @bot.message_handler(commands=["admin"])
 def open_admin_panel(message):
     if not is_admin(message.chat.id):
-        bot.send_message(message.chat.id, "❌ Bu bölməyə yalnız admin daxil ola bilər.")
+        reset_user_state(message.chat.id)
+        return_to_main_menu(message.chat.id)
         return
 
+    reset_user_state(message.chat.id)
     send_admin_panel(message.chat.id, page=1)
 
 
@@ -15683,6 +15705,8 @@ def auto_update_db_cmd(m):
 @callback_guard
 def cb_admin_panel(c):
     if not is_admin(c.from_user.id):
+        safe_answer_callback_query(c.id)
+        return_to_main_menu(c.message.chat.id)
         return
     chat_id = c.message.chat.id
     if c.data == "admin_qr_stats":
@@ -15705,7 +15729,7 @@ def cb_admin_panel(c):
 def cb_admin_lastlink_refresh(c):
     chat_id = c.message.chat.id
     if not is_admin(c.from_user.id):
-        safe_answer_callback_query(c.id, "❌ Yalnız adminlər üçün.")
+        safe_answer_callback_query(c.id)
         return_to_main_menu(chat_id)
         return
     history = load_dropbox_url_history()
@@ -15753,7 +15777,7 @@ def cb_admin_lastlink_refresh(c):
 def cb_admin_run_lastlink(c):
     chat_id = c.message.chat.id
     if not is_admin(c.from_user.id):
-        safe_answer_callback_query(c.id, "❌ Yalnız adminlər üçün.")
+        safe_answer_callback_query(c.id)
         return_to_main_menu(chat_id)
         return
     history = load_dropbox_url_history()
@@ -15782,6 +15806,7 @@ def cb_admin_run_lastlink(c):
 @callback_guard
 def cb_admin_stats_menu(c):
     if not is_admin(c.from_user.id):
+        return_to_main_menu(c.message.chat.id)
         return
     chat_id = c.message.chat.id
     action = c.data.split(":", 1)[1]
@@ -15816,6 +15841,7 @@ def cb_admin_stats_menu(c):
 def cb_admin_activity_stats(c):
     chat_id = c.message.chat.id
     if not is_admin(chat_id):
+        return_to_main_menu(chat_id)
         return
     if c.data == "adm_activity_back":
         send_admin_panel(chat_id, page=admin_panel_page_state.get(chat_id, 1))
@@ -22732,7 +22758,7 @@ def show_admin_stats(
         return None
 
     def detect_date_column(cur, table: str) -> Optional[str]:
-        return detect_table_date_column(cur, table)
+        return detect_created_at_column(cur, table)
 
     def count_today_new(cur, table: str) -> int:
         col = detect_date_column(cur, table)
@@ -22973,10 +22999,8 @@ def handle_stats_period_callback(c):
 
     chat_id = c.message.chat.id if c.message else c.from_user.id
     if not is_admin(chat_id):
-        try:
-            bot.answer_callback_query(c.id, "❌ Yalnız adminlər üçün.")
-        except Exception:
-            pass
+        safe_answer_callback_query(c.id)
+        return_to_main_menu(chat_id)
         return
 
     admin_stats_period[chat_id] = period
@@ -23000,10 +23024,8 @@ def handle_bonus_stats_period_callback(c):
 
     chat_id = c.message.chat.id if c.message else c.from_user.id
     if not is_admin(chat_id):
-        try:
-            bot.answer_callback_query(c.id, "❌ Yalnız adminlər üçün.")
-        except Exception:
-            pass
+        safe_answer_callback_query(c.id)
+        return_to_main_menu(chat_id)
         return
 
     admin_bonus_stats_period[chat_id] = period
