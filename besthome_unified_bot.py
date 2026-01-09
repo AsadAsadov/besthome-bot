@@ -1535,17 +1535,23 @@ def count_new_listings_since(db_path: str, last_max_id: Optional[int]) -> int:
 def count_new_listings_by_op(
     db_path: str, op_code: str, from_id: int, to_id: int
 ) -> int:
+    op_norm = normalize_operation_value(op_code) or op_code
+    op_value = detect_db_operation_value(op_norm, "main") if op_norm else None
+    if not op_value:
+        return 0
+    candidates = {op_value, str(op_value).upper()}
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.cursor()
+        placeholders = ", ".join(["?"] * len(candidates))
         cur.execute(
-            """
+            f"""
             SELECT COUNT(*)
             FROM listings
             WHERE id > ? AND id <= ?
-              AND operation = ?
+              AND operation IN ({placeholders})
             """,
-            (from_id, to_id, op_code),
+            (from_id, to_id, *candidates),
         )
         row = cur.fetchone()
         return int(row[0]) if row and row[0] is not None else 0
@@ -1691,10 +1697,10 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
                 last_max_id = 0
 
             new_sale = count_new_listings_by_op(
-                MAIN_DB, "sat", last_max_id, new_max_id
+                MAIN_DB, "sale", last_max_id, new_max_id
             )
             new_rent = count_new_listings_by_op(
-                MAIN_DB, "kir", last_max_id, new_max_id
+                MAIN_DB, "rent", last_max_id, new_max_id
             )
             new_today = count_new_listings_today(MAIN_DB, last_max_id, new_max_id)
             try:
@@ -15538,6 +15544,17 @@ def _handle_admin_panel_action(chat_id: int, action_text: str):
     elif action_text == TEXTS_AZ["admin_panel_archived_requests"]:
         show_archived_requests(chat_id, page=1)
 
+
+def trigger_auto_update_db(admin_id: int, url: str) -> None:
+    logger.info(
+        "AUTO DB UPDATE triggered internally admin_id=%s url=%s",
+        admin_id,
+        url,
+    )
+    safe_admin_step(admin_id, "⏳ Yenilənmə başladılır…")
+    run_db_update_pipeline(admin_id, url)
+
+
 @bot.message_handler(commands=['auto_update_db'])
 def auto_update_db_cmd(m):
     if not is_admin(m.chat.id):
@@ -15550,15 +15567,8 @@ def auto_update_db_cmd(m):
         )
         return
     url = parts[1].strip()
-    logger.info(
-        "AUTO DB UPDATE triggered by admin chat_id=%s url=%s",
-        m.chat.id,
-        url,
-    )
-    bot.send_message(m.chat.id, "⏳ Yenilənmə başladılır…")
-    run_db_update_pipeline(m.chat.id, url)
+    trigger_auto_update_db(m.chat.id, url)
 
-    
 @bot.callback_query_handler(
     func=lambda c: c.data.startswith("adm_act:")
     or c.data.startswith("adm_back:")
