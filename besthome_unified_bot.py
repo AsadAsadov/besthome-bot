@@ -1851,6 +1851,60 @@ def count_new_listings_today(db_path: str, from_id: int, to_id: int) -> int:
         conn.close()
 
 
+def count_last_24h_listings(db_path: str) -> Tuple[int, int, int]:
+    window = get_last_24h_window()
+    date_sql, date_params = build_last_24h_clause("created_at", window)
+    sale_value = detect_db_operation_value("sale", "main")
+    rent_value = detect_db_operation_value("rent", "main")
+    sale_candidates = {sale_value, str(sale_value).upper()} if sale_value else set()
+    rent_candidates = {rent_value, str(rent_value).upper()} if rent_value else set()
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM listings
+            WHERE 1=1
+            """
+            + date_sql,
+            date_params,
+        )
+        row = cur.fetchone()
+        total = int(row[0]) if row and row[0] is not None else 0
+        sale_count = 0
+        if sale_candidates:
+            placeholders = ", ".join(["?"] * len(sale_candidates))
+            cur.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM listings
+                WHERE operation IN ({placeholders})
+                """
+                + date_sql,
+                (*sale_candidates, *date_params),
+            )
+            row = cur.fetchone()
+            sale_count = int(row[0]) if row and row[0] is not None else 0
+        rent_count = 0
+        if rent_candidates:
+            placeholders = ", ".join(["?"] * len(rent_candidates))
+            cur.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM listings
+                WHERE operation IN ({placeholders})
+                """
+                + date_sql,
+                (*rent_candidates, *date_params),
+            )
+            row = cur.fetchone()
+            rent_count = int(row[0]) if row and row[0] is not None else 0
+        return total, sale_count, rent_count
+    finally:
+        conn.close()
+
+
 def atomic_replace_main_db(new_db_path: str) -> Optional[str]:
     backup_path = backup_main_db_file()
     if backup_path:
@@ -1875,7 +1929,6 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
     extracted_db_path = None
     extracted_dir = None
     backup_path = None
-    old_listing_ids: Set[int] = set()
     try:
         main_db_update_in_progress.set()
         clean_old_update_artifacts()
@@ -1913,13 +1966,8 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             extracted_db_path,
         )
 
-        last_max_id = load_last_update_max_id()
-        if os.path.exists(MAIN_DB):
-            old_listing_ids = fetch_listing_ids(MAIN_DB)
-            if last_max_id is None:
-                last_max_id = get_max_listing_id(MAIN_DB)
-
         send_db_update_progress(admin_id, "🔁 DB əvəz olunur…")
+        logger.info("[UPDATE] Using REPLACE mode")
         with main_db_replace_lock:
             close_all_main_conns()
             prepare_main_db_for_swap()
@@ -1950,22 +1998,18 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
 
         send_db_update_progress(admin_id, "📊 Statistika hesablanır…")
         try:
-            new_listing_ids = fetch_listing_ids(MAIN_DB)
-            newly_added_ids = new_listing_ids - old_listing_ids
-            new_listings = len(newly_added_ids)
-            new_max_id = get_max_listing_id(MAIN_DB)
-            save_last_update_max_id(new_max_id)
-
-            if last_max_id is None:
-                last_max_id = 0
-
-            new_sale = count_listings_by_op_for_ids(
-                MAIN_DB, "sale", newly_added_ids
-            )
-            new_rent = count_listings_by_op_for_ids(
-                MAIN_DB, "rent", newly_added_ids
-            )
-            new_today = count_recent_listings_for_ids(MAIN_DB, newly_added_ids)
+            logger.info("[UPDATE] New listings computed from last 24h window")
+            try:
+                total, new_sale, new_rent = count_last_24h_listings(MAIN_DB)
+                logger.info(
+                    "[UPDATE] 24h total=%s satilir=%s kiraye=%s",
+                    total,
+                    new_sale,
+                    new_rent,
+                )
+            except Exception:
+                logger.exception("[UPDATE] 24h listing count failed")
+                total, new_sale, new_rent = 0, 0, 0
             try:
                 process_keyword_alerts_for_new_listings()
             except Exception as e:
@@ -1973,17 +2017,16 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
 
             report = (
                 "✅ Elanlar uğurla yeniləndi.\n"
-                f"📦 Yeni elanlar: {new_listings}\n"
-                "📊 Bu yenilənmədə əlavə olunanlar:\n"
+                f"📦 Yeni elanlar (son 24 saat): {total}\n"
+                "📊 Bu yenilənmədə:\n"
                 f"1⃣ Satılır: {new_sale}\n"
-                f"2⃣ Kirayə verilir: {new_rent}\n"
-                f"🕒 Son 24 saat əlavə olunanlar: {new_today}"
+                f"2⃣ Kirayə verilir: {new_rent}"
             )
             safe_admin_step(admin_id, report)
             logger.info(
                 "DB update completed chat_id=%s new=%s",
                 admin_id,
-                new_listings,
+                total,
             )
         except Exception:
             logger.exception("DB stats failed after update chat_id=%s", admin_id)
