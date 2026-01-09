@@ -15503,7 +15503,14 @@ def _handle_admin_panel_action(chat_id: int, action_text: str):
 def auto_update_db_cmd(m):
     if not is_admin(m.chat.id):
         return
-    start_admin_update_db(m.chat.id)
+    command_text = m.text or ""
+    parts = command_text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        bot.reply_to(m, "❌ Update üçün link tapılmadı.")
+        return
+    url = parts[1].strip()
+    logger.info("AUTO DB UPDATE triggered by admin chat_id=%s url=%s", m.chat.id, url)
+    run_db_update_pipeline(m.chat.id, url)
 
     
 @bot.callback_query_handler(
