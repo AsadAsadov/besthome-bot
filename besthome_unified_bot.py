@@ -680,7 +680,7 @@ FEATURE_FLAG_KEYS = list(FEATURE_FLAG_DEFAULTS.keys())
 
 FEATURE_FLAG_LABELS = {
     "main_search": "Axtarış sistemi",
-    "last_24_hours": "Son 24 saat",
+    "last_24_hours": "Son 24 saatda əlavə olunan elanlar",
     "account": "Hesabım",
     "statistics": "Statistika",
     "try_your_luck": "Şansını sına",
@@ -716,7 +716,7 @@ QR_STATS_AREAS = [
 ]
 
 QR_STATS_RANGE_LABELS = {
-    "24h": "Son 24 saat",
+    "24h": "Son 24 saatda əlavə olunan elanlar",
     "7d": "Son 7 gün",
     "30d": "Son 30 gün",
     "all": "Ümumi",
@@ -1779,11 +1779,15 @@ def count_recent_listings_for_ids(db_path: str, listing_ids: Set[int]) -> int:
     if not listing_ids:
         return 0
     ids_list = list(listing_ids)
-    window = get_last_24h_window()
-    date_sql, date_params = build_last_24h_clause("created_at", window)
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.cursor()
+        date_col = detect_added_at_column(cur, "listings")
+        if not date_col:
+            logger.warning("added_at column missing for recent listing count")
+            return 0
+        window = get_last_24h_window()
+        date_sql, date_params = build_last_24h_clause(date_col, window)
         total = 0
         for batch in _chunk_list(ids_list):
             placeholders = ", ".join(["?"] * len(batch))
@@ -1834,8 +1838,12 @@ def count_new_listings_today(db_path: str, from_id: int, to_id: int) -> int:
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.cursor()
+        date_col = detect_added_at_column(cur, "listings")
+        if not date_col:
+            logger.warning("added_at column missing for new listing counts")
+            return 0
         window = get_last_24h_window()
-        date_sql, date_params = build_last_24h_clause("created_at", window)
+        date_sql, date_params = build_last_24h_clause(date_col, window)
         cur.execute(
             """
             SELECT COUNT(*)
@@ -1852,8 +1860,6 @@ def count_new_listings_today(db_path: str, from_id: int, to_id: int) -> int:
 
 
 def count_last_24h_listings(db_path: str) -> Tuple[int, int, int]:
-    window = get_last_24h_window()
-    date_sql, date_params = build_last_24h_clause("created_at", window)
     sale_value = detect_db_operation_value("sale", "main")
     rent_value = detect_db_operation_value("rent", "main")
     sale_candidates = {sale_value, str(sale_value).upper()} if sale_value else set()
@@ -1861,6 +1867,12 @@ def count_last_24h_listings(db_path: str) -> Tuple[int, int, int]:
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.cursor()
+        date_col = detect_added_at_column(cur, "listings")
+        if not date_col:
+            logger.warning("added_at column missing for 24h listing count")
+            return 0, 0, 0
+        window = get_last_24h_window()
+        date_sql, date_params = build_last_24h_clause(date_col, window)
         cur.execute(
             """
             SELECT COUNT(*)
@@ -2017,7 +2029,7 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
 
             report = (
                 "✅ Elanlar uğurla yeniləndi.\n"
-                f"📦 Yeni elanlar (son 24 saat): {total}\n"
+                f"📦 Son 24 saatda əlavə olunan elanlar: {total}\n"
                 "📊 Bu yenilənmədə:\n"
                 f"1⃣ Satılır: {new_sale}\n"
                 f"2⃣ Kirayə verilir: {new_rent}"
@@ -5084,7 +5096,7 @@ def detect_user_listings_table(conn) -> Optional[str]:
 
 def detect_table_date_column(cur, table: str) -> Optional[str]:
     cols = get_table_columns(cur, table)
-    for key in ("inserted_at", "created_at", "date_added", "date_read", "added_at"):
+    for key in ("added_at", "inserted_at", "created_at", "date_added", "date_read"):
         if key in cols:
             return cols[key]
     return None
@@ -5096,6 +5108,11 @@ def detect_created_at_column(cur, table: str) -> Optional[str]:
         if key in cols:
             return cols[key]
     return None
+
+
+def detect_added_at_column(cur, table: str) -> Optional[str]:
+    cols = get_table_columns(cur, table)
+    return cols.get("added_at")
 
 
 def _detect_ts_kind(cur, table: str, col: str) -> Optional[str]:
@@ -5392,7 +5409,7 @@ def count_main_active_listings(
         flt, params = build_filters_sql(op_code, prop_code, None, mode="main")
         date_sql, date_params = ("", [])
         if only_today:
-            date_col = detect_created_at_column(cur, "listings")
+            date_col = detect_added_at_column(cur, "listings")
             if date_col:
                 window = get_last_24h_window()
                 date_sql, date_params = build_today_clause(f"l.{date_col}", window)
@@ -5421,7 +5438,7 @@ def count_local_active_listings(
         flt, params = build_filters_sql(op_code, prop_code, None, mode="local")
         date_sql, date_params = ("", [])
         if only_today:
-            date_col = detect_created_at_column(cur, "listings_approved")
+            date_col = detect_added_at_column(cur, "listings_approved")
             if date_col:
                 window = get_last_24h_window()
                 date_sql, date_params = build_today_clause(f"l.{date_col}", window)
@@ -6311,7 +6328,7 @@ def build_main_menu(
         buttons.append("🔎 Axtarış sistemi")
 
     if is_feature_enabled("last_24_hours", chat_id):
-        buttons.append("🕒 Son 24 saat")
+        buttons.append("🕒 Son 24 saatda əlavə olunan elanlar")
 
     if is_feature_enabled("account", chat_id):
         buttons.append("👤 Hesabım")
@@ -8357,16 +8374,16 @@ def show_account_status(message):
 
 
 STATS_FILTER_LABELS = {
-    "24h": "🕒 24 saat",
+    "24h": "🕒 Son 24 saatda əlavə olunan elanlar",
     "7d": "📆 7 gün",
     "30d": "📅 30 gün",
     "all": "🧾 Ümumi",
 }
 
 STATS_TS_CANDIDATES = (
+    "added_at",
     "created_at",
     "inserted_at",
-    "added_at",
     "published_at",
     "date_added",
     "ts",
@@ -9888,7 +9905,7 @@ def compute_today_stats(filters: dict) -> dict:
 def send_today_stats_message(chat_id: int, filters: dict):
     stats = compute_today_stats(filters)
     text = (
-        "🕒 Son 24 saat\n"
+        "🕒 Son 24 saatda əlavə olunan elanlar\n"
         f"📊 Ümumi: {stats['total']}\n"
         f"1⃣ Satılır: {stats['sale']}\n"
         f"2⃣ Kirayə: {stats['rent']}"
@@ -9922,7 +9939,7 @@ def start_today_flow(chat_id: int):
     prompt_today_operation(chat_id)
 
 
-@bot.message_handler(func=lambda m: m.text == "🕒 Son 24 saat")
+@bot.message_handler(func=lambda m: m.text == "🕒 Son 24 saatda əlavə olunan elanlar")
 def handle_today_menu(message):
     if not ensure_feature_available(message.chat.id, "last_24_hours"):
         return
@@ -13096,7 +13113,7 @@ def compute_user_statistics(period: str) -> dict:
         "prop_type_counts": {},
         "meta": {
             "table": "listings",
-            "ts_col": "created_at",
+            "ts_col": "added_at",
             "ts_kind": "iso",
             "op_col": "operation",
             "type_col": "prop_type",
@@ -13126,9 +13143,9 @@ def compute_user_statistics(period: str) -> dict:
 
         col_names = {str(r[1]).lower(): r[1] for r in col_rows if len(r) > 1}
 
-        ts_col = col_names.get("created_at")
+        ts_col = col_names.get("added_at")
         if not ts_col:
-            logger.warning("User stats timestamp column missing in listings table")
+            logger.warning("User stats added_at column missing in listings table")
 
         op_col = col_names.get("operation")
         type_col = col_names.get("prop_type")
@@ -13832,7 +13849,7 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
         cur = conn.cursor()
         base = "SELECT * FROM listings"
         flt, params = build_filters_sql(op_code, prop_code, None, mode="main")
-        date_col = detect_created_at_column(cur, "listings")
+        date_col = detect_added_at_column(cur, "listings")
         date_sql, date_params = build_today_clause(date_col, window)
         rayon_sql, rayon_params = build_rayon_filter_sql(
             cur, "listings", filters.get("rayon"), ""
@@ -13858,7 +13875,7 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
     cur = conn.cursor()
     base = "SELECT * FROM listings_approved"
     flt, params = build_filters_sql(op_code, prop_code, None, mode="local")
-    date_col = detect_created_at_column(cur, "listings_approved")
+    date_col = detect_added_at_column(cur, "listings_approved")
     date_sql, date_params = build_today_clause(date_col, window)
     rayon_sql, rayon_params = build_rayon_filter_sql(
         cur, "listings_approved", filters.get("rayon"), ""
@@ -16591,7 +16608,9 @@ def fetch_qr_top_areas():
 def build_qr_stats_menu() -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup()
     mk.row(
-        types.InlineKeyboardButton("📅 Son 24 saat", callback_data="qr_stats:24h"),
+        types.InlineKeyboardButton(
+            "📅 Son 24 saatda əlavə olunan elanlar", callback_data="qr_stats:24h"
+        ),
         types.InlineKeyboardButton("📅 Son 7 gün", callback_data="qr_stats:7d"),
     )
     mk.row(
@@ -23268,7 +23287,7 @@ def show_admin_stats(
         return None
 
     def detect_date_column(cur, table: str) -> Optional[str]:
-        return detect_created_at_column(cur, table)
+        return detect_added_at_column(cur, table)
 
     def count_today_new(cur, table: str) -> int:
         col = detect_date_column(cur, table)
