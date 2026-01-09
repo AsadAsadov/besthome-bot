@@ -15510,6 +15510,7 @@ def auto_update_db_cmd(m):
         return
     url = parts[1].strip()
     logger.info("AUTO DB UPDATE triggered by admin chat_id=%s url=%s", m.chat.id, url)
+    bot.send_message(m.chat.id, "⏳ Yenilənmə başladılır…")
     run_db_update_pipeline(m.chat.id, url)
 
     
@@ -18435,34 +18436,12 @@ def admin_direct_message_send(message):
 def start_admin_update_db(chat_id: int, callback_id: Optional[str] = None):
     if not is_admin(chat_id):
         return
-
-    stale = cleanup_stale_db_updates()
-    if stale:
-        safe_admin_step(chat_id, "⚠️ Köhnə yenilənmə stuck idi, yenidən başladım.")
-
-    running = get_running_db_update()
-    if running:
-        running_admin, state = running
-        started_at = state.get("started_at", now_utc())
-        remaining = DB_UPDATE_TTL_SECONDS - (now_utc() - started_at).total_seconds()
-        message = (
-            "⏳ Hal-hazırda baza yenilənir"
-            f" (qalan: təxmini {format_seconds(remaining)})."
-        )
-        if callback_id:
-            safe_answer_callback_query(callback_id, "⚠️ Baza yenilənir.")
-        safe_admin_step(chat_id, message)
-        return
-
     if callback_id:
         safe_answer_callback_query(callback_id, "📦 Baza yeniləmə")
-
-    admin_update_state[chat_id] = "awaiting_db_link"
-    set_db_update_state(chat_id, "awaiting_link")
     logger.info("Admin requested db update chat_id=%s", chat_id)
     safe_admin_step(
         chat_id,
-        "🔗 Dropbox yükləmə linkini göndərin (besthome.db birbaşa yüklənəcək).",
+        "ℹ️ Yenilənmə üçün /auto_update_db <dropbox_url> istifadə edin.",
     )
 
 
@@ -18471,75 +18450,6 @@ def start_admin_update_db(chat_id: int, callback_id: Optional[str] = None):
 def cb_admin_update_db(c):
     start_admin_update_db(c.message.chat.id, callback_id=c.id)
 
-
-@bot.message_handler(
-    content_types=["text"],
-    func=lambda m: m.from_user
-    and is_admin(m.chat.id)
-    and admin_update_state.get(m.chat.id) == "awaiting_db_link",
-)
-def handle_admin_db_upload(message):
-    chat_id = message.chat.id
-    if message.text and message.text.startswith("/"):
-        return
-    if not message.from_user or not is_admin(chat_id):
-        return
-
-    if admin_update_state.get(chat_id) != "awaiting_db_link":
-        return
-
-    stale = cleanup_stale_db_updates()
-    if stale:
-        safe_admin_step(chat_id, "⚠️ Köhnə yenilənmə stuck idi, yenidən başladım.")
-
-    url = message.text.strip() if message.text else ""
-    url_lower = url.lower()
-    parts = urlsplit(url)
-    if (
-        not url
-        or parts.scheme.lower() != "https"
-        or "dropbox" not in parts.netloc.lower()
-    ):
-        safe_admin_step(
-            chat_id, "❌ Zəhmət olmasa HTTPS Dropbox yükləmə linki göndərin."
-        )
-        return
-
-    running = get_running_db_update()
-    if running:
-        started_at = running[1].get("started_at", now_utc())
-        remaining = DB_UPDATE_TTL_SECONDS - (now_utc() - started_at).total_seconds()
-        safe_admin_step(
-            chat_id,
-            "⏳ Hal-hazırda baza yenilənir"
-            f" (qalan: təxmini {format_seconds(remaining)}).",
-        )
-        return
-
-    if not acquire_db_update_lock(chat_id):
-        safe_admin_step(
-            chat_id, "⏳ Hal-hazırda baza yenilənir. Zəhmət olmasa gözləyin."
-        )
-        return
-
-    safe_admin_step(chat_id, "✅ Link alındı. ⏳ Yenilənir…")
-    logger.info("Admin db update link received chat_id=%s url=%s", chat_id, url)
-    admin_update_state[chat_id] = "updating_db"
-    set_db_update_state(chat_id, "running")
-    try:
-        threading.Thread(
-            target=run_db_update_pipeline,
-            args=(chat_id, url),
-            daemon=True,
-        ).start()
-    except Exception:
-        release_db_update_lock(chat_id)
-        admin_update_state.pop(chat_id, None)
-        clear_db_update_state(chat_id)
-        logger.exception("Failed to start db update thread chat_id=%s", chat_id)
-        safe_admin_step(
-            chat_id, "❌ Yenilənmə başladılmadı. Zəhmət olmasa yenidən yoxlayın."
-        )
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm|"))
