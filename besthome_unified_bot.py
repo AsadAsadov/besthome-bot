@@ -1663,7 +1663,7 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
                 logger.warning("keyword alert listing scan error: %s", e)
 
             report = (
-                "✅ Baza uğurla yeniləndi.\n"
+                "✅ Elanlar uğurla yeniləndi.\n"
                 f"📦 Yeni elanlar: {new_listings}\n"
                 f"📊 Ümumi elan sayı: {total_active}\n"
                 f"1⃣ Satılır: {sale_active}\n"
