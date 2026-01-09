@@ -1150,8 +1150,8 @@ def append_dropbox_url_history(url: str) -> None:
     history.append(
         {"url": url, "datetime": now_utc().strftime("%Y-%m-%d %H:%M")}
     )
-    if len(history) > 10:
-        history = history[-10:]
+    if len(history) > 5:
+        history = history[-5:]
     save_dropbox_url_history(history)
 
 
@@ -15674,8 +15674,7 @@ def cb_admin_lastlink_refresh(c):
         )
         try:
             bot.edit_message_text(
-                "❌ Hələ heç bir link istifadə olunmayıb.\n"
-                "ℹ️ Link göndərmək üçün:\n/auto_update_db",
+                "❌ Hələ avtomatik yaradılmış link yoxdur.",
                 chat_id=chat_id,
                 message_id=c.message.message_id,
                 reply_markup=mk,
@@ -15684,7 +15683,7 @@ def cb_admin_lastlink_refresh(c):
             logger.exception("Failed to edit admin panel for last link history empty")
         return
 
-    display_history = list(reversed(history))
+    display_history = list(reversed(history[-5:]))
     text_lines = ["📜 Son istifadə olunan linklər", "────────────────────"]
     for item in display_history:
         text_lines.append(f"🕒 {item['datetime']}")
@@ -15692,12 +15691,7 @@ def cb_admin_lastlink_refresh(c):
         text_lines.append("")
     text = "\n".join(text_lines).strip()
     mk = types.InlineKeyboardMarkup()
-    for index in range(len(display_history)):
-        mk.add(
-            types.InlineKeyboardButton(
-                "▶️ Bu linklə yenilə", callback_data=f"a_run_lastlink_{index}"
-            )
-        )
+    mk.add(types.InlineKeyboardButton("🔄 Yenilə", callback_data="a_run_lastlink_latest"))
     mk.add(types.InlineKeyboardButton(ADMIN_PANEL_BACK_MAIN, callback_data="adm_back:main"))
     try:
         bot.edit_message_text(
@@ -15718,17 +15712,11 @@ def cb_admin_run_lastlink(c):
         safe_answer_callback_query(c.id, "❌ Yalnız adminlər üçün.")
         return_to_main_menu(chat_id)
         return
-    try:
-        index = int(c.data.split("a_run_lastlink_", 1)[1])
-    except ValueError:
-        safe_answer_callback_query(c.id, "❌ Link tapılmadı.")
-        return
     history = load_dropbox_url_history()
-    display_history = list(reversed(history))
-    if index < 0 or index >= len(display_history):
+    if not history:
         safe_answer_callback_query(c.id, "❌ Link tapılmadı.")
         return
-    selected_link = display_history[index]["url"]
+    selected_link = history[-1]["url"]
     try:
         bot.edit_message_text(
             "🔄 Yenilənmə başladıldı\n🔗 İstifadə olunan link:\n"
@@ -15741,7 +15729,7 @@ def cb_admin_run_lastlink(c):
         )
     except Exception:
         logger.exception("Failed to edit admin panel after last link run")
-    handle_auto_update_db_link(chat_id, selected_link)
+    trigger_auto_update_db(chat_id, selected_link)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("admin_stats_menu:"))
