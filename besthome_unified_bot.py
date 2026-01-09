@@ -452,6 +452,7 @@ TEXTS_AZ = {
     "admin_panel_send_update": "🚀 Yeniləmə göndər",
     "admin_panel_topviews": "🔥 Ən çox baxılan elanlar",
     "admin_panel_db_update": "📦 Bazanı yenilə (Dropbox)",
+    "admin_panel_lastlink_refresh": "🔗 Son link",
     "admin_panel_direct_message": "📨 İstifadəçiyə mesaj göndər",
     "admin_panel_customer_requests_access": "📌 Müştəri istəkləri icazəsi",
     "admin_panel_archived_requests": "🗄 Arxivlənmiş müştəri istəkləri",
@@ -619,6 +620,7 @@ ADMIN_PANEL_BUTTONS = [
     TEXTS_AZ["admin_panel_send_update"],
     TEXTS_AZ["admin_panel_topviews"],
     TEXTS_AZ["admin_panel_db_update"],
+    TEXTS_AZ["admin_panel_lastlink_refresh"],
     TEXTS_AZ["admin_panel_direct_message"],
 ]
 ADMIN_PANEL_BACK_MAIN = TEXTS_AZ["admin_panel_back_main"]
@@ -1099,6 +1101,22 @@ def load_last_update_max_id() -> Optional[int]:
 def save_last_update_max_id(max_id: int) -> None:
     data = _load_db_update_state_file()
     data["last_max_id"] = int(max_id)
+    data["updated_at"] = now_utc().isoformat()
+    _save_db_update_state_file(data)
+
+
+def load_last_dropbox_url() -> Optional[str]:
+    data = _load_db_update_state_file()
+    url = data.get("last_dropbox_url")
+    if not url:
+        return None
+    url_text = str(url).strip()
+    return url_text or None
+
+
+def save_last_dropbox_url(url: str) -> None:
+    data = _load_db_update_state_file()
+    data["last_dropbox_url"] = url
     data["updated_at"] = now_utc().isoformat()
     _save_db_update_state_file(data)
 
@@ -15420,6 +15438,8 @@ def build_admin_panel_keyboard(chat_id: int, page: int = 1):
             callback_data = f"adm_act:{ADMIN_PANEL_ACTION_KEYS[btn_text]}"
             if btn_text == "📊 QR Statistikası":
                 callback_data = "admin_qr_stats"
+            if btn_text == TEXTS_AZ["admin_panel_lastlink_refresh"]:
+                callback_data = "a_lastlink_refresh"
             row_buttons.append(
                 types.InlineKeyboardButton(
                     btn_text,
@@ -15553,6 +15573,15 @@ def trigger_auto_update_db(admin_id: int, url: str) -> None:
     run_db_update_pipeline(admin_id, url)
 
 
+def handle_auto_update_db_link(admin_id: int, url: str) -> bool:
+    cleaned_url = (url or "").strip()
+    if not cleaned_url:
+        return False
+    save_last_dropbox_url(cleaned_url)
+    trigger_auto_update_db(admin_id, cleaned_url)
+    return True
+
+
 @bot.message_handler(commands=['auto_update_db'])
 def auto_update_db_cmd(m):
     if not is_admin(m.chat.id):
@@ -15565,7 +15594,7 @@ def auto_update_db_cmd(m):
         )
         return
     url = parts[1].strip()
-    trigger_auto_update_db(m.chat.id, url)
+    handle_auto_update_db_link(m.chat.id, url)
 
 @bot.callback_query_handler(
     func=lambda c: c.data.startswith("adm_act:")
@@ -15590,6 +15619,42 @@ def cb_admin_panel(c):
         action_text = ADMIN_PANEL_ACTION_LOOKUP.get(action_key)
         if action_text:
             _handle_admin_panel_action(chat_id, action_text)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "a_lastlink_refresh")
+@callback_guard
+def cb_admin_lastlink_refresh(c):
+    chat_id = c.message.chat.id
+    if not is_admin(c.from_user.id):
+        safe_answer_callback_query(c.id, "❌ Yalnız adminlər üçün.")
+        return_to_main_menu(chat_id)
+        return
+    last_link = load_last_dropbox_url()
+    if not last_link:
+        try:
+            bot.edit_message_text(
+                "❌ Son link tapılmadı.",
+                chat_id=chat_id,
+                message_id=c.message.message_id,
+                reply_markup=build_admin_panel_keyboard(
+                    chat_id, page=admin_panel_page_state.get(chat_id, 1)
+                ),
+            )
+        except Exception:
+            logger.exception("Failed to edit admin panel for last link missing")
+        return
+    try:
+        bot.edit_message_text(
+            "✅ Son link göndərildi\n🔄 Elanlar yenilənir…",
+            chat_id=chat_id,
+            message_id=c.message.message_id,
+            reply_markup=build_admin_panel_keyboard(
+                chat_id, page=admin_panel_page_state.get(chat_id, 1)
+            ),
+        )
+    except Exception:
+        logger.exception("Failed to edit admin panel after last link refresh")
+    handle_auto_update_db_link(chat_id, last_link)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("admin_stats_menu:"))
