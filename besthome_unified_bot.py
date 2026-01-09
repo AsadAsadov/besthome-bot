@@ -1153,11 +1153,10 @@ def save_dropbox_url_history(history: List[Dict[str, str]]) -> None:
 
 def append_dropbox_url_history(url: str) -> None:
     history = load_dropbox_url_history()
-    history.append(
-        {"url": url, "datetime": now_utc().strftime("%Y-%m-%d %H:%M")}
+    history.insert(
+        0, {"url": url, "datetime": now_utc().strftime("%Y-%m-%d %H:%M")}
     )
-    if len(history) > 5:
-        history = history[-5:]
+    history = history[:5]
     save_dropbox_url_history(history)
 
 
@@ -4847,7 +4846,8 @@ def format_auto_link_datetime(dt_text: str) -> str:
         dt = dt.replace(tzinfo=timezone.utc)
     else:
         dt = dt.astimezone(timezone.utc)
-    return dt.astimezone().strftime("%Y-%m-%d %H:%M")
+    dt = dt + timedelta(hours=4)
+    return dt.strftime("%Y-%m-%d %H:%M")
 
 
 def _select_first_existing_table(cur, candidates: Tuple[str, ...]) -> Optional[str]:
@@ -15671,22 +15671,38 @@ def handle_auto_update_db_link(
     return True
 
 
+def extract_dropbox_url_from_text(text: str) -> Optional[str]:
+    if not text:
+        return None
+    for token in text.split():
+        if "dropbox" not in token.lower():
+            continue
+        candidate = token.strip().strip("()[]<>.,")
+        parts = urlsplit(candidate)
+        if (
+            parts.scheme.lower() in {"http", "https"}
+            and "dropbox" in parts.netloc.lower()
+        ):
+            return candidate
+    return None
+
+
 @bot.message_handler(commands=['auto_update_db'])
 def auto_update_db_cmd(m):
     if not is_admin(m.chat.id):
         return
-    parts = m.text.split(maxsplit=1)
-    if len(parts) < 2:
+    text = (m.text or "").strip()
+    dropbox_url = extract_dropbox_url_from_text(text)
+    if not text.startswith("/auto_update_db ") or not dropbox_url:
         bot.send_message(
             m.chat.id,
             "❌ Update üçün link tapılmadı.\nİstifadə: /auto_update_db <dropbox_link>"
         )
         return
-    url = parts[1].strip()
     handle_auto_update_db_link(
         m.chat.id,
-        url,
-        record_auto_link=is_auto_update_sender(m),
+        dropbox_url,
+        record_auto_link=True,
     )
 
 @bot.callback_query_handler(
@@ -15741,7 +15757,7 @@ def cb_admin_lastlink_refresh(c):
             logger.exception("Failed to edit admin panel for last link history empty")
         return
 
-    display_history = list(reversed(history[-5:]))
+    display_history = history[:5]
     text_lines = ["📜 Son avtomatik linklər", "────────────────────"]
     for item in display_history:
         text_lines.append(f"🕒 {format_auto_link_datetime(item['datetime'])}")
@@ -15776,7 +15792,7 @@ def cb_admin_run_lastlink(c):
             c.id, "❌ Hələ sistem tərəfindən göndərilmiş link yoxdur."
         )
         return
-    selected_link = history[-1]["url"]
+    selected_link = history[0]["url"]
     try:
         bot.edit_message_text(
             "🔄 Yenilənmə başladıldı\n🔗 İstifadə olunan link:\n"
@@ -22684,10 +22700,9 @@ def format_active_user_stats(users):
             username = str(row["username"] or "").strip()
         except Exception:
             username = str(row[3] if len(row) > 3 else "").strip()
-        display_name = full_name or username or "—"
-        label_name = display_name
-        if len(label_name) > 30:
-            label_name = label_name[:27] + "..."
+        display_name = full_name or username or "(Ad yoxdur)"
+        if len(display_name) > 60:
+            display_name = display_name[:57].rstrip() + "..."
 
         try:
             profile_url = build_profile_url(chat_id, username)
@@ -22695,11 +22710,8 @@ def format_active_user_stats(users):
             profile_url = None
 
         name_text = html.escape(display_name)
-        lines.append(
-            "• {name} — ID: <a href=\"tg://user?id={chat_id}\">{chat_id}</a> — 🔍 {count}".format(
-                name=name_text, chat_id=chat_id, count=cnt
-            )
-        )
+        lines.append(f"• {name_text}")
+        lines.append(f"ID: {chat_id} | Axtarış: {cnt}")
 
     return lines, buttons
 
@@ -22948,6 +22960,7 @@ def show_admin_stats(
     lines.append("")
 
     lines.append("⚡ Aktiv istifadəçilər")
+    lines.append("────────────────────")
     active_user_blocks, profile_buttons = (
         format_active_user_stats(top_users) if search_stats_available else ([], [])
     )
