@@ -1728,6 +1728,82 @@ def count_new_listings_since(db_path: str, last_max_id: Optional[int]) -> int:
         conn.close()
 
 
+def fetch_listing_ids(db_path: str) -> Set[int]:
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM listings")
+        return {int(row[0]) for row in cur.fetchall() if row and row[0] is not None}
+    finally:
+        conn.close()
+
+
+def _chunk_list(values: List[int], size: int = 900) -> List[List[int]]:
+    return [values[i : i + size] for i in range(0, len(values), size)]
+
+
+def count_listings_by_op_for_ids(
+    db_path: str, op_code: str, listing_ids: Set[int]
+) -> int:
+    if not listing_ids:
+        return 0
+    op_norm = normalize_operation_value(op_code) or op_code
+    op_value = detect_db_operation_value(op_norm, "main") if op_norm else None
+    if not op_value:
+        return 0
+    candidates = {op_value, str(op_value).upper()}
+    ids_list = list(listing_ids)
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        total = 0
+        for batch in _chunk_list(ids_list):
+            placeholders = ", ".join(["?"] * len(batch))
+            op_placeholders = ", ".join(["?"] * len(candidates))
+            cur.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM listings
+                WHERE id IN ({placeholders})
+                  AND operation IN ({op_placeholders})
+                """,
+                (*batch, *candidates),
+            )
+            row = cur.fetchone()
+            total += int(row[0]) if row and row[0] is not None else 0
+        return total
+    finally:
+        conn.close()
+
+
+def count_recent_listings_for_ids(db_path: str, listing_ids: Set[int]) -> int:
+    if not listing_ids:
+        return 0
+    ids_list = list(listing_ids)
+    window = get_last_24h_window()
+    date_sql, date_params = build_last_24h_clause("created_at", window)
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        total = 0
+        for batch in _chunk_list(ids_list):
+            placeholders = ", ".join(["?"] * len(batch))
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM listings
+                WHERE id IN ({placeholders})
+                """.format(placeholders=placeholders)
+                + date_sql,
+                (*batch, *date_params),
+            )
+            row = cur.fetchone()
+            total += int(row[0]) if row and row[0] is not None else 0
+        return total
+    finally:
+        conn.close()
+
+
 def count_new_listings_by_op(
     db_path: str, op_code: str, from_id: int, to_id: int
 ) -> int:
@@ -1815,6 +1891,7 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
     extracted_db_path = None
     extracted_dir = None
     backup_path = None
+    old_listing_ids: Set[int] = set()
     try:
         main_db_update_in_progress.set()
         clean_old_update_artifacts()
@@ -1853,8 +1930,10 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
         )
 
         last_max_id = load_last_update_max_id()
-        if last_max_id is None and os.path.exists(MAIN_DB):
-            last_max_id = get_max_listing_id(MAIN_DB)
+        if os.path.exists(MAIN_DB):
+            old_listing_ids = fetch_listing_ids(MAIN_DB)
+            if last_max_id is None:
+                last_max_id = get_max_listing_id(MAIN_DB)
 
         send_db_update_progress(admin_id, "🔁 DB əvəz olunur…")
         with main_db_replace_lock:
@@ -1887,20 +1966,22 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
 
         send_db_update_progress(admin_id, "📊 Statistika hesablanır…")
         try:
-            new_listings = count_new_listings_since(MAIN_DB, last_max_id)
+            new_listing_ids = fetch_listing_ids(MAIN_DB)
+            newly_added_ids = new_listing_ids - old_listing_ids
+            new_listings = len(newly_added_ids)
             new_max_id = get_max_listing_id(MAIN_DB)
             save_last_update_max_id(new_max_id)
 
             if last_max_id is None:
                 last_max_id = 0
 
-            new_sale = count_new_listings_by_op(
-                MAIN_DB, "sale", last_max_id, new_max_id
+            new_sale = count_listings_by_op_for_ids(
+                MAIN_DB, "sale", newly_added_ids
             )
-            new_rent = count_new_listings_by_op(
-                MAIN_DB, "rent", last_max_id, new_max_id
+            new_rent = count_listings_by_op_for_ids(
+                MAIN_DB, "rent", newly_added_ids
             )
-            new_today = count_new_listings_today(MAIN_DB, last_max_id, new_max_id)
+            new_today = count_recent_listings_for_ids(MAIN_DB, newly_added_ids)
             try:
                 process_keyword_alerts_for_new_listings()
             except Exception as e:
