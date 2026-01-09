@@ -15499,7 +15499,13 @@ def _handle_admin_panel_action(chat_id: int, action_text: str):
     elif action_text == TEXTS_AZ["admin_panel_archived_requests"]:
         show_archived_requests(chat_id, page=1)
 
+@bot.message_handler(commands=['auto_update_db'])
+def auto_update_db_cmd(m):
+    if not is_admin(m.chat.id):
+        return
+    start_admin_update_db(m.chat.id)
 
+    
 @bot.callback_query_handler(
     func=lambda c: c.data.startswith("adm_act:")
     or c.data.startswith("adm_back:")
