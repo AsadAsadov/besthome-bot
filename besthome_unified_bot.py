@@ -8502,11 +8502,24 @@ def start_support_chat_for_user(chat_id: int, user: types.User):
         fallback_name=(f"{user.first_name or ''} {user.last_name or ''}").strip()
         or user.username,
     )
-    if not existing_session:
-        notify_admins_new_support_session(session)
+    if existing_session:
+        bot.send_message(
+            chat_id,
+            "💬 Aktiv söhbətiniz davam edir\n\n"
+            "Adminlə olan əvvəlki yazışmanı buradan davam edə bilərsiniz.\n"
+            "Mesajınızı yazın 👇",
+        )
+        return
+    notify_admins_new_support_session(session)
     bot.send_message(
         chat_id,
-        "📩 Sorğunuz adminə göndərildi. Buradan yaza bilərsiniz.",
+        "💬 Online dəstək aktivdir\n\n"
+        "Siz indi adminlə birbaşa bot daxilində əlaqə saxlayırsınız.\n\n"
+        "Buradan:\n"
+        "• Mətn yaza bilərsiniz\n"
+        "• 🎤 Səsli mesaj göndərə bilərsiniz\n"
+        "• 📎 Fayl və şəkil göndərə bilərsiniz\n\n"
+        "Suallarınızı yazın — admin real vaxtda cavab verəcək.",
     )
 
 
