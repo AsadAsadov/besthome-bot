@@ -1661,6 +1661,13 @@ def download_main_db_file(url: str) -> Tuple[str, bool]:
     raise RuntimeError(f"DB yükləmə alınmadı: {last_error}")
 
 
+def find_db_file(root: str) -> Optional[str]:
+    for current_root, _dirs, files in os.walk(root):
+        if "besthome.db" in files:
+            return os.path.join(current_root, "besthome.db")
+    return None
+
+
 def extract_main_db_from_zip(zip_path: str) -> Tuple[str, str]:
     if not zipfile.is_zipfile(zip_path):
         raise RuntimeError("Fayl ZIP formatında deyil")
@@ -1671,19 +1678,11 @@ def extract_main_db_from_zip(zip_path: str) -> Tuple[str, str]:
         bad_file = zf.testzip()
         if bad_file:
             raise RuntimeError(f"ZIP faylında zədəli fayl var: {bad_file}")
-        target = None
-        for name in zf.namelist():
-            if os.path.basename(name).lower() == "besthome.db":
-                target = name
-                break
-        if not target:
-            raise RuntimeError("ZIP daxilində besthome.db tapılmadı")
-        extracted_path = os.path.join(temp_dir, "besthome.db")
-        with zf.open(target) as src, open(extracted_path, "wb") as dst:
-            shutil.copyfileobj(src, dst)
-    if not os.path.exists(extracted_path):
-        raise RuntimeError("ZIP extraction failed: /tmp/besthome_update/besthome.db not found")
-    logger.info("📦 DB extracted to /tmp")
+        zf.extractall(temp_dir)
+    extracted_path = find_db_file(temp_dir)
+    if not extracted_path:
+        raise RuntimeError("❌ ZIP içində besthome.db tapılmadı")
+    logger.info("📦 DB extracted to /tmp path=%s", extracted_path)
     return extracted_path, temp_dir
 
 
@@ -1853,30 +1852,15 @@ def count_new_listings_today(db_path: str, from_id: int, to_id: int) -> int:
 
 
 def atomic_replace_main_db(new_db_path: str) -> Optional[str]:
-    temp_target = os.path.join(BASE_DATA_DIR, "besthome.db.new")
     backup_path = backup_main_db_file()
-    last_error = None
-    for _ in range(3):
-        try:
-            if os.path.exists(temp_target):
-                os.remove(temp_target)
-            shutil.copy2(new_db_path, temp_target)
-            os.replace(temp_target, MAIN_DB)
-            last_error = None
-            break
-        except Exception as exc:
-            last_error = exc
-            time.sleep(0.5)
-    try:
-        if os.path.exists(temp_target):
-            os.remove(temp_target)
-    except Exception:
-        pass
-    if last_error:
-        raise last_error
-    with open(MAIN_DB, "rb") as f:
-        os.fsync(f.fileno())
-    logger.info("✅ Database replaced successfully (copy + replace)")
+    if backup_path:
+        logger.info("[UPDATE] Old DB backed up")
+    shutil.move(new_db_path, MAIN_DB)
+    if not os.path.exists(MAIN_DB):
+        raise RuntimeError("❌ Yeni DB düzgün yerləşdirilmədi")
+    logger.info("[UPDATE] New DB moved to: %s", MAIN_DB)
+    logger.info("[UPDATE] DB file size: %s", os.path.getsize(MAIN_DB))
+    logger.info("✅ DB REAL olaraq yeniləndi: %s", MAIN_DB)
     return backup_path
 
 
