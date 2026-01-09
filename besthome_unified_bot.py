@@ -11350,7 +11350,7 @@ def cb_keyword_notification_view(c):
     if not items:
         bot.send_message(chat_id, "⚠️ Baxmaq üçün yeni elan yoxdur.")
         return
-    send_paginated_results(chat_id, mode="keyword_notif", params={}, page=1)
+    show_keyword_alert_hits(chat_id, period="today", index=0, message=c.message)
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "notif_menu")
@@ -13146,7 +13146,9 @@ def process_saved_search_notifications():
         )
         mk = types.InlineKeyboardMarkup()
         mk.row(
-            types.InlineKeyboardButton("👀 Elanları gör", callback_data="notif_menu"),
+            types.InlineKeyboardButton(
+                "👀 Elanları gör", callback_data="crit_hits:today:0"
+            ),
             types.InlineKeyboardButton("⚙️ Kriteriyalar", callback_data="notif_crit"),
         )
         if s.get("id"):
