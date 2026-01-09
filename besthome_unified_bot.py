@@ -1532,6 +1532,46 @@ def count_new_listings_since(db_path: str, last_max_id: Optional[int]) -> int:
         conn.close()
 
 
+def count_new_listings_by_op(
+    db_path: str, op_code: str, from_id: int, to_id: int
+) -> int:
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM listings
+            WHERE id > ? AND id <= ?
+              AND operation = ?
+            """,
+            (from_id, to_id, op_code),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    finally:
+        conn.close()
+
+
+def count_new_listings_today(db_path: str, from_id: int, to_id: int) -> int:
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM listings
+            WHERE id > ? AND id <= ?
+              AND date(created_at) = date('now')
+            """,
+            (from_id, to_id),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    finally:
+        conn.close()
+
+
 def atomic_replace_main_db(new_db_path: str) -> Optional[str]:
     temp_target = os.path.join(BASE_DATA_DIR, "besthome.db.new")
     backup_path = backup_main_db_file()
@@ -1647,16 +1687,16 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             new_max_id = get_max_listing_id(MAIN_DB)
             save_last_update_max_id(new_max_id)
 
-            total_active = count_main_active_listings(use_direct_conn=True)
-            sale_active = count_main_active_listings(
-                op_code="sat", use_direct_conn=True
+            if last_max_id is None:
+                last_max_id = 0
+
+            new_sale = count_new_listings_by_op(
+                MAIN_DB, "sat", last_max_id, new_max_id
             )
-            rent_active = count_main_active_listings(
-                op_code="kir", use_direct_conn=True
+            new_rent = count_new_listings_by_op(
+                MAIN_DB, "kir", last_max_id, new_max_id
             )
-            today_active = count_main_active_listings(
-                only_today=True, use_direct_conn=True
-            )
+            new_today = count_new_listings_today(MAIN_DB, last_max_id, new_max_id)
             try:
                 process_keyword_alerts_for_new_listings()
             except Exception as e:
@@ -1665,17 +1705,16 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             report = (
                 "✅ Elanlar uğurla yeniləndi.\n"
                 f"📦 Yeni elanlar: {new_listings}\n"
-                f"📊 Ümumi elan sayı: {total_active}\n"
-                f"1⃣ Satılır: {sale_active}\n"
-                f"2⃣ Kirayə verilir: {rent_active}\n"
-                f"🕒 Son 24 saat elanları: {today_active}"
+                "📊 Bu yenilənmədə əlavə olunanlar:\n"
+                f"1⃣ Satılır: {new_sale}\n"
+                f"2⃣ Kirayə verilir: {new_rent}\n"
+                f"🕒 Son 24 saat əlavə olunanlar: {new_today}"
             )
             safe_admin_step(admin_id, report)
             logger.info(
-                "DB update completed chat_id=%s new=%s total=%s",
+                "DB update completed chat_id=%s new=%s",
                 admin_id,
                 new_listings,
-                total_active,
             )
         except Exception:
             logger.exception("DB stats failed after update chat_id=%s", admin_id)
@@ -15454,8 +15493,6 @@ def _handle_admin_panel_action(chat_id: int, action_text: str):
         TEXTS_AZ["admin_panel_archived_requests"],
     }:
         return
-    if admin_update_state.get(chat_id) == "awaiting_db_link":
-        return
 
     if action_text == TEXTS_AZ["admin_panel_pending_listings"]:
         show_pending_listings(chat_id)
@@ -15491,7 +15528,9 @@ def _handle_admin_panel_action(chat_id: int, action_text: str):
         reset_search_state(chat_id)
         send_paginated_results(chat_id, "topviews", params={"days": 7}, page=1)
     elif action_text == TEXTS_AZ["admin_panel_db_update"]:
-        start_admin_update_db(chat_id)
+        bot.send_message(
+            chat_id, "ℹ️ /auto_update_db <dropbox_link> əmri ilə yeniləmə başladın."
+        )
     elif action_text == TEXTS_AZ["admin_panel_direct_message"]:
         start_direct_user_message_flow(chat_id)
     elif action_text == TEXTS_AZ["admin_panel_customer_requests_access"]:
@@ -15503,13 +15542,20 @@ def _handle_admin_panel_action(chat_id: int, action_text: str):
 def auto_update_db_cmd(m):
     if not is_admin(m.chat.id):
         return
-    command_text = m.text or ""
-    parts = command_text.split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip():
-        bot.reply_to(m, "❌ Update üçün link tapılmadı.")
+    parts = m.text.split(maxsplit=1)
+    if len(parts) < 2:
+        bot.send_message(
+            m.chat.id,
+            "❌ Update üçün link tapılmadı.\nİstifadə: /auto_update_db <dropbox_link>"
+        )
         return
     url = parts[1].strip()
-    logger.info("AUTO DB UPDATE triggered by admin chat_id=%s url=%s", m.chat.id, url)
+    logger.info(
+        "AUTO DB UPDATE triggered by admin chat_id=%s url=%s",
+        m.chat.id,
+        url,
+    )
+    bot.send_message(m.chat.id, "⏳ Yenilənmə başladılır…")
     run_db_update_pipeline(m.chat.id, url)
 
     
@@ -18430,116 +18476,6 @@ def admin_direct_message_send(message):
         )
     finally:
         admin_direct_message_state.pop(message.chat.id, None)
-
-
-def start_admin_update_db(chat_id: int, callback_id: Optional[str] = None):
-    if not is_admin(chat_id):
-        return
-
-    stale = cleanup_stale_db_updates()
-    if stale:
-        safe_admin_step(chat_id, "⚠️ Köhnə yenilənmə stuck idi, yenidən başladım.")
-
-    running = get_running_db_update()
-    if running:
-        running_admin, state = running
-        started_at = state.get("started_at", now_utc())
-        remaining = DB_UPDATE_TTL_SECONDS - (now_utc() - started_at).total_seconds()
-        message = (
-            "⏳ Hal-hazırda baza yenilənir"
-            f" (qalan: təxmini {format_seconds(remaining)})."
-        )
-        if callback_id:
-            safe_answer_callback_query(callback_id, "⚠️ Baza yenilənir.")
-        safe_admin_step(chat_id, message)
-        return
-
-    if callback_id:
-        safe_answer_callback_query(callback_id, "📦 Baza yeniləmə")
-
-    admin_update_state[chat_id] = "awaiting_db_link"
-    set_db_update_state(chat_id, "awaiting_link")
-    logger.info("Admin requested db update chat_id=%s", chat_id)
-    safe_admin_step(
-        chat_id,
-        "🔗 Dropbox yükləmə linkini göndərin (besthome.db birbaşa yüklənəcək).",
-    )
-
-
-@bot.callback_query_handler(func=lambda c: c.data == "admin_update_db")
-@callback_guard
-def cb_admin_update_db(c):
-    start_admin_update_db(c.message.chat.id, callback_id=c.id)
-
-
-@bot.message_handler(
-    content_types=["text"],
-    func=lambda m: m.from_user
-    and is_admin(m.chat.id)
-    and admin_update_state.get(m.chat.id) == "awaiting_db_link",
-)
-def handle_admin_db_upload(message):
-    chat_id = message.chat.id
-    if message.text and message.text.startswith("/"):
-        return
-    if not message.from_user or not is_admin(chat_id):
-        return
-
-    if admin_update_state.get(chat_id) != "awaiting_db_link":
-        return
-
-    stale = cleanup_stale_db_updates()
-    if stale:
-        safe_admin_step(chat_id, "⚠️ Köhnə yenilənmə stuck idi, yenidən başladım.")
-
-    url = message.text.strip() if message.text else ""
-    url_lower = url.lower()
-    parts = urlsplit(url)
-    if (
-        not url
-        or parts.scheme.lower() != "https"
-        or "dropbox" not in parts.netloc.lower()
-    ):
-        safe_admin_step(
-            chat_id, "❌ Zəhmət olmasa HTTPS Dropbox yükləmə linki göndərin."
-        )
-        return
-
-    running = get_running_db_update()
-    if running:
-        started_at = running[1].get("started_at", now_utc())
-        remaining = DB_UPDATE_TTL_SECONDS - (now_utc() - started_at).total_seconds()
-        safe_admin_step(
-            chat_id,
-            "⏳ Hal-hazırda baza yenilənir"
-            f" (qalan: təxmini {format_seconds(remaining)}).",
-        )
-        return
-
-    if not acquire_db_update_lock(chat_id):
-        safe_admin_step(
-            chat_id, "⏳ Hal-hazırda baza yenilənir. Zəhmət olmasa gözləyin."
-        )
-        return
-
-    safe_admin_step(chat_id, "✅ Link alındı. ⏳ Yenilənir…")
-    logger.info("Admin db update link received chat_id=%s url=%s", chat_id, url)
-    admin_update_state[chat_id] = "updating_db"
-    set_db_update_state(chat_id, "running")
-    try:
-        threading.Thread(
-            target=run_db_update_pipeline,
-            args=(chat_id, url),
-            daemon=True,
-        ).start()
-    except Exception:
-        release_db_update_lock(chat_id)
-        admin_update_state.pop(chat_id, None)
-        clear_db_update_state(chat_id)
-        logger.exception("Failed to start db update thread chat_id=%s", chat_id)
-        safe_admin_step(
-            chat_id, "❌ Yenilənmə başladılmadı. Zəhmət olmasa yenidən yoxlayın."
-        )
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm|"))
