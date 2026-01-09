@@ -479,7 +479,7 @@ TEXTS_AZ = {
     "admin_panel_direct_message": "📨 İstifadəçiyə mesaj göndər",
     "admin_panel_customer_requests_access": "📌 Müştəri istəkləri icazəsi",
     "admin_panel_archived_requests": "🗄 Arxivlənmiş müştəri istəkləri",
-    "admin_panel_support_chats": "💬 Ödəniş çatları",
+    "admin_panel_support_chats": "💬 Online chat",
     "financial_reports_back": "⬅️ Geri (Admin Panel)",
     "financial_reports_history": "📜 Ödəniş tarixçəsi",
     "financial_reports_referral": "🤝 Referral statistikası",
@@ -4663,25 +4663,14 @@ def build_card_payment_button(plan_key: str) -> types.InlineKeyboardButton:
 def build_payment_action_markup(
     plan_key: str, plan: dict, payment_code: str, include_card_button: bool = True
 ) -> types.InlineKeyboardMarkup:
-    contact_message = (
-        "Salam.\n"
-        "Best Home Əmlak Botu üçün 1 günlük paket almaq istəyirəm.\n\n"
-        f"Ödəniş kodu: {payment_code}"
-    )
-    encoded_message = quote(contact_message, safe="")
-    whatsapp_url = f"https://wa.me/994708468585?text={encoded_message}"
-    telegram_url = f"https://t.me/esedovesed?text={encoded_message}"
-
     mk = types.InlineKeyboardMarkup(row_width=1)
     if include_card_button:
         mk.add(build_card_payment_button(plan_key))
     mk.add(
         types.InlineKeyboardButton(
-            "💳 Ödəniş etmək istəyirəm", callback_data="supportchat:start"
+            "💬 Online chat (ödəniş dəstəyi)", callback_data="supportchat:start"
         )
     )
-    mk.add(types.InlineKeyboardButton("📲 WhatsApp-da yaz", url=whatsapp_url))
-    mk.add(types.InlineKeyboardButton("✈️ Telegram-da yaz", url=telegram_url))
     mk.add(types.InlineKeyboardButton("✅ Ödəniş etdim", callback_data=f"paydone|{plan_key}"))
     return mk
 
@@ -4740,7 +4729,7 @@ def start_support_session(
 def notify_admins_new_support_session(session: dict) -> None:
     name = session.get("display_name") or f"User {session.get('user_id')}"
     text = (
-        "🆕 Yeni ödəniş çat sorğusu\n"
+        "🆕 Yeni online chat sorğusu\n"
         f"👤 {name}\n"
         f"ID: {session.get('user_id')}\n"
         f"Sessiya: {session.get('session_id')}"
@@ -6236,7 +6225,7 @@ def build_main_menu(
         buttons.append("ℹ️ Haqqında")
 
     if is_feature_enabled("complaints", chat_id):
-        buttons.append("📩 Şikayət və təkliflər")
+        buttons.append("📨 Şikayət və təkliflər")
 
     if is_admin_user:
         buttons.append(TEXTS_AZ["admin_panel_button"])
@@ -8060,14 +8049,16 @@ def notify_admin_complaint(message, category: str, user_text: str):
     bot.send_message(ADMIN_ID, text, reply_markup=mk)
 
 
-@bot.message_handler(func=lambda m: m.text == "📩 Şikayət və təkliflər")
+@bot.message_handler(func=lambda m: m.text == "📨 Şikayət və təkliflər")
 def complaint_entry(message):
     if message.text and message.text.startswith('/'):
         return
 
     if not is_complaint_access_allowed(message.chat.id):
         return
-    start_complaint_flow(message.chat.id)
+    if is_admin(message.chat.id):
+        return
+    start_support_chat_for_user(message.chat.id, message.from_user)
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "open_complaint")
@@ -8079,7 +8070,9 @@ def cb_open_complaint(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-    start_complaint_flow(c.message.chat.id)
+    if is_admin(c.from_user.id):
+        return
+    start_support_chat_for_user(c.message.chat.id, c.from_user)
 
 
 @bot.message_handler(
@@ -8474,7 +8467,7 @@ def about(message):
     mk = types.InlineKeyboardMarkup()
     mk.add(
         types.InlineKeyboardButton(
-            "📩 Şikayət və təkliflər", callback_data="open_complaint"
+            "📨 Şikayət və təkliflər", callback_data="supportchat:start"
         )
     )
     bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=mk)
@@ -8496,21 +8489,23 @@ def open_support_chat_from_menu(message):
         return
     if is_admin(message.chat.id):
         return
-    reset_user_state(message.chat.id)
+    start_support_chat_for_user(message.chat.id, message.from_user)
+
+
+def start_support_chat_for_user(chat_id: int, user: types.User):
+    reset_user_state(chat_id)
     existing_session = get_support_session_by_user(
-        message.chat.id, SUPPORT_SESSION_STATUS_OPEN
+        chat_id, SUPPORT_SESSION_STATUS_OPEN
     )
     session = start_support_session(
-        message.chat.id,
-        fallback_name=(
-            f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}"
-        ).strip()
-        or message.from_user.username,
+        chat_id,
+        fallback_name=(f"{user.first_name or ''} {user.last_name or ''}").strip()
+        or user.username,
     )
     if not existing_session:
         notify_admins_new_support_session(session)
     bot.send_message(
-        message.chat.id,
+        chat_id,
         "📩 Sorğunuz adminə göndərildi. Buradan yaza bilərsiniz.",
     )
 
@@ -8564,23 +8559,7 @@ def cb_supportchat_start(c):
         safe_answer_callback_query(c.id)
         return
     chat_id = c.message.chat.id
-    reset_user_state(chat_id)
-    existing_session = get_support_session_by_user(
-        chat_id, SUPPORT_SESSION_STATUS_OPEN
-    )
-    session = start_support_session(
-        chat_id,
-        fallback_name=(
-            f"{c.from_user.first_name or ''} {c.from_user.last_name or ''}"
-        ).strip()
-        or c.from_user.username,
-    )
-    if not existing_session:
-        notify_admins_new_support_session(session)
-    bot.send_message(
-        chat_id,
-        "📩 Sorğunuz adminə göndərildi. Buradan yaza bilərsiniz.",
-    )
+    start_support_chat_for_user(chat_id, c.from_user)
     safe_answer_callback_query(c.id)
 
 
@@ -8674,6 +8653,7 @@ def cb_payplan(c):
         "Ödənişdən sonra mütləq\n"
         "✅ “Ödəniş etdim” düyməsinə klikləyin.\n"
         "Yalnız bundan sonra hesabınız aktivləşdirilir.\n\n"
+        "Ödənişlə bağlı sualınız varsa, birbaşa bot daxilindən adminlə yazın.\n\n"
         "🆔 Ödəniş kodu:\n"
         f"BH-{chat_id}"
     )
