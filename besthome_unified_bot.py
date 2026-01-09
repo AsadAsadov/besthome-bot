@@ -1620,12 +1620,16 @@ def count_new_listings_today(db_path: str, from_id: int, to_id: int) -> int:
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.cursor()
+        window = get_last_24h_window()
+        date_sql, date_params = build_last_24h_clause("created_at", window)
         cur.execute(
             """
             SELECT COUNT(*)
             FROM listings
-            WHERE created_at >= datetime('now', '-24 hours')
-            """,
+            WHERE 1=1
+            """
+            + date_sql,
+            date_params,
         )
         row = cur.fetchone()
         return int(row[0]) if row and row[0] is not None else 0
@@ -4681,20 +4685,6 @@ def compute_total_pages(total_count: int) -> int:
 
 
 def get_last_24h_window():
-    try:
-        conn = sqlite3.connect(":memory:")
-        cur = conn.cursor()
-        cur.execute("SELECT datetime('now','-1 day'), datetime('now')")
-        row = cur.fetchone()
-        conn.close()
-        if row and row[0] and row[1]:
-            start = datetime.fromisoformat(str(row[0]))
-            now = datetime.fromisoformat(str(row[1]))
-            logger.info("Last 24h stats computed using database time window")
-            return start, now
-    except Exception:
-        logger.exception("Failed to fetch SQLite time window, falling back to UTC")
-
     now = datetime.utcnow()
     start = now - timedelta(hours=24)
     logger.info("Last 24h stats computed using rolling window (now-24h)")
@@ -4975,12 +4965,14 @@ def build_last_24h_clause(
 ):
     if not column:
         return "", []
+    start = (window or (None, None))[0] or (datetime.utcnow() - timedelta(hours=24))
+    start_ts = int(start.replace(tzinfo=timezone.utc).timestamp())
+    start_str = format_sqlite_datetime(start)
     clause = (
-        " AND ((typeof({col})='integer' "
-        "AND {col} >= strftime('%s','now','-1 day') AND {col} < strftime('%s','now')) "
-        "OR (datetime({col}) >= datetime('now','-1 day') AND datetime({col}) < datetime('now')))"
+        " AND ((typeof({col})='integer' AND {col} >= ?) "
+        "OR (datetime({col}) >= datetime(?)))"
     ).format(col=column)
-    return clause, []
+    return clause, [start_ts, start_str]
 
 
 def build_today_clause(
@@ -13518,13 +13510,13 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
         results.append(d)
     conn.close()
 
-    start, end = window
+    start, _ = window
     filtered = []
     for ev in results:
         ev_dt = safe_date(ev)
         if ev_dt == datetime.min:
             continue
-        if not (start <= ev_dt < end):
+        if ev_dt < start:
             continue
         if not matches_today_rayon(ev, filters):
             continue
