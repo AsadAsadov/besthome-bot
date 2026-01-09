@@ -1567,10 +1567,8 @@ def count_new_listings_today(db_path: str, from_id: int, to_id: int) -> int:
             """
             SELECT COUNT(*)
             FROM listings
-            WHERE id > ? AND id <= ?
-              AND date(created_at) = date('now')
+            WHERE created_at >= datetime('now', '-24 hours')
             """,
-            (from_id, to_id),
         )
         row = cur.fetchone()
         return int(row[0]) if row and row[0] is not None else 0
