@@ -149,6 +149,12 @@ import os
 
 ADMIN_ID = PRIMARY_ADMIN_ID or ADMIN_ID
 ADMIN_IDS = CONFIG_ADMIN_IDS or [ADMIN_ID]
+_raw_auto_update_sender_ids = os.getenv("AUTO_UPDATE_SENDER_IDS", "")
+AUTO_UPDATE_SENDER_IDS = {
+    int(item)
+    for item in (value.strip() for value in _raw_auto_update_sender_ids.split(","))
+    if item
+}
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -4799,6 +4805,49 @@ def _detect_ts_kind(cur, table: str, col: str) -> Optional[str]:
     if len(value_str) >= 10:
         return "iso"
     return None
+
+
+def is_auto_update_sender(message: Optional[types.Message]) -> bool:
+    if not message:
+        return False
+    sender = getattr(message, "from_user", None)
+    sender_id = getattr(sender, "id", None)
+    if sender_id is not None:
+        try:
+            if int(sender_id) in AUTO_UPDATE_SENDER_IDS:
+                return True
+        except Exception:
+            pass
+    via_bot = getattr(message, "via_bot", None)
+    if via_bot:
+        try:
+            if int(via_bot.id) in AUTO_UPDATE_SENDER_IDS:
+                return True
+        except Exception:
+            pass
+        if getattr(via_bot, "is_bot", False):
+            return True
+    sender_chat = getattr(message, "sender_chat", None)
+    if sender_chat:
+        try:
+            if int(sender_chat.id) in AUTO_UPDATE_SENDER_IDS:
+                return True
+        except Exception:
+            pass
+    if sender and getattr(sender, "is_bot", False):
+        return True
+    return False
+
+
+def format_auto_link_datetime(dt_text: str) -> str:
+    dt = parse_dt_safe(dt_text)
+    if not dt:
+        return dt_text
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.astimezone().strftime("%Y-%m-%d %H:%M")
 
 
 def _select_first_existing_table(cur, candidates: Tuple[str, ...]) -> Optional[str]:
@@ -15607,12 +15656,17 @@ def trigger_auto_update_db(admin_id: int, url: str) -> None:
     run_db_update_pipeline(admin_id, url)
 
 
-def handle_auto_update_db_link(admin_id: int, url: str) -> bool:
+def handle_auto_update_db_link(
+    admin_id: int,
+    url: str,
+    record_auto_link: bool = False,
+) -> bool:
     cleaned_url = (url or "").strip()
     if not cleaned_url:
         return False
-    save_last_dropbox_url(cleaned_url)
-    append_dropbox_url_history(cleaned_url)
+    if record_auto_link:
+        save_last_dropbox_url(cleaned_url)
+        append_dropbox_url_history(cleaned_url)
     trigger_auto_update_db(admin_id, cleaned_url)
     return True
 
@@ -15629,7 +15683,11 @@ def auto_update_db_cmd(m):
         )
         return
     url = parts[1].strip()
-    handle_auto_update_db_link(m.chat.id, url)
+    handle_auto_update_db_link(
+        m.chat.id,
+        url,
+        record_auto_link=is_auto_update_sender(m),
+    )
 
 @bot.callback_query_handler(
     func=lambda c: c.data.startswith("adm_act:")
@@ -15674,7 +15732,7 @@ def cb_admin_lastlink_refresh(c):
         )
         try:
             bot.edit_message_text(
-                "❌ Hələ avtomatik yaradılmış link yoxdur.",
+                "❌ Hələ sistem tərəfindən göndərilmiş link yoxdur.",
                 chat_id=chat_id,
                 message_id=c.message.message_id,
                 reply_markup=mk,
@@ -15684,9 +15742,9 @@ def cb_admin_lastlink_refresh(c):
         return
 
     display_history = list(reversed(history[-5:]))
-    text_lines = ["📜 Son istifadə olunan linklər", "────────────────────"]
+    text_lines = ["📜 Son avtomatik linklər", "────────────────────"]
     for item in display_history:
-        text_lines.append(f"🕒 {item['datetime']}")
+        text_lines.append(f"🕒 {format_auto_link_datetime(item['datetime'])}")
         text_lines.append(f"🔗 {item['url']}")
         text_lines.append("")
     text = "\n".join(text_lines).strip()
@@ -15714,7 +15772,9 @@ def cb_admin_run_lastlink(c):
         return
     history = load_dropbox_url_history()
     if not history:
-        safe_answer_callback_query(c.id, "❌ Link tapılmadı.")
+        safe_answer_callback_query(
+            c.id, "❌ Hələ sistem tərəfindən göndərilmiş link yoxdur."
+        )
         return
     selected_link = history[-1]["url"]
     try:
