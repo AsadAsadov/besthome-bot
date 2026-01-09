@@ -8439,31 +8439,37 @@ def format_stats_text(
 
 
 def send_user_statistics(chat_id: int, period_key: str, message_id: Optional[int] = None):
-    selected = period_key if period_key in STATS_FILTER_LABELS else "24h"
-    user_stats_filter[chat_id] = selected
-    base_stats = compute_user_statistics("all")
-    period_stats = compute_user_statistics(selected)
-    is_admin = is_admin(chat_id)
-    text = format_stats_text(base_stats, period_stats, selected, is_admin=is_admin)
-    keyboard = build_user_stats_keyboard(selected)
+    try:
+        selected = period_key if period_key in STATS_FILTER_LABELS else "24h"
+        logger.info("STATS start chat_id=%s period=%s", chat_id, selected)
+        user_stats_filter[chat_id] = selected
+        base_stats = compute_user_statistics("all")
+        period_stats = compute_user_statistics(selected)
+        admin_flag = is_admin(chat_id)
+        text = format_stats_text(base_stats, period_stats, selected, is_admin=admin_flag)
+        keyboard = build_user_stats_keyboard(selected)
 
-    if message_id:
-        bot.edit_message_text(
-            text,
-            chat_id,
-            message_id,
-            reply_markup=keyboard,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-    else:
-        bot.send_message(
-            chat_id,
-            text,
-            reply_markup=keyboard,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
+        if message_id:
+            bot.edit_message_text(
+                text,
+                chat_id,
+                message_id,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        else:
+            bot.send_message(
+                chat_id,
+                text,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        logger.info("STATS done chat_id=%s period=%s", chat_id, selected)
+    except Exception as exc:
+        logger.exception("STATISTICS handler failed", exc_info=exc)
+        safe_send(chat_id, "❌ Statistika xətası baş verdi. Zəhmət olmasa yenidən yoxlayın.")
 
 
 def send_market_pulse_overview(chat_id: int):
