@@ -250,8 +250,9 @@ def handle_start(message):
 
     logger.info("START HANDLER HIT user=%s arg=%s", chat_id, start_arg)
 
+    is_first_time = False
     try:
-        handle_start_attribution_and_demo(message, start_arg)
+        is_first_time = handle_start_attribution_and_demo(message, start_arg)
     except Exception as e:
         logger.exception("Start logic failed")
         bot.send_message(
@@ -288,7 +289,7 @@ def handle_start(message):
         )
     )
 
-    if not user_active:
+    if not user_active and not is_first_time:
         bot.send_message(
             chat_id,
             "⏳ Pulsuz sınaq müddətiniz başa çatıb.\n"
@@ -301,7 +302,7 @@ def handle_start(message):
 
 def handle_start_attribution_and_demo(message, start_arg: str):
     # existing start logic here (do not remove)
-    register_or_update_user_if_needed(message, start_arg)
+    return register_or_update_user_if_needed(message, start_arg)
 
 
 def _pbkdf2_hash_password(password: str, iterations: int = 120_000) -> str:
@@ -6282,7 +6283,7 @@ def send_listing_card(
     bot.send_message(chat_id, text, reply_markup=mk)
 
 
-def register_or_update_user_if_needed(message, start_arg: str):
+def register_or_update_user_if_needed(message, start_arg: str) -> bool:
     chat_id = message.chat.id
     username = message.from_user.username or ""
     first_name = message.from_user.first_name or ""
@@ -6440,9 +6441,6 @@ def register_or_update_user_if_needed(message, start_arg: str):
         elif "demo_used" in row and row["demo_used"]:
             demo_info_text = "🎁 Demo müddətiniz bitib. Ödəniş menyusundan yeniləyə bilərsiniz."
 
-    if is_first_time:
-        send_payment_menu(chat_id)
-
     # 🧩 Admin üçün avtomatik təsdiq
     if is_admin(chat_id):
         try:
@@ -6461,10 +6459,12 @@ def register_or_update_user_if_needed(message, start_arg: str):
     if is_first_start and not is_admin(chat_id):
         bot.send_message(
             chat_id,
-            "👋 Xoş gəldiniz!\n\n"
-            "Bu bot vasitəsilə satılan və kirayə verilən evləri filtr, açar söz və əlaqə nömrəsi ilə rahat axtara bilərsiniz.\n"
-            "⏳ Davam etmək üçün admin təsdiqini gözləyin.\n"
-            "Təsdiq tamamlanan kimi bot avtomatik aktiv olacaq.",
+            "👋 Xoş gəldin BestHome-a!\n\n"
+            "Burada sən:\n"
+            "• Satılan və kirayə verilən evləri tapa bilərsən\n"
+            "• Açar sözlə və filtr ilə axtarış edə bilərsən\n"
+            "• Uyğun elan çıxanda bildiriş ala bilərsən\n\n"
+            "Başlamaq üçün Menyudan istədiyin bölməni seç.",
             disable_web_page_preview=True,
         )
         set_first_start_false_for_user(chat_id)
@@ -6472,26 +6472,12 @@ def register_or_update_user_if_needed(message, start_arg: str):
     set_user_state(chat_id, "MAIN")
     set_ui_context(chat_id, UI_CONTEXT_MAIN)
     if is_first_time:
-        if source_type == "qr":
-            demo_info_text = (
-                "🎉 QR vasitəsilə qoşuldunuz.\n\n"
-                "Sizə avtomatik olaraq 7 gün PULSUZ demo aktiv edildi.\n\n"
-                "⏳ Hazırda hesabınız qısa yoxlama mərhələsindədir.\n"
-                "Bu, botun təhlükəsiz və stabil işləməsi üçündür.\n\n"
-                "✅ Admin təsdiqi tamamlanan kimi bütün funksiyalar avtomatik açılacaq.\n"
-                "📌 Bu proses adətən çox çəkmir.\n\n"
-                "Gözlədiyiniz üçün təşəkkür edirik 🙏"
-            )
-        else:
-            demo_info_text = (
-                "Sizə 3 gün PULSUZ demo ayrıldı.\n"
-                "🔒 Demo admin təsdiqindən sonra aktiv olacaq.\n\n"
-                "📌 Təsdiqdən sonra botu tam şəkildə istifadə edə biləcəksiniz."
-            )
+        demo_info_text = None
     if demo_info_text:
         bot.send_message(chat_id, demo_info_text)
 
     logger.info("/start executed successfully for user %s", chat_id)
+    return is_first_time
 
 
 @bot.message_handler(func=lambda m: m.text == "🤝 Dostunu dəvət et")
@@ -8240,27 +8226,19 @@ def about(message):
 
     if not ensure_feature_available(message.chat.id, "about"):
         return
+    send_logo_if_exists(message.chat.id)
     text = (
         "🏠 BestHome Əmlak Botu\n\n"
-        "BestHome — Azərbaycanda satılan və kirayə verilən daşınmaz əmlak elanlarını rahat və sürətli tapmaq üçün hazırlanmış ağıllı Telegram botudur.\n\n"
-        "🔎 Axtarış imkanları\n"
-        "• Filtrlə axtarış (satılır / kirayə verilir, otaq, qiymət və s.)\n"
-        "• Açar sözlə axtarış (mətn yazmaq kifayətdir)\n"
-        "• Telefon nömrəsi ilə axtarış\n"
-        "• Ağıllı axtarış — yazdığınız mətni avtomatik analiz edir\n\n"
-        "📄 Elanlarla işləmə\n"
-        "• Elanlara baxış və səhifələmə\n"
-        "• Elanları ⭐ favorilərə əlavə etmə\n"
-        "• Favorilərdən çıxarma\n"
-        "• Satılıb / Kirayə verilib kimi işarələmə\n"
-        "• Qara siyahı ilə idarəetmə\n\n"
-        "🔔 Bildirişlər\n"
-        "• Yeni uyğun elan olduqda xəbərdarlıq\n"
-        "• Favori elanların qiyməti düşdükdə bildiriş\n\n"
-        "👥 Təhlükəsizlik\n"
-        "• Bot yalnız admin tərəfindən təsdiqlənmiş istifadəçilər üçün aktivdir\n"
-        "• Elanlar və istifadəçilər admin nəzarətindədir\n\n"
-        "📞 Əlaqə\n"
+        "Azərbaycanda satılan və kirayə verilən daşınmaz əmlak elanlarını tez, rahat və ağıllı tapmaq üçün hazırlanmış Telegram botu.\n\n"
+        "Nə edə bilərsiniz?\n"
+        "• Filtrlə və açar sözlə axtarış\n"
+        "• Telefon nömrəsi ilə elan tapmaq\n"
+        "• Elanları favorilərə əlavə etmək\n"
+        "• Qiymət düşəndə bildiriş almaq\n"
+        "• Satılıb / kirayə verilib kimi işarələmək\n\n"
+        "Təhlükəsizlik\n"
+        "Bot yalnız admin tərəfindən təsdiqlənmiş istifadəçilər üçün aktivdir.\n\n"
+        "Əlaqə\n"
         "Admin: @esedovesed"
     )
     mk = types.InlineKeyboardMarkup()
