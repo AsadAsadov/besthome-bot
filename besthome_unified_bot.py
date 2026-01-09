@@ -410,10 +410,10 @@ user_callback_locks: Dict[int, threading.Lock] = defaultdict(threading.Lock)
 admin_user_last_list: Dict[int, str] = {}
 admin_navigation_state: Dict[int, Dict[str, Any]] = {}
 bonus_probability_edit_state: Dict[int, bool] = {}
-BLOCKED_MESSAGE_TEXT = "Hesabınız müvəqqəti olaraq dayandırıldı."
-BLOCKED_PROMPT_TEXT = (
-    "Hesabınız aktiv deyil. Davam etmək üçün ödəniş edin və ya 3 gün demo istifadə edin."
+BLOCKED_MESSAGE_TEXT = (
+    "⛔ Siz botdan bloklanmısınız.\nƏlaqə üçün adminə müraciət edin."
 )
+PENDING_APPROVAL_MESSAGE_TEXT = "⏳ Hesabınız təsdiq gözləyir."
 STATUS_PENDING = "pending"
 STATUS_ACTIVE_PAID = "active_paid"
 STATUS_ACTIVE_DEMO = "active_demo"
@@ -4485,16 +4485,7 @@ def send_payment_menu(chat_id: int):
 
 
 def send_blocked_prompt(chat_id: int):
-    mk = types.InlineKeyboardMarkup()
-    if is_feature_enabled("payment", chat_id):
-        mk.add(types.InlineKeyboardButton("💳 Ödəniş et", callback_data="open_pay_menu"))
-    if is_demo_available(chat_id):
-        mk.add(
-            types.InlineKeyboardButton(
-                "🎁 3 gün demo istifadə et", callback_data="demo3"
-            )
-        )
-    bot.send_message(chat_id, BLOCKED_PROMPT_TEXT, reply_markup=mk)
+    bot.send_message(chat_id, BLOCKED_MESSAGE_TEXT)
 
 
 def check_subscription(
@@ -4509,6 +4500,10 @@ def check_subscription(
         if not silent:
             logger.info("User blocked access attempt chat_id=%s", chat_id)
             send_blocked_prompt(chat_id)
+        return False
+    if status == "PENDING":
+        if not silent:
+            bot.send_message(chat_id, PENDING_APPROVAL_MESSAGE_TEXT)
         return False
     if not silent:
         send_payment_menu(chat_id)
@@ -6243,21 +6238,29 @@ def register_or_update_user_if_needed(message, start_arg: str):
             bot.send_message(chat_id, "⚠️ Texniki problem oldu, amma bot aktivdir.")
         else:
             try:
-                username_display = username if username else "-"
-                username_line = (
-                    f"@{username_display}" if username_display != "-" else "-"
-                )
+                username_line = f"@{username}" if username else "-"
                 joined_at = (datetime.utcnow() + timedelta(hours=4)).strftime(
                     "%d.%m.%Y %H:%M"
                 )
                 admin_text = (
-                    "🆕 Yeni istifadəçi qoşuldu\n\n"
-                    f"👤 ID: {chat_id}\n"
-                    f"👤 Username: {username_line}\n"
-                    f"👤 Ad: {first_name}\n"
-                    f"⏰ Tarix: {joined_at}"
+                    "🆕 Yeni istifadəçi qoşuldu\n"
+                    f"ID: {chat_id}\n"
+                    f"Username: {username_line}\n"
+                    f"Ad: {first_name}\n"
+                    f"Tarix: {joined_at}"
                 )
-                bot.send_message(ADMIN_ID, admin_text)
+                mk = types.InlineKeyboardMarkup(row_width=1)
+                mk.add(
+                    types.InlineKeyboardButton(
+                        "✅ Təsdiqlə", callback_data=f"approve_user:{chat_id}"
+                    )
+                )
+                mk.add(
+                    types.InlineKeyboardButton(
+                        "⛔ Blokla", callback_data=f"block_user:{chat_id}"
+                    )
+                )
+                bot.send_message(ADMIN_ID, admin_text, reply_markup=mk)
             except Exception as e:
                 logger.warning(
                     "Failed to notify admin about new user %s: %s", chat_id, e
@@ -21258,6 +21261,77 @@ def show_pending_users(chat_id, message=None):
         message=message,
         force_new=message is None,
     )
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("approve_user:"))
+@callback_guard
+def cb_approve_new_user(c):
+    admin_id = getattr(getattr(c, "from_user", None), "id", None)
+    if not is_admin(admin_id):
+        logger.warning(
+            "Non-admin attempted new user approve from=%s data=%s",
+            admin_id,
+            c.data,
+        )
+        return
+    try:
+        uid = int(c.data.split(":", 1)[1])
+    except Exception:
+        logger.warning("Invalid approve_user callback data=%s", c.data)
+        return
+
+    conn = get_local_conn()
+    cur = conn.cursor()
+    schema = detect_users_schema()
+    columns = schema.get("columns", set())
+    updates = ["approved=1", "blocked=0"]
+    if "is_blocked" in columns:
+        updates.append("is_blocked=0")
+    if "blocked_at" in columns:
+        updates.append("blocked_at=NULL")
+    if "is_active" in columns:
+        updates.append("is_active=1")
+    cur.execute(f"UPDATE users SET {', '.join(updates)} WHERE chat_id=?", (uid,))
+    conn.commit()
+    conn.close()
+
+    try:
+        bot.edit_message_text(
+            f"✅ İstifadəçi təsdiqləndi\nID: {uid}",
+            chat_id=c.message.chat.id,
+            message_id=c.message.message_id,
+        )
+    except Exception:
+        logger.exception("Failed to edit approve message for user_id=%s", uid)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("block_user:"))
+@callback_guard
+def cb_block_new_user(c):
+    admin_id = getattr(getattr(c, "from_user", None), "id", None)
+    if not is_admin(admin_id):
+        logger.warning(
+            "Non-admin attempted new user block from=%s data=%s",
+            admin_id,
+            c.data,
+        )
+        return
+    try:
+        uid = int(c.data.split(":", 1)[1])
+    except Exception:
+        logger.warning("Invalid block_user callback data=%s", c.data)
+        return
+
+    block_user(uid)
+
+    try:
+        bot.edit_message_text(
+            f"⛔ İstifadəçi bloklandı\nID: {uid}",
+            chat_id=c.message.chat.id,
+            message_id=c.message.message_id,
+        )
+    except Exception:
+        logger.exception("Failed to edit block message for user_id=%s", uid)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_approve|"))
