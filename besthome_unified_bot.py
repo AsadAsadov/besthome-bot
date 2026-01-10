@@ -5512,7 +5512,7 @@ def build_payment_action_markup(
         mk.add(build_card_payment_button(plan_key))
     mk.add(
         types.InlineKeyboardButton(
-            "💬 Online chat (ödəniş dəstəyi)", callback_data="supportchat:start"
+            "💬 Adminlə əlaqə", callback_data="SUPPORT_TOGGLE"
         )
     )
     mk.add(types.InlineKeyboardButton("✅ Ödəniş etdim", callback_data=f"paydone|{plan_key}"))
@@ -5604,31 +5604,13 @@ def _should_notify_admin_for_user(user_id: int) -> bool:
 
 
 def notify_admins_support_incoming(user_id: int) -> None:
-    if not _should_notify_admin_for_user(user_id):
-        return
-    text = f"🔔 Yeni support mesajı var — {user_id}"
-    for admin_id in ADMIN_IDS:
-        bot.send_message(admin_id, text)
+    return
 
 
 def send_support_message_to_user_from_admin(
     admin_message: types.Message, session: dict
 ) -> None:
-    user_id = session.get("user_id")
-    if not user_id:
-        return
-    if admin_message.content_type == "text":
-        bot.send_message(user_id, admin_message.text)
-    elif admin_message.content_type == "voice":
-        bot.send_voice(user_id, admin_message.voice.file_id)
-    elif admin_message.content_type == "document":
-        bot.send_document(user_id, admin_message.document.file_id)
-    elif admin_message.content_type == "photo":
-        bot.send_photo(user_id, admin_message.photo[-1].file_id)
-    elif admin_message.content_type == "audio":
-        bot.send_audio(user_id, admin_message.audio.file_id)
-    elif admin_message.content_type == "video":
-        bot.send_video(user_id, admin_message.video.file_id)
+    return
 
 
 def send_blocked_prompt(chat_id: int):
@@ -9408,10 +9390,7 @@ def open_support_chat_from_menu(message):
     if is_admin(message.chat.id):
         return
     delete_user_command_message(message)
-    if is_user_support_active(message.chat.id):
-        close_support_chat_for_user(message.chat.id)
-        return
-    start_support_chat_for_user(message.chat.id, message.from_user)
+    toggle_support_inbox(message.chat.id, message.from_user)
 
 
 @bot.message_handler(func=lambda m: m.text in ("⛔ Çatı sonlandır", "🔚 Çatı sonlandır"))
@@ -9421,7 +9400,7 @@ def close_support_chat_from_menu(message):
     if is_admin(message.chat.id):
         return
     delete_user_command_message(message)
-    close_support_chat_for_user(message.chat.id)
+    close_support_session(message.chat.id)
 
 
 @bot.message_handler(func=lambda m: m.text == "🔔 Bildirişlər / Inbox")
@@ -9447,6 +9426,24 @@ def close_support_chat_for_user(chat_id: int) -> None:
             last_message_from=thread.get("last_message_from"),
         )
     set_support_session_active(chat_id, False)
+    set_support_session_last_ui_message_id(chat_id, None)
+
+
+def open_support_inbox(chat_id: int, user: types.User) -> None:
+    start_support_chat_for_user(chat_id, user)
+    show_user_support_inbox(chat_id)
+
+
+def close_support_session(chat_id: int) -> None:
+    close_support_chat_for_user(chat_id)
+    return_to_main_menu(chat_id)
+
+
+def toggle_support_inbox(chat_id: int, user: types.User) -> None:
+    if is_user_support_active(chat_id):
+        close_support_session(chat_id)
+        return
+    open_support_inbox(chat_id, user)
 
 
 def delete_last_ui_message_for_support(chat_id: int) -> None:
@@ -9498,15 +9495,11 @@ def send_support_sent_toast(chat_id: int) -> None:
 
 
 def send_support_reply_notification(chat_id: int) -> None:
-    mk = types.InlineKeyboardMarkup()
-    mk.add(
-        types.InlineKeyboardButton("📩 Mesajlara bax", callback_data="supportuser:open")
-    )
-    bot.send_message(chat_id, "🔔 Dəstəkdən yeni cavab var.", reply_markup=mk)
+    return
 
 
 def format_user_support_inbox_text(messages: List[dict]) -> str:
-    header = "🔔 Bildirişlər / Inbox"
+    header = "📩 Support Inbox"
     if not messages:
         return f"{header}\n\n📭 Dəstək mesajı yoxdur."
     lines = []
@@ -9573,25 +9566,14 @@ def cb_paytype_manual(c):
     chat_id = c.message.chat.id
 
 
-@bot.callback_query_handler(func=lambda c: c.data == "supportchat:start")
+@bot.callback_query_handler(func=lambda c: c.data == "SUPPORT_TOGGLE")
 @callback_guard
-def cb_supportchat_start(c):
+def cb_support_toggle(c):
     if is_admin(c.from_user.id):
         safe_answer_callback_query(c.id)
         return
     chat_id = c.message.chat.id
-    start_support_chat_for_user(chat_id, c.from_user)
-    safe_answer_callback_query(c.id)
-
-
-@bot.callback_query_handler(func=lambda c: c.data == "supportchat:end")
-@callback_guard
-def cb_supportchat_end(c):
-    if is_admin(c.from_user.id):
-        safe_answer_callback_query(c.id)
-        return
-    chat_id = c.message.chat.id
-    close_support_chat_for_user(chat_id)
+    toggle_support_inbox(chat_id, c.from_user)
     safe_answer_callback_query(c.id)
 
 
@@ -17572,13 +17554,11 @@ def cb_support_user_inbox(c):
         safe_answer_callback_query(c.id)
         return
     if action == "reply":
-        start_support_chat_for_user(chat_id, c.from_user)
-        show_user_support_inbox(chat_id)
+        open_support_inbox(chat_id, c.from_user)
         safe_answer_callback_query(c.id)
         return
     if action == "end":
-        close_support_chat_for_user(chat_id)
-        show_user_support_inbox(chat_id)
+        close_support_session(chat_id)
         safe_answer_callback_query(c.id)
         return
     if action == "back":
