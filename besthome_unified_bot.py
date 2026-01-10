@@ -408,6 +408,7 @@ UI_CONTEXT_SEARCH = "browsing_search_results"
 UI_CONTEXT_ADMIN = "browsing_admin_users"
 ui_context_state: Dict[int, str] = defaultdict(lambda: UI_CONTEXT_MAIN)
 ui_message_state: Dict[int, int] = {}
+last_ui_message_id: Dict[int, int] = ui_message_state
 search_reminder_shown = set()  # Session-level reminder flag
 session_interactions = {}
 db_update_state_lock = threading.Lock()
@@ -6962,6 +6963,17 @@ def send_with_reply_keyboard(
     send_menu_visibility_hint(chat_id)
 
 
+def delete_user_command_message(message: types.Message) -> None:
+    try:
+        bot.delete_message(message.chat.id, message.message_id)
+    except Exception:
+        logger.debug(
+            "Failed to delete user command message chat_id=%s message_id=%s",
+            message.chat.id,
+            message.message_id,
+        )
+
+
 def edit_or_send_message(
     user_id: int,
     text: str,
@@ -7000,6 +7012,58 @@ def edit_or_send_message(
         return None
 
 
+def update_ui_message(
+    user_id: int,
+    chat_id: int,
+    text: str,
+    keyboard: Optional[types.InlineKeyboardMarkup],
+    *,
+    parse_mode: Optional[str] = None,
+    disable_preview: Optional[bool] = None,
+) -> Optional[int]:
+    message_id = last_ui_message_id.get(user_id)
+    if message_id:
+        edited = False
+        try:
+            bot.edit_message_text(
+                text,
+                chat_id,
+                message_id,
+                reply_markup=keyboard,
+                parse_mode=parse_mode,
+                disable_web_page_preview=disable_preview,
+            )
+            edited = True
+        except Exception:
+            logger.debug("update_ui_message edit text failed chat_id=%s", chat_id)
+        if not edited:
+            try:
+                bot.edit_message_reply_markup(
+                    chat_id,
+                    message_id,
+                    reply_markup=keyboard,
+                )
+                edited = True
+            except Exception:
+                logger.debug("update_ui_message edit markup failed chat_id=%s", chat_id)
+        if edited:
+            last_ui_message_id[user_id] = message_id
+            return message_id
+    try:
+        msg = bot.send_message(
+            chat_id,
+            text,
+            reply_markup=keyboard,
+            parse_mode=parse_mode,
+            disable_web_page_preview=disable_preview,
+        )
+        last_ui_message_id[user_id] = msg.message_id
+        return msg.message_id
+    except Exception:
+        logger.exception("update_ui_message send failed chat_id=%s", chat_id)
+        return None
+
+
 def send_or_edit_ui_message(
     user_id: int,
     text: str,
@@ -7008,42 +7072,14 @@ def send_or_edit_ui_message(
     parse_mode: Optional[str] = None,
     disable_preview: Optional[bool] = None,
 ) -> Optional[int]:
-    message_id = ui_message_state.get(user_id)
-    if message_id:
-        try:
-            bot.edit_message_text(
-                text,
-                user_id,
-                message_id,
-                parse_mode=parse_mode,
-                disable_web_page_preview=disable_preview,
-            )
-        except Exception:
-            logger.debug("send_or_edit_ui_message edit text failed chat_id=%s", user_id)
-        try:
-            bot.edit_message_reply_markup(
-                user_id,
-                message_id,
-                reply_markup=keyboard,
-            )
-        except Exception:
-            logger.debug(
-                "send_or_edit_ui_message edit markup failed chat_id=%s", user_id
-            )
-        return message_id
-    try:
-        msg = bot.send_message(
-            user_id,
-            text,
-            reply_markup=keyboard,
-            parse_mode=parse_mode,
-            disable_web_page_preview=disable_preview,
-        )
-        ui_message_state[user_id] = msg.message_id
-        return msg.message_id
-    except Exception:
-        logger.exception("send_or_edit_ui_message send failed chat_id=%s", user_id)
-        return None
+    return update_ui_message(
+        user_id,
+        user_id,
+        text,
+        keyboard,
+        parse_mode=parse_mode,
+        disable_preview=disable_preview,
+    )
 
 
 def build_main_menu(
@@ -7595,6 +7631,7 @@ def share_referral(message):
         return
 
     chat_id = message.chat.id
+    delete_user_command_message(message)
     if is_admin(chat_id):
         main_menu(chat_id)
         return
@@ -7616,7 +7653,7 @@ def share_referral(message):
         "🎯 10 istifadəçi tamam olduqda isə:\n"
         "→ +45 gün əlavə BONUS 🎉"
     )
-    bot.send_message(chat_id, text)
+    update_ui_message(chat_id, chat_id, text, None)
 
 
 # =============== 📝 MÜŞTƏRİ SORĞULARI ===============
@@ -8876,6 +8913,7 @@ def show_account_status(message):
     if message.text and message.text.startswith('/'):
         return
 
+    delete_user_command_message(message)
     if not ensure_feature_available(message.chat.id, "account"):
         return
     if not ensure_allowed(message, allow_blocked=True):
@@ -9087,6 +9125,7 @@ def show_global_statistics(message):
     if message.text and message.text.startswith('/'):
         return
 
+    delete_user_command_message(message)
     if not ensure_feature_available(message.chat.id, "statistics"):
         return
     if not ensure_allowed(message, allow_blocked=True):
@@ -9152,10 +9191,16 @@ def about(message):
     if message.text and message.text.startswith('/'):
         return
 
+    delete_user_command_message(message)
     if not ensure_feature_available(message.chat.id, "about"):
         return
-    send_logo_if_exists(message.chat.id)
-    bot.send_message(message.chat.id, build_about_text(), parse_mode="Markdown")
+    update_ui_message(
+        message.chat.id,
+        message.chat.id,
+        build_about_text(),
+        None,
+        parse_mode="Markdown",
+    )
 
 
 @bot.message_handler(func=lambda m: m.text == "💳 Ödəniş")
@@ -9163,6 +9208,7 @@ def payment_menu_entry(message):
     if message.text and message.text.startswith('/'):
         return
 
+    delete_user_command_message(message)
     if not ensure_feature_available(message.chat.id, "payment"):
         return
     send_payment_menu(message.chat.id)
@@ -10294,6 +10340,7 @@ def search_system_menu(message):
     if message.text and message.text.startswith('/'):
         return
 
+    delete_user_command_message(message)
     if not ensure_feature_available(message.chat.id, "main_search"):
         return
     if not ensure_allowed(message):
@@ -16601,8 +16648,8 @@ def send_admin_panel(
     mk = build_admin_panel_keyboard(chat_id, page)
     set_user_state(chat_id, "ADMIN")
     if message:
-        ui_message_state[chat_id] = message.message_id
-    send_or_edit_ui_message(chat_id, text, mk)
+        last_ui_message_id[chat_id] = message.message_id
+    update_ui_message(chat_id, chat_id, text, mk)
 
 
 def send_feature_flags_menu(chat_id: int, message: Optional[types.Message] = None):
@@ -16632,20 +16679,15 @@ def send_feature_flags_menu(chat_id: int, message: Optional[types.Message] = Non
     )
     text = "⚙️ Funksiyaları idarə et\n" f"{mode_text}"
 
-    try:
-        if message:
-            bot.edit_message_text(
-                text, chat_id=chat_id, message_id=message.message_id, reply_markup=mk
-            )
-        else:
-            bot.send_message(chat_id, text, reply_markup=mk)
-    except Exception:
-        bot.send_message(chat_id, text, reply_markup=mk)
+    if message:
+        last_ui_message_id[chat_id] = message.message_id
+    update_ui_message(chat_id, chat_id, text, mk)
 
 
 @bot.message_handler(func=lambda m: m.text == TEXTS_AZ["admin_panel_button"])
 @bot.message_handler(commands=["admin"])
 def open_admin_panel(message):
+    delete_user_command_message(message)
     if not is_admin(message.chat.id):
         reset_user_state(message.chat.id)
         return_to_main_menu(message.chat.id)
@@ -16659,7 +16701,7 @@ def _handle_admin_panel_action(
     chat_id: int, action_text: str, message: Optional[types.Message] = None
 ):
     if message:
-        ui_message_state[chat_id] = message.message_id
+        last_ui_message_id[chat_id] = message.message_id
     if action_text in {
         TEXTS_AZ["admin_panel_customer_requests"],
         TEXTS_AZ["admin_panel_customer_requests_access"],
@@ -16859,6 +16901,8 @@ def cb_admin_lastlink_refresh(c):
         safe_answer_callback_query(c.id)
         return_to_main_menu(chat_id)
         return
+    if c.message:
+        last_ui_message_id[chat_id] = c.message.message_id
     history = load_dropbox_url_history()
     if not history:
         mk = types.InlineKeyboardMarkup()
@@ -16867,15 +16911,12 @@ def cb_admin_lastlink_refresh(c):
                 ADMIN_PANEL_BACK_MAIN, callback_data="ui_admin_menu"
             )
         )
-        try:
-            bot.edit_message_text(
-                "❌ Hələ sistem tərəfindən göndərilmiş link yoxdur.",
-                chat_id=chat_id,
-                message_id=c.message.message_id,
-                reply_markup=mk,
-            )
-        except Exception:
-            logger.exception("Failed to edit admin panel for last link history empty")
+        update_ui_message(
+            chat_id,
+            chat_id,
+            "❌ Hələ sistem tərəfindən göndərilmiş link yoxdur.",
+            mk,
+        )
         return
 
     display_history = history[:5]
@@ -16888,15 +16929,7 @@ def cb_admin_lastlink_refresh(c):
     mk = types.InlineKeyboardMarkup()
     mk.add(types.InlineKeyboardButton("🔄 Yenilə", callback_data="a_run_lastlink_latest"))
     mk.add(types.InlineKeyboardButton(ADMIN_PANEL_BACK_MAIN, callback_data="ui_admin_menu"))
-    try:
-        bot.edit_message_text(
-            text,
-            chat_id=chat_id,
-            message_id=c.message.message_id,
-            reply_markup=mk,
-        )
-    except Exception:
-        logger.exception("Failed to edit admin panel for last link history")
+    update_ui_message(chat_id, chat_id, text, mk)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("a_run_lastlink_"))
@@ -16907,6 +16940,8 @@ def cb_admin_run_lastlink(c):
         safe_answer_callback_query(c.id)
         return_to_main_menu(chat_id)
         return
+    if c.message:
+        last_ui_message_id[chat_id] = c.message.message_id
     history = load_dropbox_url_history()
     if not history:
         safe_answer_callback_query(
@@ -16914,18 +16949,13 @@ def cb_admin_run_lastlink(c):
         )
         return
     selected_link = history[0]["url"]
-    try:
-        bot.edit_message_text(
-            "🔄 Yenilənmə başladıldı\n🔗 İstifadə olunan link:\n"
-            f"{selected_link}",
-            chat_id=chat_id,
-            message_id=c.message.message_id,
-            reply_markup=build_admin_panel_keyboard(
-                chat_id, page=admin_panel_page_state.get(chat_id, 1)
-            ),
-        )
-    except Exception:
-        logger.exception("Failed to edit admin panel after last link run")
+    update_ui_message(
+        chat_id,
+        chat_id,
+        "🔄 Yenilənmə başladıldı\n🔗 İstifadə olunan link:\n"
+        f"{selected_link}",
+        build_admin_panel_keyboard(chat_id, page=admin_panel_page_state.get(chat_id, 1)),
+    )
     trigger_auto_update_db(chat_id, selected_link)
 
 
