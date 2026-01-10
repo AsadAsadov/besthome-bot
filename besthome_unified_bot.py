@@ -7201,7 +7201,7 @@ def build_search_menu_inline_markup(chat_id: int) -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup()
     mk.row(
         types.InlineKeyboardButton("🏠 Satılır", callback_data="search_menu:sale"),
-        types.InlineKeyboardButton("🏡 Kirayə verilir", callback_data="search_menu:rent"),
+        types.InlineKeyboardButton("🌳 Kirayə verilir", callback_data="search_menu:rent"),
     )
     mk.row(
         types.InlineKeyboardButton(
@@ -7211,13 +7211,18 @@ def build_search_menu_inline_markup(chat_id: int) -> types.InlineKeyboardMarkup:
             "📞 Nömrə ilə axtar", callback_data="search_menu:phone"
         ),
     )
-    mk.add(types.InlineKeyboardButton("⭐ Favorilərim", callback_data="search_menu:favs"))
+    fav_button = types.InlineKeyboardButton(
+        "⭐ Favorilərim", callback_data="search_menu:favs"
+    )
     if is_feature_enabled("notifications", chat_id):
-        mk.add(
+        mk.row(
+            fav_button,
             types.InlineKeyboardButton(
                 "🔔 Bildirişlər", callback_data="search_menu:notifs"
             )
         )
+    else:
+        mk.add(fav_button)
     mk.add(
         types.InlineKeyboardButton(
             "🌐 Əmlak bazası / Nömrə ilə axtarış",
@@ -10393,6 +10398,23 @@ def cb_search_menu(c):
         handle_notifications_menu(chat_id)
 
 
+@bot.callback_query_handler(func=lambda c: c.data == "search_flow:back")
+@callback_guard
+def cb_search_flow_back(c):
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id if c.message else c.from_user.id
+    if c.message:
+        last_ui_message_id[chat_id] = c.message.message_id
+    reset_search_state(chat_id)
+    set_search_menu_active(chat_id, True)
+    cancel_price_range_flow(chat_id)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
 @bot.message_handler(func=lambda m: m.text == "🎁 Şansını sına")
 def handle_bonus_spin_request(message):
     if message.text and message.text.startswith('/'):
@@ -10708,7 +10730,7 @@ def handle_phone_search_menu(chat_id: int):
         chat_id,
         chat_id,
         "Telefon nömrəsini daxil edin…",
-        None,
+        search_flow_back_keyboard(),
     )
 
 
@@ -12455,13 +12477,14 @@ def cb_search_select(c):
                 c.id, "Günlük ağıllı axtarış limitiniz bitib.", show_alert=True
             )
             return
-        search_state[chat_id] = {"mode": "smart"}
-        msg = bot.send_message(
+        search_state[chat_id] = {"mode": "smart", "step": "WAITING_FOR_SMART"}
+        update_ui_message(
+            chat_id,
             chat_id,
             "🔥 Sorğunu yazın (məs: *3 otaq yasamal kirayə 800-1200*):",
+            search_flow_back_keyboard(),
             parse_mode="Markdown",
         )
-        bot.register_next_step_handler(msg, smart_search_handler)
 
     elif mode == "phone":
         if not check_limit(chat_id, "phone", 50):
@@ -12469,8 +12492,13 @@ def cb_search_select(c):
                 c.id, "Günlük nömrə ilə axtarış limitiniz bitib.", show_alert=True
             )
             return
-        msg = bot.send_message(chat_id, "☎️ Axtarmaq istədiyiniz nömrəni yazın:")
-        bot.register_next_step_handler(msg, phone_search_handler)
+        search_state[chat_id] = {"mode": "phone", "step": "WAITING_FOR_PHONE"}
+        update_ui_message(
+            chat_id,
+            chat_id,
+            "☎️ Axtarmaq istədiyiniz nömrəni yazın:",
+            search_flow_back_keyboard(),
+        )
 
     try:
         bot.answer_callback_query(c.id)
@@ -13466,6 +13494,16 @@ def build_back_reply_keyboard() -> types.ReplyKeyboardMarkup:
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("⬅️ Geri")
     return kb
+
+
+def search_flow_back_keyboard() -> types.InlineKeyboardMarkup:
+    mk = types.InlineKeyboardMarkup()
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="search_flow:back"))
+    return mk
+
+
+def price_input_keyboard() -> types.InlineKeyboardMarkup:
+    return search_flow_back_keyboard()
 
 
 def parse_floor_value(ev: dict):
@@ -15852,8 +15890,8 @@ def cb_structured(c):
         update_ui_message(
             chat_id,
             chat_id,
-            "Minimum qiyməti daxil edin:",
-            build_back_reply_keyboard(),
+            "💰 Minimum qiyməti daxil edin:",
+            price_input_keyboard(),
         )
     elif action == "rm":
         filters = st.setdefault("filters", {})
@@ -15937,6 +15975,7 @@ def handle_floor_range_input(message):
 def cancel_price_range_flow(chat_id: int) -> None:
     user_state[chat_id] = None
     user_temp.pop(chat_id, None)
+    reset_search_state(chat_id)
     if is_search_menu_active(chat_id):
         send_search_menu(chat_id)
     else:
@@ -15980,7 +16019,7 @@ def handle_price_min_input(message):
             chat_id,
             chat_id,
             "⚠️ Minimum qiyməti rəqəm ilə yazın.",
-            build_back_reply_keyboard(),
+            price_input_keyboard(),
         )
         return
     user_temp[chat_id] = {"min_price": int(value)}
@@ -15988,8 +16027,8 @@ def handle_price_min_input(message):
     update_ui_message(
         chat_id,
         chat_id,
-        "Maksimum qiyməti daxil edin:",
-        build_back_reply_keyboard(),
+        "💰 Maksimum qiyməti daxil edin:",
+        price_input_keyboard(),
     )
 
 
@@ -16012,7 +16051,7 @@ def handle_price_max_input(message):
             chat_id,
             chat_id,
             "⚠️ Maksimum qiyməti rəqəm ilə yazın.",
-            build_back_reply_keyboard(),
+            price_input_keyboard(),
         )
         return
     min_price = user_temp.get(chat_id, {}).get("min_price")
@@ -16028,7 +16067,7 @@ def handle_price_max_input(message):
             chat_id,
             chat_id,
             "⚠️ Maksimum qiymət minimumdan kiçik ola bilməz.",
-            build_back_reply_keyboard(),
+            price_input_keyboard(),
         )
         return
     user_temp.setdefault(chat_id, {})["max_price"] = int(value)
@@ -16141,17 +16180,35 @@ def keyword_search_handler(message):
     offer_save_search(chat_id, build_saved_search_from_keyword(selected_op))
 
 
+@bot.message_handler(
+    func=lambda m: search_state.get(m.chat.id, {}).get("step") == "WAITING_FOR_SMART"
+)
+def smart_search_input(message):
+    smart_search_handler(message)
+
+
 def smart_search_handler(message):
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
+    delete_user_command_message(message)
     if not check_limit(chat_id, "smart", 30):
-        bot.send_message(chat_id, "Günlük ağıllı axtarış limitiniz bitib.")
+        update_ui_message(
+            chat_id,
+            chat_id,
+            "Günlük ağıllı axtarış limitiniz bitib.",
+            build_search_menu_inline_markup(chat_id),
+        )
         return
 
     text = (message.text or "").strip()
     if not text:
-        bot.send_message(chat_id, "Boş sorğu göndərdiniz.")
+        update_ui_message(
+            chat_id,
+            chat_id,
+            "Boş sorğu göndərdiniz.",
+            search_flow_back_keyboard(),
+        )
         return
 
     criteria = parse_smart_query(text)
@@ -16164,6 +16221,8 @@ def smart_search_handler(message):
     )
 
     inc_limit(chat_id, "smart", 1)
+    st = search_state.setdefault(chat_id, {})
+    st["step"] = "results"
     send_paginated_results(
         chat_id,
         mode="smart",
@@ -16205,7 +16264,7 @@ def phone_search_handler(message):
             chat_id,
             chat_id,
             "⚠️ Zəhmət olmasa düzgün nömrə yazın (min. 7 rəqəm).",
-            None,
+            search_flow_back_keyboard(),
         )
         return
 
