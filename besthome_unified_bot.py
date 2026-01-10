@@ -415,6 +415,9 @@ support_sessions: Dict[int, Dict[str, Any]] = {}
 STATE_MAIN_MENU = "STATE_MAIN_MENU"
 STATE_SEARCH_MENU = "STATE_SEARCH_MENU"
 STATE_SEARCH_ACTION = "STATE_SEARCH_ACTION"
+STATE_KEYWORD_MODE = "STATE_KEYWORD_MODE"
+STATE_PRICE_RANGE_STEP_1 = "STATE_PRICE_RANGE_STEP_1"
+STATE_PRICE_RANGE_STEP_2 = "STATE_PRICE_RANGE_STEP_2"
 STATE_ADMIN_MENU = "STATE_ADMIN_MENU"
 STATE_ADMIN_ACTION = "STATE_ADMIN_ACTION"
 navigation_state: Dict[int, str] = defaultdict(lambda: STATE_MAIN_MENU)
@@ -486,7 +489,7 @@ BONUS_DEFAULT_PROBABILITIES = {
 }
 DEFAULT_DAILY_CHANCE_LIMIT = 1
 TEXTS_AZ = {
-    "admin_panel_button": "📊 Admin Panel",
+    "admin_panel_button": "⚙️ Admin Panel",
     "admin_panel_title": "🛠 Admin Panel:",
     "admin_panel_nav_next": "▶️ Növbəti səhifə",
     "admin_panel_nav_prev": "◀️ Əvvəlki səhifə",
@@ -7129,9 +7132,13 @@ def is_search_menu_active(chat_id: int) -> bool:
 
 def return_to_previous_menu(chat_id: int) -> None:
     nav_state = get_navigation_state(chat_id)
-    if nav_state in {STATE_SEARCH_MENU, STATE_SEARCH_ACTION} or is_search_menu_active(
-        chat_id
-    ):
+    if nav_state in {
+        STATE_SEARCH_MENU,
+        STATE_SEARCH_ACTION,
+        STATE_KEYWORD_MODE,
+        STATE_PRICE_RANGE_STEP_1,
+        STATE_PRICE_RANGE_STEP_2,
+    } or is_search_menu_active(chat_id):
         send_search_menu(chat_id)
         return
     if nav_state in {STATE_ADMIN_MENU, STATE_ADMIN_ACTION}:
@@ -10498,9 +10505,15 @@ def cb_search_flow_back(c):
     chat_id = c.message.chat.id if c.message else c.from_user.id
     if c.message:
         last_ui_message_id[chat_id] = c.message.message_id
-    reset_search_state(chat_id)
-    set_search_menu_active(chat_id, True)
-    cancel_price_range_flow(chat_id)
+    if get_navigation_state(chat_id) in {
+        STATE_PRICE_RANGE_STEP_1,
+        STATE_PRICE_RANGE_STEP_2,
+    }:
+        handle_price_range_back(chat_id)
+    else:
+        reset_search_state(chat_id)
+        set_search_menu_active(chat_id, True)
+        send_search_menu(chat_id)
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -10525,8 +10538,11 @@ def return_to_main_menu(message):
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
-    if user_state.get(chat_id) in {"WAIT_MIN_PRICE", "WAIT_MAX_PRICE"}:
-        cancel_price_range_flow(chat_id)
+    if get_navigation_state(chat_id) in {
+        STATE_PRICE_RANGE_STEP_1,
+        STATE_PRICE_RANGE_STEP_2,
+    } or user_state.get(chat_id) in {"WAIT_MIN_PRICE", "WAIT_MAX_PRICE"}:
+        handle_price_range_back(chat_id)
         return
     reset_search_state(chat_id)
     reset_user_state(chat_id)
@@ -10783,7 +10799,7 @@ def handle_structured_search_menu(chat_id: int, op_code: str):
 def handle_keyword_search_menu(chat_id: int):
     if not check_subscription(chat_id):
         return
-    set_navigation_state(chat_id, STATE_SEARCH_ACTION)
+    set_navigation_state(chat_id, STATE_KEYWORD_MODE)
     set_search_menu_active(chat_id, True)
     if not check_limit(chat_id, "keyword", 30):
         update_ui_message(
@@ -13140,11 +13156,14 @@ def cb_delete_criteria(c):
 
 
 def send_keyword_operation_prompt(chat_id: int):
+    set_navigation_state(chat_id, STATE_KEYWORD_MODE)
+    set_search_menu_active(chat_id, True)
     mk = types.InlineKeyboardMarkup()
     mk.add(
         types.InlineKeyboardButton("🏠 Satılır", callback_data="kwop|sale"),
         types.InlineKeyboardButton("🏢 Kirayə verilir", callback_data="kwop|rent"),
     )
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kwop|menu"))
     update_ui_message(
         chat_id,
         chat_id,
@@ -13181,6 +13200,13 @@ def cb_keyword_operation(c):
     action = c.data.split("|")[1]
     chat_id = c.message.chat.id
     last_ui_message_id[chat_id] = c.message.message_id
+
+    if action == "menu":
+        reset_search_state(chat_id)
+        set_navigation_state(chat_id, STATE_SEARCH_MENU)
+        set_search_menu_active(chat_id, True)
+        send_search_menu(chat_id)
+        return
 
     if action == "back":
         search_state[chat_id] = {
@@ -15978,13 +16004,7 @@ def cb_structured(c):
         st.setdefault("filters", {})["max_price"] = None
         st["step"] = "price_min"
         user_temp.pop(chat_id, None)
-        user_state[chat_id] = "WAIT_MIN_PRICE"
-        update_ui_message(
-            chat_id,
-            chat_id,
-            "💰 Minimum qiyməti daxil edin:",
-            price_input_keyboard(),
-        )
+        set_price_range_step(chat_id, step=1)
     elif action == "rm":
         filters = st.setdefault("filters", {})
         filters.pop("floor_range", None)
@@ -16068,10 +16088,41 @@ def cancel_price_range_flow(chat_id: int) -> None:
     user_state[chat_id] = None
     user_temp.pop(chat_id, None)
     reset_search_state(chat_id)
-    if is_search_menu_active(chat_id):
-        send_search_menu(chat_id)
-    else:
-        return_to_main_menu(chat_id)
+    set_navigation_state(chat_id, STATE_SEARCH_MENU)
+    set_search_menu_active(chat_id, True)
+    send_search_menu(chat_id)
+
+
+def set_price_range_step(chat_id: int, *, step: int) -> None:
+    set_search_menu_active(chat_id, True)
+    if step == 2:
+        set_navigation_state(chat_id, STATE_PRICE_RANGE_STEP_2)
+        user_state[chat_id] = "WAIT_MAX_PRICE"
+        update_ui_message(
+            chat_id,
+            chat_id,
+            "Maksimum qiymət daxil et",
+            price_input_keyboard(),
+        )
+        return
+
+    set_navigation_state(chat_id, STATE_PRICE_RANGE_STEP_1)
+    user_state[chat_id] = "WAIT_MIN_PRICE"
+    user_temp.pop(chat_id, None)
+    update_ui_message(
+        chat_id,
+        chat_id,
+        "Minimum qiymət daxil et",
+        price_input_keyboard(),
+    )
+
+
+def handle_price_range_back(chat_id: int) -> None:
+    nav_state = get_navigation_state(chat_id)
+    if nav_state == STATE_PRICE_RANGE_STEP_2:
+        set_price_range_step(chat_id, step=1)
+        return
+    cancel_price_range_flow(chat_id)
 
 
 def apply_price_filter(chat_id: int, min_p: int, max_p: int) -> None:
@@ -16084,6 +16135,8 @@ def apply_price_filter(chat_id: int, min_p: int, max_p: int) -> None:
     st.setdefault("filters", {}).pop("price", None)
     st["step"] = "price"
     structured_push_history(chat_id)
+    set_navigation_state(chat_id, STATE_SEARCH_ACTION)
+    set_search_menu_active(chat_id, True)
     update_ui_message(chat_id, chat_id, "✅ Qiymət aralığı seçildi.", None)
     prop = st.get("filters", {}).get("prop")
     if prop == "t":
@@ -16103,7 +16156,7 @@ def handle_price_min_input(message):
         return
     delete_user_command_message(message)
     if text == "⬅️ Geri":
-        cancel_price_range_flow(chat_id)
+        handle_price_range_back(chat_id)
         return
     value = parse_number(text)
     if value is None:
@@ -16115,13 +16168,7 @@ def handle_price_min_input(message):
         )
         return
     user_temp[chat_id] = {"min_price": int(value)}
-    user_state[chat_id] = "WAIT_MAX_PRICE"
-    update_ui_message(
-        chat_id,
-        chat_id,
-        "💰 Maksimum qiyməti daxil edin:",
-        price_input_keyboard(),
-    )
+    set_price_range_step(chat_id, step=2)
 
 
 @bot.message_handler(func=lambda m: user_state.get(m.chat.id) == "WAIT_MAX_PRICE")
@@ -16135,7 +16182,8 @@ def handle_price_max_input(message):
         return
     delete_user_command_message(message)
     if text == "⬅️ Geri":
-        cancel_price_range_flow(chat_id)
+        user_temp.pop(chat_id, None)
+        set_price_range_step(chat_id, step=1)
         return
     value = parse_number(text)
     if value is None:
