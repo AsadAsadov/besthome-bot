@@ -322,14 +322,20 @@ def handle_start(message):
         )
 
     reset_user_state(chat_id)
-    send_main_menu(chat_id)
+    restore_reply_keyboard(chat_id)
 
 
 @bot.message_handler(commands=["menu"])
 def handle_menu(message):
     chat_id = message.chat.id
     reset_user_state(chat_id)
-    send_main_menu(chat_id, "📋 Əsas menyudan seçim et:", force=True)
+    restore_reply_keyboard(chat_id, "📋 Əsas menyudan seçim et:")
+
+
+@bot.message_handler(content_types=["web_app_data"])
+def handle_web_app_data(message):
+    chat_id = message.chat.id
+    restore_reply_keyboard(chat_id)
 
 
 def handle_start_attribution_and_demo(message, start_arg: str):
@@ -2483,8 +2489,10 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
         update_entry = record_db_update_stats(pre_update_count, post_update_count)
         update_added = update_entry.get("added", 0)
         last24h_from_updates = get_last24h_added_from_updates()
+        today_total = get_today_added_count()
         logger.info("[STATS] update_added=%s", update_added)
         logger.info("[STATS] last24h_from_updates=%s", last24h_from_updates)
+        logger.info("[STATS] today_added=%s", today_total)
 
         try:
             post_fp = compute_db_fingerprint(MAIN_DB)
@@ -2572,13 +2580,11 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             new_total = len(added_listing_ids)
             if update_added == 0:
                 recent_line = (
-                    "📦 Son 24 saatda əlavə olunan elanlar: "
+                    f"📦 Bu gün əlavə olunan elanlar: {today_total} "
                     "Yeni DB əvvəlki ilə eynidir – real yeni elan yoxdur."
                 )
             else:
-                recent_line = (
-                    f"📦 Son 24 saatda əlavə olunan elanlar: {last24h_from_updates}"
-                )
+                recent_line = f"📦 Bu gün əlavə olunan elanlar: {today_total}"
             total_added = added_sale + added_rent
             report = (
                 "✅ Elanlar uğurla yeniləndi.\n"
@@ -5575,11 +5581,77 @@ def get_last_24h_window():
     return start, now
 
 
+def get_today_range():
+    start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    end = datetime.now()
+    return start, end
+
+
 def get_today_bounds():
     now = datetime.now()
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     end = start.replace(hour=23, minute=59, second=59, microsecond=999999)
     return start, end
+
+
+def _count_today_added_in_table(cur, table: str) -> int:
+    cols = get_table_columns(cur, table)
+    start, _ = get_today_range()
+    ts_col = None
+    for key in ("created_at", "updated_at", "inserted_at"):
+        if key in cols:
+            ts_col = cols[key]
+            break
+    if ts_col:
+        clause, params = build_since_clause(f"\"{ts_col}\"", start)
+        cur.execute(f"SELECT COUNT(*) FROM {table} WHERE 1=1 {clause}", params)
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    id_col = cols.get("id")
+    if id_col and _detect_ts_kind(cur, table, id_col) == "unix":
+        clause, params = build_since_clause(f"\"{id_col}\"", start)
+        cur.execute(f"SELECT COUNT(*) FROM {table} WHERE 1=1 {clause}", params)
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    return 0
+
+
+def get_today_added_count() -> int:
+    total = 0
+    if os.path.exists(MAIN_DB):
+        conn = None
+        try:
+            conn = get_main_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='listings'"
+            )
+            if cur.fetchone():
+                try:
+                    total += _count_today_added_in_table(cur, "listings")
+                except Exception:
+                    logger.exception("[STATS] Failed to count today listings in main DB")
+        finally:
+            if conn:
+                close_main_conn(conn)
+    try:
+        conn_local = get_local_conn()
+        cur_local = conn_local.cursor()
+        cur_local.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='listings_approved'"
+        )
+        if cur_local.fetchone():
+            try:
+                total += _count_today_added_in_table(cur_local, "listings_approved")
+            except Exception:
+                logger.exception("[STATS] Failed to count today listings in local DB")
+    finally:
+        try:
+            conn_local.close()
+        except Exception:
+            pass
+    logger.info("[STATS] today_added=%s", total)
+    return total
 
 
 def format_sqlite_datetime(dt: datetime) -> str:
@@ -5909,7 +5981,10 @@ def build_today_clause(
     column: Optional[str],
     window: Optional[Tuple[datetime, datetime]] = None,
 ):
-    return build_last_24h_clause(column, window)
+    if not column:
+        return "", []
+    start = (window or (None, None))[0] or get_today_range()[0]
+    return build_since_clause(column, start)
 
 
 def build_date_range_clause(
@@ -5999,7 +6074,7 @@ def count_main_active_listings(
             if not date_col:
                 logger.error("[STATS] No timestamp column found")
                 return 0
-            window = get_last_24h_window()
+            window = get_today_range()
             date_sql, date_params = build_today_clause(f"l.{date_col}", window)
         rayon_sql, rayon_params = build_rayon_filter_sql(cur, "listings", rayon, "l.")
         sql = "SELECT COUNT(*) FROM listings l " + flt + date_sql + rayon_sql
@@ -6028,7 +6103,7 @@ def count_local_active_listings(
         if only_today:
             date_col = detect_added_at_column(cur, "listings_approved")
             if date_col:
-                window = get_last_24h_window()
+                window = get_today_range()
                 date_sql, date_params = build_today_clause(f"l.{date_col}", window)
         rayon_sql, rayon_params = build_rayon_filter_sql(
             cur, "listings_approved", rayon, "l."
@@ -6870,7 +6945,7 @@ def recover_main_menu(
         except Exception:
             logger.debug("Menu recovery edit failed chat_id=%s", chat_id)
     try:
-        send_main_menu(chat_id, text, force=True)
+        restore_reply_keyboard(chat_id, text)
     except Exception:
         logger.exception("Failed to send main menu chat_id=%s", chat_id)
 
@@ -6986,6 +7061,11 @@ def send_main_menu(
         parse_mode=parse_mode,
         disable_preview=disable_preview,
     )
+
+
+def restore_reply_keyboard(chat_id: int, text: Optional[str] = None):
+    send_main_menu(chat_id, text or "Əsas menyu", force=True)
+    logger.info("[UI] reply_keyboard_restored chat_id=%s", chat_id)
 
 
 def build_search_menu_keyboard(chat_id: int):
@@ -9112,6 +9192,9 @@ def send_user_statistics(chat_id: int, period_key: str, message_id: Optional[int
         user_stats_filter[chat_id] = selected
         base_stats = compute_user_statistics("all")
         period_stats = compute_user_statistics(selected)
+        if selected == "24h":
+            period_stats = dict(period_stats)
+            period_stats["total"] = get_today_added_count()
         admin_flag = is_admin(chat_id)
         text = format_stats_text(base_stats, period_stats, selected, is_admin=admin_flag)
         keyboard = build_user_stats_keyboard(selected)
@@ -10389,7 +10472,7 @@ def return_to_main_menu(message):
     reset_search_state(chat_id)
     reset_user_state(chat_id)
     set_ui_context(chat_id, UI_CONTEXT_MAIN)
-    send_main_menu(chat_id, "🏠 Əsas menyu", force=True)
+    restore_reply_keyboard(chat_id, "🏠 Əsas menyu")
 
 
 def prompt_today_operation(chat_id: int):
@@ -13795,8 +13878,8 @@ def compute_user_statistics(period: str) -> dict:
             )
             return stats
         if key_base == "24h" and ts_col:
-            window = get_last_24h_window()
-            date_sql, date_params = build_last_24h_clause(f"l.\"{ts_col}\"", window)
+            today_start, _ = get_today_range()
+            date_sql, date_params = build_since_clause(f"l.\"{ts_col}\"", today_start)
             where_clauses.append(date_sql.replace(" AND ", "", 1))
             where_params.extend(date_params)
         elif key_base != "all" and ts_col:
@@ -14446,7 +14529,7 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
     op_code = filters.get("op", "all")
     prop_code = filters.get("prop", "all")
     results = []
-    window = get_last_24h_window()
+    window = get_today_range()
     logger.info(
         "today query start filters=%s offset=%s limit=%s", filters, offset, limit
     )
@@ -15483,7 +15566,7 @@ def cb_listing_nav(c):
     if action == "home":
         session["timestamp"] = time.time()
         reset_user_state(chat_id)
-        send_main_menu(chat_id, "🏠 Əsas menyu", force=True)
+        restore_reply_keyboard(chat_id, "🏠 Əsas menyu")
         try:
             bot.answer_callback_query(c.id, "Əsas menyu")
         except Exception:
@@ -23861,9 +23944,6 @@ def show_admin_stats(
     selected_period = period or admin_stats_period.get(chat_id, "day")
     admin_stats_period[chat_id] = selected_period
     start_date, end_date, period_label = stats_period_range(selected_period)
-    today_start, today_end = get_today_bounds()
-    today_start_str = format_sqlite_datetime(today_start)
-    today_end_str = format_sqlite_datetime(today_end)
 
     def table_exists(cur, name: str) -> bool:
         try:
@@ -23896,27 +23976,6 @@ def show_admin_stats(
             if key in cols:
                 return cols[key]
         return None
-
-    def detect_date_column(cur, table: str) -> Optional[str]:
-        return detect_added_at_column(cur, table)
-
-    def count_today_new(cur, table: str) -> int:
-        col = detect_date_column(cur, table)
-        if not col:
-            return 0
-        return safe_count(
-            cur,
-            (
-                f"SELECT COUNT(*) FROM {table} WHERE ((typeof({col})='integer' AND {col} BETWEEN ? AND ?) "
-                f"OR datetime({col}) BETWEEN datetime(?) AND datetime(?))"
-            ),
-            (
-                int(today_start.timestamp()),
-                int(today_end.timestamp()),
-                today_start_str,
-                today_end_str,
-            ),
-        )
 
     def op_counts(cur, table: str):
         total = (
@@ -24014,7 +24073,6 @@ def show_admin_stats(
             pass
 
     main_total = main_sale = main_rent = 0
-    today_new_main = 0
     conn_main = None
     if os.path.exists(MAIN_DB):
         try:
@@ -24033,7 +24091,6 @@ def show_admin_stats(
                         break
             if main_table:
                 main_total, main_sale, main_rent = op_counts(cur_main, main_table)
-                today_new_main = count_today_new(cur_main, main_table)
         except Exception:
             pass
         finally:
@@ -24043,7 +24100,6 @@ def show_admin_stats(
                 pass
 
     local_total = local_sale = local_rent = 0
-    today_new_local = 0
     conn_local_counts = None
     try:
         conn_local_counts = get_local_conn()
@@ -24052,7 +24108,6 @@ def show_admin_stats(
             local_total, local_sale, local_rent = op_counts(
                 cur_local_counts, "listings_approved"
             )
-            today_new_local = count_today_new(cur_local_counts, "listings_approved")
     finally:
         try:
             conn_local_counts.close()
@@ -24062,7 +24117,7 @@ def show_admin_stats(
     total_listings = main_total + local_total
     sale_total = main_sale + local_sale
     rent_total = main_rent + local_rent
-    today_new_listings = today_new_main + today_new_local
+    today_new_listings = get_today_added_count()
 
     lines = [f"📊 BestHome Statistikalar — {period_label}", ""]
     lines.append("👥 İstifadəçilər")
