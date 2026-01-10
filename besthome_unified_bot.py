@@ -1941,6 +1941,66 @@ def count_listings_since(db_path: str, since_dt: datetime) -> int:
         conn.close()
 
 
+def collect_existing_listing_ids(db_path: str) -> Tuple[Set[Any], Optional[str]]:
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(listings)")
+        columns = {row[1] for row in cur.fetchall() if row and row[1]}
+        if "id" in columns:
+            key_column = "id"
+        elif "external_id" in columns:
+            key_column = "external_id"
+        elif "url" in columns:
+            key_column = "url"
+        else:
+            logger.warning("[UPDATE] listings table has no id/external_id/url column")
+            return set(), None
+        cur.execute(f"SELECT {key_column} FROM listings")
+        return {row[0] for row in cur.fetchall() if row and row[0] is not None}, key_column
+    finally:
+        conn.close()
+
+
+def count_added_listings_by_operation(
+    db_path: str, id_column: Optional[str], added_ids: Set[Any]
+) -> Tuple[int, int]:
+    if not added_ids or not id_column:
+        return 0, 0
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(listings)")
+        columns = {row[1] for row in cur.fetchall() if row and row[1]}
+        if "operation" not in columns:
+            return 0, 0
+        sale_count = 0
+        rent_count = 0
+        added_list = list(added_ids)
+        chunk_size = 900
+        for idx in range(0, len(added_list), chunk_size):
+            chunk = added_list[idx : idx + chunk_size]
+            placeholders = ", ".join(["?"] * len(chunk))
+            cur.execute(
+                f"""
+                SELECT operation, COUNT(*)
+                FROM listings
+                WHERE {id_column} IN ({placeholders})
+                GROUP BY operation
+                """,
+                chunk,
+            )
+            for op_value, count in cur.fetchall():
+                op_norm = normalize_operation_value(op_value)
+                if op_norm == "sale":
+                    sale_count += int(count)
+                elif op_norm == "rent":
+                    rent_count += int(count)
+        return sale_count, rent_count
+    finally:
+        conn.close()
+
+
 def atomic_replace_main_db(new_db_path: str) -> Optional[str]:
     backup_path = backup_main_db_file()
     if backup_path:
@@ -1965,6 +2025,8 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
     extracted_db_path = None
     extracted_dir = None
     backup_path = None
+    old_listing_ids: Set[Any] = set()
+    listing_key_column: Optional[str] = None
     update_start_time = datetime.now()
     try:
         main_db_update_in_progress.set()
@@ -2005,6 +2067,12 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             extracted_db_path,
         )
 
+        try:
+            old_listing_ids, listing_key_column = collect_existing_listing_ids(MAIN_DB)
+            logger.info("[UPDATE] Old listings count: %s", len(old_listing_ids))
+        except Exception:
+            logger.exception("[UPDATE] Failed to collect old listings")
+
         send_db_update_progress(admin_id, "🔁 DB əvəz olunur…")
         logger.info("[UPDATE] Using REPLACE mode")
         with main_db_replace_lock:
@@ -2029,6 +2097,30 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             conn.close()
         LISTINGS_TS_COLUMN = None
 
+        added_listing_ids: Set[Any] = set()
+        added_sale = 0
+        added_rent = 0
+        try:
+            new_listing_ids, new_key_column = collect_existing_listing_ids(MAIN_DB)
+            logger.info("[UPDATE] New listings count: %s", len(new_listing_ids))
+            if listing_key_column and new_key_column and listing_key_column != new_key_column:
+                logger.warning(
+                    "[UPDATE] Listing key column changed old=%s new=%s",
+                    listing_key_column,
+                    new_key_column,
+                )
+            else:
+                key_column = listing_key_column or new_key_column
+                added_listing_ids = new_listing_ids - old_listing_ids
+                logger.info("[UPDATE] Added listings: %s", len(added_listing_ids))
+                if not added_listing_ids:
+                    logger.info("[UPDATE] No new listings detected by DB diff")
+                added_sale, added_rent = count_added_listings_by_operation(
+                    MAIN_DB, key_column, added_listing_ids
+                )
+        except Exception:
+            logger.exception("[UPDATE] Listing diff failed")
+
         send_db_update_progress(admin_id, "🧱 FTS/indeks yenilənir…")
         try:
             init_main_db_indices()
@@ -2040,7 +2132,7 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
         try:
             logger.info("[UPDATE] New listings computed from last 24h window")
             try:
-                new_count = count_listings_since(MAIN_DB, update_start_time)
+                time_based_new_count = count_listings_since(MAIN_DB, update_start_time)
                 total, new_sale, new_rent = count_last_24h_listings(MAIN_DB)
                 logger.info(
                     "[UPDATE] 24h total=%s satilir=%s kiraye=%s",
@@ -2048,27 +2140,32 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
                     new_sale,
                     new_rent,
                 )
+                logger.info(
+                    "[UPDATE] Time-based new listings since start=%s",
+                    time_based_new_count,
+                )
             except Exception:
                 logger.exception("[UPDATE] 24h listing count failed")
                 total, new_sale, new_rent = 0, 0, 0
-                new_count = 0
+                time_based_new_count = 0
             try:
                 process_keyword_alerts_for_new_listings()
             except Exception as e:
                 logger.warning("keyword alert listing scan error: %s", e)
 
+            new_total = len(added_listing_ids)
             report = (
                 "✅ Elanlar uğurla yeniləndi.\n"
                 f"📦 Son 24 saatda əlavə olunan elanlar: {total}\n"
-                f"📊 Bu yenilənmədə: {new_count}\n"
-                f"1⃣ Satılır: {new_sale}\n"
-                f"2⃣ Kirayə verilir: {new_rent}"
+                f"📊 Bu yenilənmədə: {new_total}\n"
+                f"1⃣ Satılır: {added_sale}\n"
+                f"2⃣ Kirayə verilir: {added_rent}"
             )
             safe_admin_step(admin_id, report)
             logger.info(
                 "DB update completed chat_id=%s new=%s",
                 admin_id,
-                new_count,
+                new_total,
             )
         except Exception:
             logger.exception("DB stats failed after update chat_id=%s", admin_id)
