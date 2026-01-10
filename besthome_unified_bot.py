@@ -6239,28 +6239,7 @@ def build_listing_navigation_keyboard(
 
 
 def offer_save_search(chat_id: int, params: dict):
-    if not params:
-        return
-
-    st = search_state.setdefault(chat_id, {})
-
-    if chat_id in search_reminder_shown:
-        st.pop("pending_save", None)
-        return
-
-    st["pending_save"] = params
-    search_reminder_shown.add(chat_id)
-
-    mk = types.InlineKeyboardMarkup()
-    mk.add(
-        types.InlineKeyboardButton("✅ Bəli", callback_data="save_search|yes"),
-        types.InlineKeyboardButton("❌ Xeyr", callback_data="save_search|no"),
-    )
-    bot.send_message(
-        chat_id,
-        "💡 Bu axtarışı tez-tez edirsiniz?\nBildiriş aktiv edim?",
-        reply_markup=mk,
-    )
+    return
 
 
 def build_saved_search_from_structured(filters: dict):
@@ -11138,20 +11117,9 @@ def show_notifications_inbox(chat_id: int, period: str, page: int = 1, message=N
             )
         )
         mk_empty.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="notif_menu"))
-        try:
-            if message:
-                bot.edit_message_text(
-                    "🔔 Yeni bildiriş yoxdur.",
-                    chat_id=message.chat.id,
-                    message_id=message.message_id,
-                    reply_markup=mk_empty,
-                )
-            else:
-                bot.send_message(
-                    chat_id, "🔔 Yeni bildiriş yoxdur.", reply_markup=mk_empty
-                )
-        except Exception:
-            pass
+        if message:
+            last_ui_message_id[chat_id] = message.message_id
+        update_ui_message(chat_id, chat_id, "🔔 Yeni bildiriş yoxdur.", mk_empty)
         return
 
     unseen_ids = [r.get("id") for r in rows if r.get("status") == "new"]
@@ -20536,7 +20504,7 @@ def admin_show_user_panel(
     join_source_text = (
         f"QR — {format_qr_area_label(join_source_code)}"
         if join_source_code
-        else "Birbaşa /start"
+        else "Birbaşa başlanğıc"
     )
 
     info_txt = (
@@ -23090,7 +23058,7 @@ def cb_bot_refresh(c):
 @bot.callback_query_handler(func=lambda c: c.data == "refresh_bot")
 @callback_guard
 def cb_refresh_bot(c):
-    """İstifadəçi 'Botu yenilə' düyməsinə basanda /start işə düşür."""
+    """İstifadəçi 'Botu yenilə' düyməsinə basanda başlanğıc bərpa olunur."""
     try:
         bot.answer_callback_query(c.id, "✅ Yeniləndi.")
     except:
