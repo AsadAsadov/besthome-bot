@@ -1127,12 +1127,70 @@ def get_support_session_state(user_id: int) -> Dict[str, Any]:
     return state
 
 
+def get_user_support_flags(chat_id: int) -> Dict[str, Any]:
+    record = get_user_record(chat_id) or {}
+    return {
+        "active": bool(record.get("user_support_active")),
+        "inbox_unread": int(record.get("user_support_inbox_unread") or 0),
+    }
+
+
+def set_user_support_active_flag(chat_id: int, active: bool) -> None:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "UPDATE users SET user_support_active=? WHERE chat_id=?",
+            (1 if active else 0, chat_id),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        conn.close()
+
+
+def set_user_support_inbox_unread(chat_id: int, unread_count: int) -> None:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "UPDATE users SET user_support_inbox_unread=? WHERE chat_id=?",
+            (max(0, int(unread_count)), chat_id),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        conn.close()
+
+
+def increment_user_support_inbox_unread(chat_id: int, delta: int = 1) -> None:
+    conn = get_local_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            UPDATE users
+            SET user_support_inbox_unread=COALESCE(user_support_inbox_unread, 0) + ?
+            WHERE chat_id=?
+            """,
+            (delta, chat_id),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        conn.close()
+
+
 def set_support_session_active(
     user_id: int, active: bool, started_at: Optional[str] = None
 ) -> Dict[str, Any]:
     state = get_support_session_state(user_id)
     state["active"] = active
     state["started_at"] = started_at if active else None
+    set_user_support_active_flag(user_id, active)
     return state
 
 
@@ -2862,7 +2920,9 @@ def init_local_db():
             bonus_allowed INTEGER DEFAULT 0,
             last_spin_at TEXT,
             chance_last_used_at TEXT,
-            chance_blocked INTEGER DEFAULT 0
+            chance_blocked INTEGER DEFAULT 0,
+            user_support_active INTEGER DEFAULT 0,
+            user_support_inbox_unread INTEGER DEFAULT 0
         )
     """
     )
@@ -2907,6 +2967,8 @@ def init_local_db():
         "ALTER TABLE users ADD COLUMN deleted_at TEXT",
         "ALTER TABLE users ADD COLUMN payment_type TEXT",
         "ALTER TABLE users ADD COLUMN last_payment_at TEXT",
+        "ALTER TABLE users ADD COLUMN user_support_active INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN user_support_inbox_unread INTEGER DEFAULT 0",
     ]:
         try:
             cur.execute(alter_stmt)
@@ -3873,7 +3935,8 @@ def get_user_record(chat_id: int) -> Optional[dict]:
                u.referral_bonus_used, u.referral_milestone_used, u.demo_used,
                u.demo_expires_at, u.blocked_at, u.last_error, u.is_active, u.deleted_at,
                uw.computed_status, uw.effective_expires_at, u.bonus_allowed, u.last_spin_at,
-               u.join_source, u.chance_last_used_at, u.chance_blocked
+               u.join_source, u.chance_last_used_at, u.chance_blocked,
+               u.user_support_active, u.user_support_inbox_unread
         FROM users u
         LEFT JOIN users_with_status uw ON uw.chat_id = u.chat_id
         WHERE u.chat_id=?
@@ -5503,6 +5566,9 @@ def is_support_session_open_for_user(user_id: int) -> bool:
 
 
 def is_user_support_active(user_id: int) -> bool:
+    record = get_user_record(user_id)
+    if record is not None and "user_support_active" in record:
+        return bool(record.get("user_support_active"))
     state = get_support_session_state(user_id)
     return bool(state.get("active"))
 
@@ -7224,10 +7290,8 @@ def build_main_menu(
         buttons.append("💳 Ödəniş")
 
     if not is_admin_user:
-        if is_user_support_active(chat_id):
-            buttons.append("⛔ Çatı sonlandır")
-        else:
-            buttons.append("💬 Adminlə əlaqə")
+        buttons.append("💬 Adminlə əlaqə")
+        buttons.append("🔔 Bildirişlər / Inbox")
         buttons.append("🤝 Dostunu dəvət et")
 
     if is_feature_enabled("about", chat_id):
@@ -9343,6 +9407,10 @@ def open_support_chat_from_menu(message):
         return
     if is_admin(message.chat.id):
         return
+    delete_user_command_message(message)
+    if is_user_support_active(message.chat.id):
+        close_support_chat_for_user(message.chat.id)
+        return
     start_support_chat_for_user(message.chat.id, message.from_user)
 
 
@@ -9352,7 +9420,18 @@ def close_support_chat_from_menu(message):
         return
     if is_admin(message.chat.id):
         return
+    delete_user_command_message(message)
     close_support_chat_for_user(message.chat.id)
+
+
+@bot.message_handler(func=lambda m: m.text == "🔔 Bildirişlər / Inbox")
+def open_support_inbox_from_menu(message):
+    if message.text and message.text.startswith("/"):
+        return
+    if is_admin(message.chat.id):
+        return
+    delete_user_command_message(message)
+    show_user_support_inbox(message.chat.id)
 
 
 def close_support_chat_for_user(chat_id: int) -> None:
@@ -9370,8 +9449,7 @@ def close_support_chat_for_user(chat_id: int) -> None:
     set_support_session_active(chat_id, False)
     bot.send_message(
         chat_id,
-        "✅ Dəstək söhbəti bağlandı.\n"
-        "Yenidən yazmaq üçün “Adminlə əlaqə” seçin.",
+        "🔴 Dəstək bağlandı.",
     )
     send_main_menu(chat_id, force=True)
 
@@ -9418,14 +9496,77 @@ def start_support_chat_for_user(chat_id: int, user: types.User):
         True,
         now_ts,
     )
-    mk = types.InlineKeyboardMarkup()
-    mk.add(types.InlineKeyboardButton("⛔ Çatı sonlandır", callback_data="supportchat:end"))
     bot.send_message(
         chat_id,
         "🟢 Dəstək aktivdir. Mesajınızı yazın.\n"
         "İstənilən vaxt menyudan istifadə edə bilərsiniz.",
-        reply_markup=mk,
     )
+
+
+def send_support_sent_toast(chat_id: int) -> None:
+    try:
+        msg = bot.send_message(chat_id, "📨 Mesajınız dəstəyə göndərildi.")
+    except Exception:
+        logger.exception("Failed to send support confirmation chat_id=%s", chat_id)
+        return
+
+    def _cleanup():
+        time.sleep(2.5)
+        try:
+            bot.delete_message(chat_id, msg.message_id)
+        except Exception:
+            logger.debug(
+                "Failed to delete support confirmation chat_id=%s message_id=%s",
+                chat_id,
+                msg.message_id,
+            )
+
+    threading.Thread(target=_cleanup, daemon=True).start()
+
+
+def send_support_reply_notification(chat_id: int) -> None:
+    mk = types.InlineKeyboardMarkup()
+    mk.add(
+        types.InlineKeyboardButton("📩 Mesajlara bax", callback_data="supportuser:open")
+    )
+    bot.send_message(chat_id, "🔔 Dəstəkdən yeni cavab var.", reply_markup=mk)
+
+
+def format_user_support_inbox_text(messages: List[dict]) -> str:
+    header = "🔔 Bildirişlər / Inbox"
+    if not messages:
+        return f"{header}\n\n📭 Dəstək mesajı yoxdur."
+    lines = []
+    for msg in messages:
+        sender = msg.get("sender")
+        prefix = "🛠 Dəstək" if sender == "admin" else "👤 Siz"
+        text = _truncate_support_text(msg.get("text"), limit=240)
+        lines.append(f"{prefix}: {text}")
+    return f"{header}\n\n" + "\n".join(lines)
+
+
+def build_user_support_inbox_markup(is_active: bool) -> types.InlineKeyboardMarkup:
+    mk = types.InlineKeyboardMarkup()
+    mk.add(types.InlineKeyboardButton("✍️ Cavab yaz", callback_data="supportuser:reply"))
+    if is_active:
+        mk.add(
+            types.InlineKeyboardButton(
+                "⛔ Çatı sonlandır", callback_data="supportuser:end"
+            )
+        )
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="supportuser:back"))
+    return mk
+
+
+def show_user_support_inbox(chat_id: int) -> None:
+    thread = get_support_thread_by_user(chat_id)
+    messages = list_support_messages(thread["id"], limit=30) if thread else []
+    messages = list(reversed(messages))
+    text = format_user_support_inbox_text(messages)
+    mk = build_user_support_inbox_markup(is_user_support_active(chat_id))
+    set_user_support_inbox_unread(chat_id, 0)
+    set_ui_context(chat_id, UI_CONTEXT_MAIN)
+    send_or_edit_ui_message(chat_id, text, mk)
 
 
 @bot.callback_query_handler(func=lambda c: c.data in ("open_pay_menu", "ui_payment_menu"))
@@ -17425,7 +17566,6 @@ def cb_support_inbox_admin(c):
                 "✅ Dəstək söhbəti bağlandı. Yenidən yazmaq istəsəniz "
                 "“Adminlə əlaqə” seçin."
             )
-            bot.send_message(user_id, close_text)
             add_support_message(thread["id"], "admin", close_text)
             update_support_thread(
                 user_id,
@@ -17435,8 +17575,38 @@ def cb_support_inbox_admin(c):
                 last_message_from="admin",
                 last_message_at=now_utc().isoformat(),
             )
+            increment_user_support_inbox_unread(user_id)
+            send_support_reply_notification(user_id)
             set_support_session_active(user_id, False)
         show_support_thread_view(chat_id, user_id, message=c.message, set_active=False)
+        safe_answer_callback_query(c.id)
+        return
+    safe_answer_callback_query(c.id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("supportuser:"))
+@callback_guard
+def cb_support_user_inbox(c):
+    action = c.data.split(":", 1)[1] if c.data else ""
+    chat_id = c.from_user.id
+    if is_admin(chat_id):
+        safe_answer_callback_query(c.id)
+        return_to_main_menu(chat_id)
+        return
+    if action == "open":
+        show_user_support_inbox(chat_id)
+        safe_answer_callback_query(c.id)
+        return
+    if action == "reply":
+        start_support_chat_for_user(chat_id, c.from_user)
+        safe_answer_callback_query(c.id)
+        return
+    if action == "end":
+        close_support_chat_for_user(chat_id)
+        safe_answer_callback_query(c.id)
+        return
+    if action == "back":
+        return_to_main_menu(chat_id)
         safe_answer_callback_query(c.id)
         return
     safe_answer_callback_query(c.id)
@@ -25304,6 +25474,14 @@ def support_user_message_router(message):
         return
     if has_active_text_flow(message.chat.id):
         return
+    try:
+        bot.delete_message(message.chat.id, message.message_id)
+    except Exception:
+        logger.debug(
+            "Failed to delete support user message chat_id=%s message_id=%s",
+            message.chat.id,
+            message.message_id,
+        )
     now_ts = now_utc().isoformat()
     thread = get_support_thread_by_user(message.chat.id)
     if not thread or thread.get("status") == SUPPORT_THREAD_STATUS_CLOSED:
@@ -25329,6 +25507,7 @@ def support_user_message_router(message):
     text = message.text or message.caption or f"[{message.content_type}]"
     add_support_message(thread["id"], "user", text)
     notify_admins_support_incoming(message.chat.id)
+    send_support_sent_toast(message.chat.id)
 
 
 @bot.message_handler(
@@ -25346,13 +25525,6 @@ def support_admin_message_router(message):
         _set_support_admin_state(message.chat.id, reply_to_user_id=None)
         bot.send_message(message.chat.id, "Thread not found")
         return
-    reply_markup = None
-    if not is_user_support_active(reply_user_id):
-        reply_markup = types.InlineKeyboardMarkup()
-        reply_markup.add(
-            types.InlineKeyboardButton("💬 Cavab yaz", callback_data="supportchat:start")
-        )
-    bot.send_message(reply_user_id, message.text, reply_markup=reply_markup)
     add_support_message(thread["id"], "admin", message.text)
     update_support_thread(
         reply_user_id,
@@ -25362,6 +25534,8 @@ def support_admin_message_router(message):
         last_message_from="admin",
         last_message_at=now_utc().isoformat(),
     )
+    increment_user_support_inbox_unread(reply_user_id)
+    send_support_reply_notification(reply_user_id)
     _set_support_admin_state(message.chat.id, reply_to_user_id=None)
     show_support_thread_view(message.chat.id, reply_user_id, set_active=False)
 
