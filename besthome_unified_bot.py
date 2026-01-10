@@ -5502,6 +5502,11 @@ def is_support_session_open_for_user(user_id: int) -> bool:
     return bool(thread and thread.get("status") != SUPPORT_THREAD_STATUS_CLOSED)
 
 
+def is_user_support_active(user_id: int) -> bool:
+    state = get_support_session_state(user_id)
+    return bool(state.get("active"))
+
+
 def has_closed_support_session_for_user(user_id: int) -> bool:
     thread = get_support_thread_by_user(user_id)
     return bool(thread and thread.get("status") == SUPPORT_THREAD_STATUS_CLOSED)
@@ -7078,7 +7083,7 @@ def update_ui_message(
 ) -> Optional[int]:
     message_id = last_ui_message_id.get(user_id)
     last_user = last_user_message_id.get(user_id)
-    in_admin_chat = is_support_session_open_for_user(user_id)
+    in_admin_chat = False
     if message_id and last_user and message_id < last_user:
         try:
             bot.delete_message(chat_id, message_id)
@@ -7219,7 +7224,7 @@ def build_main_menu(
         buttons.append("💳 Ödəniş")
 
     if not is_admin_user:
-        if is_support_session_open_for_user(chat_id):
+        if is_user_support_active(chat_id):
             buttons.append("⛔ Çatı sonlandır")
         else:
             buttons.append("💬 Adminlə əlaqə")
@@ -9347,20 +9352,28 @@ def close_support_chat_from_menu(message):
         return
     if is_admin(message.chat.id):
         return
+    close_support_chat_for_user(message.chat.id)
+
+
+def close_support_chat_for_user(chat_id: int) -> None:
     now_ts = now_utc().isoformat()
-    thread = get_support_thread_by_user(message.chat.id)
+    thread = get_support_thread_by_user(chat_id)
     if thread:
         update_support_thread(
-            message.chat.id,
+            chat_id,
             status=SUPPORT_THREAD_STATUS_CLOSED,
             needs_reply=0,
             unread_for_admin=0,
             last_message_at=now_ts,
             last_message_from=thread.get("last_message_from"),
         )
-    set_support_session_active(message.chat.id, False)
-    bot.send_message(message.chat.id, "🔴 Çat sonlandırıldı")
-    send_main_menu(message.chat.id, force=True)
+    set_support_session_active(chat_id, False)
+    bot.send_message(
+        chat_id,
+        "✅ Dəstək söhbəti bağlandı.\n"
+        "Yenidən yazmaq üçün “Adminlə əlaqə” seçin.",
+    )
+    send_main_menu(chat_id, force=True)
 
 
 def delete_last_ui_message_for_support(chat_id: int) -> None:
@@ -9380,41 +9393,39 @@ def delete_last_ui_message_for_support(chat_id: int) -> None:
 
 
 def start_support_chat_for_user(chat_id: int, user: types.User):
-    reset_user_state(chat_id)
     existing_thread = get_support_thread_by_user(chat_id)
     now_ts = now_utc().isoformat()
     if existing_thread:
-        if existing_thread.get("status") == SUPPORT_THREAD_STATUS_CLOSED:
-            update_support_thread(
-                chat_id,
-                status=SUPPORT_THREAD_STATUS_OPEN,
-                needs_reply=0,
-                unread_for_admin=0,
-                last_message_at=now_ts,
-                last_message_from=existing_thread.get("last_message_from"),
-            )
+        update_support_thread(
+            chat_id,
+            status=SUPPORT_THREAD_STATUS_OPEN,
+            needs_reply=1,
+            unread_for_admin=0,
+            last_message_at=now_ts,
+            last_message_from=existing_thread.get("last_message_from"),
+        )
     else:
         upsert_support_thread(
             chat_id,
             status=SUPPORT_THREAD_STATUS_OPEN,
-            needs_reply=0,
+            needs_reply=1,
             unread_for_admin=0,
             last_message_from=None,
             last_message_at=now_ts,
         )
-    delete_last_ui_message_for_support(chat_id)
     set_support_session_active(
         chat_id,
         True,
         now_ts,
     )
+    mk = types.InlineKeyboardMarkup()
+    mk.add(types.InlineKeyboardButton("⛔ Çatı sonlandır", callback_data="supportchat:end"))
     bot.send_message(
         chat_id,
-        "🟢 Online dəstək aktivdir. Mesajınızı yazın.",
+        "🟢 Dəstək aktivdir. Mesajınızı yazın.\n"
+        "İstənilən vaxt menyudan istifadə edə bilərsiniz.",
+        reply_markup=mk,
     )
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("⛔ Çatı sonlandır")
-    send_with_reply_keyboard(chat_id, "\u2063", kb)
 
 
 @bot.callback_query_handler(func=lambda c: c.data in ("open_pay_menu", "ui_payment_menu"))
@@ -9455,6 +9466,17 @@ def cb_supportchat_start(c):
         return
     chat_id = c.message.chat.id
     start_support_chat_for_user(chat_id, c.from_user)
+    safe_answer_callback_query(c.id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "supportchat:end")
+@callback_guard
+def cb_supportchat_end(c):
+    if is_admin(c.from_user.id):
+        safe_answer_callback_query(c.id)
+        return
+    chat_id = c.message.chat.id
+    close_support_chat_for_user(chat_id)
     safe_answer_callback_query(c.id)
 
 
@@ -25275,18 +25297,13 @@ def admin_search_handler(message):
 
 @bot.message_handler(
     content_types=["text", "voice", "document", "photo", "audio", "video"],
-    func=lambda m: not is_admin(m.chat.id)
-    and (
-        is_support_session_open_for_user(m.chat.id)
-        or has_closed_support_session_for_user(m.chat.id)
-    ),
+    func=lambda m: not is_admin(m.chat.id) and is_user_support_active(m.chat.id),
 )
 def support_user_message_router(message):
     if message.content_type == "text" and message.text and message.text.startswith("/"):
         return
     if has_active_text_flow(message.chat.id):
         return
-    set_support_session_active(message.chat.id, True)
     now_ts = now_utc().isoformat()
     thread = get_support_thread_by_user(message.chat.id)
     if not thread or thread.get("status") == SUPPORT_THREAD_STATUS_CLOSED:
@@ -25329,7 +25346,13 @@ def support_admin_message_router(message):
         _set_support_admin_state(message.chat.id, reply_to_user_id=None)
         bot.send_message(message.chat.id, "Thread not found")
         return
-    bot.send_message(reply_user_id, message.text)
+    reply_markup = None
+    if not is_user_support_active(reply_user_id):
+        reply_markup = types.InlineKeyboardMarkup()
+        reply_markup.add(
+            types.InlineKeyboardButton("💬 Cavab yaz", callback_data="supportchat:start")
+        )
+    bot.send_message(reply_user_id, message.text, reply_markup=reply_markup)
     add_support_message(thread["id"], "admin", message.text)
     update_support_thread(
         reply_user_id,
@@ -25376,7 +25399,7 @@ def has_active_text_flow(chat_id: int) -> bool:
 def has_active_support_session(chat_id: int) -> bool:
     if is_admin(chat_id):
         return bool(get_support_admin_reply_user_id(chat_id))
-    return is_support_session_open_for_user(chat_id)
+    return is_user_support_active(chat_id)
 
 
 @bot.message_handler(
