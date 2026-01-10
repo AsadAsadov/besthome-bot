@@ -165,6 +165,7 @@ WEB_APP_URL = (
     or os.environ.get("PUBLIC_WEB_APP_URL")
     or os.environ.get("PUBLIC_BASE_URL")
 )
+EMLAK_BAZASI_URL = "https://emlak-bazasi.com/search/agency/"
 
 BASE_DATA_DIR = os.getenv("DATA_DIR", "/data")
 os.environ.setdefault("DATA_DIR", BASE_DATA_DIR)
@@ -7026,6 +7027,16 @@ def build_main_menu(
     return kb
 
 
+def build_main_menu_inline_markup() -> types.InlineKeyboardMarkup:
+    mk = types.InlineKeyboardMarkup()
+    mk.row(
+        types.InlineKeyboardButton(
+            text="🌐 Əmlak bazası", web_app=types.WebAppInfo(url=EMLAK_BAZASI_URL)
+        )
+    )
+    return mk
+
+
 def should_show_bonus_button(chat_id: int) -> bool:
     record = get_user_record(chat_id)
     if record and (record.get("blocked") or record.get("is_blocked")):
@@ -7054,9 +7065,16 @@ def send_main_menu(
         has_customer_requests_access(chat_id),
         should_show_bonus_button(chat_id),
     )
-    send_with_reply_keyboard(
+    bot.send_message(
         chat_id,
         text or "🏠 Əsas menyu:",
+        reply_markup=build_main_menu_inline_markup(),
+        parse_mode=parse_mode,
+        disable_web_page_preview=disable_preview,
+    )
+    send_with_reply_keyboard(
+        chat_id,
+        "\u2063",
         kb,
         parse_mode=parse_mode,
         disable_preview=disable_preview,
