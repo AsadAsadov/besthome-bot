@@ -399,6 +399,7 @@ ADMIN_PANEL_PASSWORD_HASHES, ADMIN_PANEL_SHARED_PASSWORD_HASH = (
 )
 
 user_state = {}  # Yeni elan proses state
+user_temp: Dict[int, Dict[str, int]] = {}
 search_state = {}  # Açar sözlə axtarış paging state
 today_flow_state = {}
 UI_CONTEXT_MAIN = "main_menu"
@@ -5542,6 +5543,7 @@ def inc_limit(chat_id: int, key_type: str, inc: int = 1):
 
 def reset_user_state(chat_id: int):
     user_state.pop(chat_id, None)
+    user_temp.pop(chat_id, None)
     clear_user_state(chat_id)
     customer_request_state.pop(chat_id, None)
     agent_request_lookup_state.pop(chat_id, None)
@@ -7139,15 +7141,8 @@ def build_main_menu(
     return kb
 
 
-def build_main_menu_inline_markup() -> types.InlineKeyboardMarkup:
-    mk = types.InlineKeyboardMarkup()
-    mk.row(
-        types.InlineKeyboardButton(
-            text="🌐 Əmlak bazası / Nömrə ilə axtarış",
-            web_app=types.WebAppInfo(url=EMLAK_BAZASI_URL),
-        )
-    )
-    return mk
+def build_main_menu_inline_markup() -> Optional[types.InlineKeyboardMarkup]:
+    return None
 
 
 def should_show_bonus_button(chat_id: int) -> bool:
@@ -7223,6 +7218,12 @@ def build_search_menu_inline_markup(chat_id: int) -> types.InlineKeyboardMarkup:
                 "🔔 Bildirişlər", callback_data="search_menu:notifs"
             )
         )
+    mk.add(
+        types.InlineKeyboardButton(
+            "🌐 Əmlak bazası / Nömrə ilə axtarış",
+            web_app=types.WebAppInfo(url=EMLAK_BAZASI_URL),
+        )
+    )
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="search_menu:back"))
     return mk
 
@@ -10410,6 +10411,9 @@ def return_to_main_menu(message):
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
+    if user_state.get(chat_id) in {"WAIT_MIN_PRICE", "WAIT_MAX_PRICE"}:
+        cancel_price_range_flow(chat_id)
+        return
     reset_search_state(chat_id)
     reset_user_state(chat_id)
     set_ui_context(chat_id, UI_CONTEXT_MAIN)
@@ -10640,8 +10644,6 @@ def start_structured_search_from_menu(chat_id: int, op_code: str):
         "filters": {},
         "history": [],
         "awaiting_floor_range": False,
-        "awaiting_price_min": False,
-        "awaiting_price_max": False,
         "step": "op",
     }
     search_state[chat_id]["filters"]["op"] = op_code
@@ -15702,8 +15704,6 @@ def send_structured_start(chat_id, message=None):
         "filters": {},
         "history": [],
         "awaiting_floor_range": False,
-        "awaiting_price_min": False,
-        "awaiting_price_max": False,
         "step": "op",
     }
     render_op_step(chat_id, message)
@@ -15757,8 +15757,6 @@ def cb_structured(c):
             "filters": {},
             "history": [],
             "awaiting_floor_range": False,
-            "awaiting_price_min": False,
-            "awaiting_price_max": False,
         },
     )
 
@@ -15778,8 +15776,6 @@ def cb_structured(c):
     if action == "op":
         st["history"] = []
         st["awaiting_floor_range"] = False
-        st["awaiting_price_min"] = False
-        st["awaiting_price_max"] = False
         st["filters"] = {"op": parts[2]}
         structured_push_history(chat_id)
         render_date_range_step(chat_id, c.message)
@@ -15850,12 +15846,13 @@ def cb_structured(c):
     elif action == "prm":
         st.setdefault("filters", {})["min_price"] = None
         st.setdefault("filters", {})["max_price"] = None
-        st["awaiting_price_min"] = True
         st["step"] = "price_min"
+        user_temp.pop(chat_id, None)
+        user_state[chat_id] = "WAIT_MIN_PRICE"
         update_ui_message(
             chat_id,
             chat_id,
-            "💰 Minimum qiymət yazın (rəqəm ilə):",
+            "Minimum qiyməti daxil edin:",
             build_back_reply_keyboard(),
         )
     elif action == "rm":
@@ -15937,9 +15934,34 @@ def handle_floor_range_input(message):
     perform_structured_search(chat_id, offset=0, edit_msg=None)
 
 
-@bot.message_handler(
-    func=lambda m: search_state.get(m.chat.id, {}).get("awaiting_price_min")
-)
+def cancel_price_range_flow(chat_id: int) -> None:
+    user_state[chat_id] = None
+    user_temp.pop(chat_id, None)
+    if is_search_menu_active(chat_id):
+        send_search_menu(chat_id)
+    else:
+        return_to_main_menu(chat_id)
+
+
+def apply_price_filter(chat_id: int, min_p: int, max_p: int) -> None:
+    st = search_state.get(chat_id, {})
+    if not st or st.get("mode") != "structured":
+        update_ui_message(chat_id, chat_id, "Sessiya tapılmadı. Yenidən başlayın.", None)
+        return
+    st.setdefault("filters", {})["min_price"] = min_p
+    st.setdefault("filters", {})["max_price"] = max_p
+    st.setdefault("filters", {}).pop("price", None)
+    st["step"] = "price"
+    structured_push_history(chat_id)
+    update_ui_message(chat_id, chat_id, "✅ Qiymət aralığı seçildi.", None)
+    prop = st.get("filters", {}).get("prop")
+    if prop == "t":
+        perform_structured_search(chat_id, offset=0, edit_msg=None)
+    else:
+        render_room_step(chat_id)
+
+
+@bot.message_handler(func=lambda m: user_state.get(m.chat.id) == "WAIT_MIN_PRICE")
 def handle_price_min_input(message):
     if not ensure_allowed(message):
         return
@@ -15950,9 +15972,7 @@ def handle_price_min_input(message):
         return
     delete_user_command_message(message)
     if text == "⬅️ Geri":
-        st["awaiting_price_min"] = False
-        update_ui_message(chat_id, chat_id, "↩️ Qiymət seçiminə qayıdıldı.", None)
-        render_price_step(chat_id)
+        cancel_price_range_flow(chat_id)
         return
     value = parse_number(text)
     if value is None:
@@ -15963,20 +15983,17 @@ def handle_price_min_input(message):
             build_back_reply_keyboard(),
         )
         return
-    st.setdefault("filters", {})["min_price"] = value
-    st["awaiting_price_min"] = False
-    st["awaiting_price_max"] = True
+    user_temp[chat_id] = {"min_price": int(value)}
+    user_state[chat_id] = "WAIT_MAX_PRICE"
     update_ui_message(
         chat_id,
         chat_id,
-        "💰 Maksimum qiymət yazın (rəqəm ilə):",
+        "Maksimum qiyməti daxil edin:",
         build_back_reply_keyboard(),
     )
 
 
-@bot.message_handler(
-    func=lambda m: search_state.get(m.chat.id, {}).get("awaiting_price_max")
-)
+@bot.message_handler(func=lambda m: user_state.get(m.chat.id) == "WAIT_MAX_PRICE")
 def handle_price_max_input(message):
     if not ensure_allowed(message):
         return
@@ -15987,14 +16004,7 @@ def handle_price_max_input(message):
         return
     delete_user_command_message(message)
     if text == "⬅️ Geri":
-        st["awaiting_price_max"] = False
-        st["awaiting_price_min"] = True
-        update_ui_message(
-            chat_id,
-            chat_id,
-            "💰 Minimum qiymət yazın (rəqəm ilə):",
-            build_back_reply_keyboard(),
-        )
+        cancel_price_range_flow(chat_id)
         return
     value = parse_number(text)
     if value is None:
@@ -16005,7 +16015,14 @@ def handle_price_max_input(message):
             build_back_reply_keyboard(),
         )
         return
-    min_price = st.get("filters", {}).get("min_price")
+    min_price = user_temp.get(chat_id, {}).get("min_price")
+    if min_price is None:
+        user_state[chat_id] = None
+        update_ui_message(
+            chat_id, chat_id, "Sessiya tapılmadı. Yenidən başlayın.", None
+        )
+        user_temp.pop(chat_id, None)
+        return
     if min_price is not None and value < min_price:
         update_ui_message(
             chat_id,
@@ -16014,16 +16031,12 @@ def handle_price_max_input(message):
             build_back_reply_keyboard(),
         )
         return
-    st.setdefault("filters", {})["max_price"] = value
-    st["awaiting_price_max"] = False
-    st["step"] = "price"
-    structured_push_history(chat_id)
-    update_ui_message(chat_id, chat_id, "✅ Qiymət aralığı seçildi.", None)
-    prop = st.get("filters", {}).get("prop")
-    if prop == "t":
-        perform_structured_search(chat_id, offset=0, edit_msg=None)
-    else:
-        render_room_step(chat_id)
+    user_temp.setdefault(chat_id, {})["max_price"] = int(value)
+    user_state[chat_id] = None
+    min_p = user_temp[chat_id]["min_price"]
+    max_p = user_temp[chat_id]["max_price"]
+    user_temp.pop(chat_id, None)
+    apply_price_filter(chat_id, min_p, max_p)
 
 
 def perform_structured_search(chat_id, offset=0, edit_msg=None):
