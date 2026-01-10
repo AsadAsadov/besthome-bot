@@ -1782,9 +1782,9 @@ def count_recent_listings_for_ids(db_path: str, listing_ids: Set[int]) -> int:
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.cursor()
-        date_col = detect_added_at_column(cur, "listings")
+        date_col = get_listings_timestamp_column(cur)
         if not date_col:
-            logger.warning("added_at column missing for recent listing count")
+            logger.error("[STATS] No timestamp column found")
             return 0
         window = get_last_24h_window()
         date_sql, date_params = build_last_24h_clause(date_col, window)
@@ -1838,9 +1838,9 @@ def count_new_listings_today(db_path: str, from_id: int, to_id: int) -> int:
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.cursor()
-        date_col = detect_added_at_column(cur, "listings")
+        date_col = get_listings_timestamp_column(cur)
         if not date_col:
-            logger.warning("added_at column missing for new listing counts")
+            logger.error("[STATS] No timestamp column found")
             return 0
         window = get_last_24h_window()
         date_sql, date_params = build_last_24h_clause(date_col, window)
@@ -1867,9 +1867,9 @@ def count_last_24h_listings(db_path: str) -> Tuple[int, int, int]:
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.cursor()
-        date_col = detect_added_at_column(cur, "listings")
+        date_col = get_listings_timestamp_column(cur)
         if not date_col:
-            logger.warning("added_at column missing for 24h listing count")
+            logger.error("[STATS] No timestamp column found")
             return 0, 0, 0
         window = get_last_24h_window()
         date_sql, date_params = build_last_24h_clause(date_col, window)
@@ -1917,6 +1917,30 @@ def count_last_24h_listings(db_path: str) -> Tuple[int, int, int]:
         conn.close()
 
 
+def count_listings_since(db_path: str, since_dt: datetime) -> int:
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        date_col = get_listings_timestamp_column(cur)
+        if not date_col:
+            logger.error("[STATS] No timestamp column found")
+            return 0
+        date_sql, date_params = build_since_clause(date_col, since_dt)
+        cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM listings
+            WHERE 1=1
+            """
+            + date_sql,
+            date_params,
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    finally:
+        conn.close()
+
+
 def atomic_replace_main_db(new_db_path: str) -> Optional[str]:
     backup_path = backup_main_db_file()
     if backup_path:
@@ -1941,8 +1965,11 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
     extracted_db_path = None
     extracted_dir = None
     backup_path = None
+    update_start_time = datetime.now()
     try:
         main_db_update_in_progress.set()
+        global LISTINGS_TS_COLUMN
+        LISTINGS_TS_COLUMN = None
         clean_old_update_artifacts()
         ensure_tmp_workspace()
         for path in (DB_UPDATE_ZIP_PATH, DB_UPDATE_DB_PATH):
@@ -2000,6 +2027,7 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             conn.commit()
         finally:
             conn.close()
+        LISTINGS_TS_COLUMN = None
 
         send_db_update_progress(admin_id, "🧱 FTS/indeks yenilənir…")
         try:
@@ -2012,6 +2040,7 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
         try:
             logger.info("[UPDATE] New listings computed from last 24h window")
             try:
+                new_count = count_listings_since(MAIN_DB, update_start_time)
                 total, new_sale, new_rent = count_last_24h_listings(MAIN_DB)
                 logger.info(
                     "[UPDATE] 24h total=%s satilir=%s kiraye=%s",
@@ -2022,6 +2051,7 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             except Exception:
                 logger.exception("[UPDATE] 24h listing count failed")
                 total, new_sale, new_rent = 0, 0, 0
+                new_count = 0
             try:
                 process_keyword_alerts_for_new_listings()
             except Exception as e:
@@ -2030,7 +2060,7 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             report = (
                 "✅ Elanlar uğurla yeniləndi.\n"
                 f"📦 Son 24 saatda əlavə olunan elanlar: {total}\n"
-                "📊 Bu yenilənmədə:\n"
+                f"📊 Bu yenilənmədə: {new_count}\n"
                 f"1⃣ Satılır: {new_sale}\n"
                 f"2⃣ Kirayə verilir: {new_rent}"
             )
@@ -2038,7 +2068,7 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             logger.info(
                 "DB update completed chat_id=%s new=%s",
                 admin_id,
-                total,
+                new_count,
             )
         except Exception:
             logger.exception("DB stats failed after update chat_id=%s", admin_id)
@@ -5016,7 +5046,7 @@ def compute_total_pages(total_count: int) -> int:
 
 
 def get_last_24h_window():
-    now = datetime.utcnow()
+    now = datetime.now()
     start = now - timedelta(hours=24)
     logger.info("Last 24h stats computed using rolling window (now-24h)")
     return start, now
@@ -5039,6 +5069,22 @@ def get_table_columns(cur, table: str):
         return {row[1].lower(): row[1] for row in cur.fetchall()}
     except Exception:
         return {}
+
+
+LISTINGS_TS_COLUMN: Optional[str] = None
+
+
+def get_listings_timestamp_column(cur) -> Optional[str]:
+    global LISTINGS_TS_COLUMN
+    if LISTINGS_TS_COLUMN:
+        return LISTINGS_TS_COLUMN
+    cols = get_table_columns(cur, "listings")
+    for key in ("created_at", "published_at", "inserted_at"):
+        if key in cols:
+            LISTINGS_TS_COLUMN = cols[key]
+            return LISTINGS_TS_COLUMN
+    logger.error("[STATS] No timestamp column found")
+    return None
 
 
 def detect_user_listings_table(conn) -> Optional[str]:
@@ -5233,12 +5279,17 @@ def detect_stats_source(cur, stat_context: str) -> Dict[str, Any]:
 
     ts_col = None
     ts_kind = None
-    for candidate in STATS_TS_CANDIDATES:
-        if candidate in cols:
-            ts_col = cols[candidate]
+    if table == "listings":
+        ts_col = get_listings_timestamp_column(cur)
+        if ts_col:
             ts_kind = _detect_ts_kind(cur, table, ts_col)
-            if ts_kind:
-                break
+    else:
+        for candidate in STATS_TS_CANDIDATES:
+            if candidate in cols:
+                ts_col = cols[candidate]
+                ts_kind = _detect_ts_kind(cur, table, ts_col)
+                if ts_kind:
+                    break
     if ts_col and not ts_kind:
         ts_kind = "iso"
     op_col = None
@@ -5309,9 +5360,21 @@ def build_last_24h_clause(
 ):
     if not column:
         return "", []
-    start = (window or (None, None))[0] or (datetime.utcnow() - timedelta(hours=24))
+    start = (window or (None, None))[0] or (datetime.now() - timedelta(hours=24))
     start_ts = int(start.replace(tzinfo=timezone.utc).timestamp())
     start_str = format_sqlite_datetime(start)
+    clause = (
+        " AND ((typeof({col})='integer' AND {col} >= ?) "
+        "OR (datetime({col}) >= datetime(?)))"
+    ).format(col=column)
+    return clause, [start_ts, start_str]
+
+
+def build_since_clause(column: Optional[str], since: datetime):
+    if not column:
+        return "", []
+    start_ts = int(since.replace(tzinfo=timezone.utc).timestamp())
+    start_str = format_sqlite_datetime(since)
     clause = (
         " AND ((typeof({col})='integer' AND {col} >= ?) "
         "OR (datetime({col}) >= datetime(?)))"
@@ -5409,10 +5472,12 @@ def count_main_active_listings(
         flt, params = build_filters_sql(op_code, prop_code, None, mode="main")
         date_sql, date_params = ("", [])
         if only_today:
-            date_col = detect_added_at_column(cur, "listings")
-            if date_col:
-                window = get_last_24h_window()
-                date_sql, date_params = build_today_clause(f"l.{date_col}", window)
+            date_col = get_listings_timestamp_column(cur)
+            if not date_col:
+                logger.error("[STATS] No timestamp column found")
+                return 0
+            window = get_last_24h_window()
+            date_sql, date_params = build_today_clause(f"l.{date_col}", window)
         rayon_sql, rayon_params = build_rayon_filter_sql(cur, "listings", rayon, "l.")
         sql = "SELECT COUNT(*) FROM listings l " + flt + date_sql + rayon_sql
         cur.execute(sql, params + date_params + rayon_params)
@@ -8409,7 +8474,7 @@ PROP_TYPE_EMOJI_MAP = {
     "Mənzil": "🏠",
     "Bağ evi": "🏡",
     "Həyət evi": "🏘️",
-    "Obyekt / Ofis": "🏢",
+    "Ofis / Obyekt": "🏢",
     "Torpaq": "🌱",
 }
 
@@ -8483,13 +8548,16 @@ def format_stats_text(
 
     if is_admin:
         meta = period_stats.get("meta") or base_stats.get("meta") or {}
+        ts_col = meta.get("ts_col")
+        if meta.get("table") == "listings":
+            ts_col = LISTINGS_TS_COLUMN or ts_col
         lines.append(
             ""
         )
         lines.append(
             "(dbg: table={} ts={} {} op={} type={})".format(
                 meta.get("table") or "-",
-                meta.get("ts_col") or "-",
+                ts_col or "-",
                 meta.get("ts_kind") or "none",
                 meta.get("op_col") or "-",
                 meta.get("type_col") or "-",
@@ -9156,7 +9224,7 @@ def start_new_listing(message):
         "📝 *Yeni elan əlavə etmə qaydası:*\n"
         "1️⃣ Rol (Vasitəçi / Əmlak sahibi)\n"
         "2️⃣ Əməliyyat (Satılır / Kirayə verilir)\n"
-        "3️⃣ Əmlak tipi (Mənzil / Həyət evi / Obyekt / Ofis / Bağ evi / Torpaq)\n"
+        "3️⃣ Əmlak tipi (Mənzil / Həyət evi / Ofis / Obyekt / Bağ evi / Torpaq)\n"
         "4️⃣ Otaq sayı, ərazi, metro, sahə, qiymət, əlaqə\n"
         "5️⃣ Elan admin təsdiqindən sonra sistemə düşəcək."
     )
@@ -9208,7 +9276,7 @@ def step_operation(message):
     st = user_state[chat_id]
     st["operation"] = choice
 
-    extra = [["Mənzil", "Həyət evi"], ["Obyekt / Ofis", "Bağ evi"], ["Torpaq"]]
+    extra = [["Mənzil", "Həyət evi"], ["Ofis / Obyekt", "Bağ evi"], ["Torpaq"]]
     kb = new_listing_keyboard(extra=extra)
     st["step"] = "prop_type"
     bot.send_message(chat_id, "🏠 Əmlak tipini seçin:", reply_markup=kb)
@@ -9225,7 +9293,7 @@ def step_prop_type(message):
     if handle_common_nav(message):
         return
     choice = (message.text or "").strip()
-    valid = ["Mənzil", "Həyət evi", "Obyekt / Ofis", "Bağ evi", "Torpaq"]
+    valid = ["Mənzil", "Həyət evi", "Ofis / Obyekt", "Bağ evi", "Torpaq"]
     normalized_choice = normalize_property_type_ui_value(choice)
     if not normalized_choice or normalized_choice not in valid:
         bot.send_message(chat_id, "Verilən siyahıdan əmlak tipini seçin.")
@@ -12488,10 +12556,10 @@ PROP_TYPE_MAP = {
     "həyət evi": "Həyət evi",
     "ferdi yasayis evi": "Həyət evi",
     "fərdi yaşayış evi": "Həyət evi",
-    "obyekt / ofis": "Obyekt / Ofis",
-    "obyekt": "Obyekt / Ofis",
-    "ofis": "Obyekt / Ofis",
-    "qeyri yaşayış sahəsi": "Obyekt / Ofis",
+    "obyekt / ofis": "Ofis / Obyekt",
+    "obyekt": "Ofis / Obyekt",
+    "ofis": "Ofis / Obyekt",
+    "qeyri yaşayış sahəsi": "Ofis / Obyekt",
     "bağ evi": "Bağ evi",
     "torpaq": "Torpaq",
 }
@@ -12519,7 +12587,7 @@ PROP_TYPES = {
     "all": None,
     "m": "Mənzil",
     "f": "Həyət evi",
-    "q": "Obyekt / Ofis",
+    "q": "Ofis / Obyekt",
     "b": "Bağ evi",
     "t": "Torpaq",
     "d": "Digər",
@@ -13028,41 +13096,39 @@ def compute_stats(
 
     where_clauses = []
     where_params: List[Any] = []
-    use_recent = False
+    if window != "all" and (not ts_col or ts_kind not in {"unix", "iso"}):
+        stats["note"] = (
+            "⚠️ Zaman məlumatı tapılmadı, yeni elan sayı hesablana bilmədi."
+        )
+        return stats
     if window == "24h":
         start, end = get_last_24h_window()
-        if ts_col and ts_kind == "unix":
+        if ts_kind == "unix":
             where_clauses.append(
                 f"COALESCE(l.\"{ts_col}\", 0) >= ? AND COALESCE(l.\"{ts_col}\", 0) < ?"
             )
             where_params.extend([int(start.timestamp()), int(end.timestamp())])
-        elif ts_col and ts_kind == "iso":
+        elif ts_kind == "iso":
             where_clauses.append(
                 f"datetime(l.\"{ts_col}\") >= datetime(?) AND datetime(l.\"{ts_col}\") < datetime(?)"
             )
             where_params.extend(
                 [format_sqlite_datetime(start), format_sqlite_datetime(end)]
             )
-        else:
-            use_recent = True
-            stats["note"] = f"Tarix məlumatı yoxdur, son {STATS_RECENT_LIMIT} elan"
     else:
         window_days = {"7d": 7, "30d": 30}.get(window)
         if window != "all" and window_days:
-            if ts_col and ts_kind == "unix":
+            if ts_kind == "unix":
                 seconds = window_days * 24 * 3600
                 where_clauses.append(
                     f"COALESCE(l.\"{ts_col}\", 0) >= (strftime('%s','now') - ?)"
                 )
                 where_params.append(seconds)
-            elif ts_col and ts_kind == "iso":
+            elif ts_kind == "iso":
                 where_clauses.append(
                     f"datetime(l.\"{ts_col}\") >= datetime('now', ?)"
                 )
                 where_params.append(f"-{window_days} days")
-            else:
-                use_recent = True
-                stats["note"] = f"Tarix məlumatı yoxdur, son {STATS_RECENT_LIMIT} elan"
 
     cols = get_table_columns(cur, source_table)
     order_col = None
@@ -13074,10 +13140,6 @@ def compute_stats(
         order_col = "ROWID"
 
     from_clause = f"{source_table} l"
-    if use_recent:
-        from_clause = (
-            f"(SELECT * FROM {source_table} ORDER BY {order_col} DESC LIMIT {STATS_RECENT_LIMIT}) l"
-        )
 
     where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
     query = f"SELECT {', '.join(select_parts)} FROM {from_clause}{where_sql}"
@@ -13143,9 +13205,13 @@ def compute_user_statistics(period: str) -> dict:
 
         col_names = {str(r[1]).lower(): r[1] for r in col_rows if len(r) > 1}
 
-        ts_col = col_names.get("added_at")
+        ts_col = get_listings_timestamp_column(cur)
         if not ts_col:
-            logger.warning("User stats added_at column missing in listings table")
+            logger.error("[STATS] No timestamp column found")
+
+        ts_kind = _detect_ts_kind(cur, "listings", ts_col) if ts_col else "none"
+        if ts_col and ts_kind is None:
+            ts_kind = "iso"
 
         op_col = col_names.get("operation")
         type_col = col_names.get("prop_type")
@@ -13153,7 +13219,7 @@ def compute_user_statistics(period: str) -> dict:
         stats["meta"] = {
             "table": "listings",
             "ts_col": ts_col,
-            "ts_kind": "iso" if ts_col else "none",
+            "ts_kind": ts_kind or "none",
             "op_col": op_col,
             "type_col": type_col,
         }
@@ -13184,23 +13250,25 @@ def compute_user_statistics(period: str) -> dict:
         where_clauses: List[str] = []
         where_params: List[Any] = []
 
+        if key_base != "all" and not ts_col:
+            stats["note"] = (
+                "⚠️ Zaman məlumatı tapılmadı, yeni elan sayı hesablana bilmədi."
+            )
+            return stats
         if key_base == "24h" and ts_col:
-            start, end = get_last_24h_window()
-            where_clauses.append(
-                f"datetime(l.\"{ts_col}\") >= datetime(?) AND datetime(l.\"{ts_col}\") < datetime(?)"
-            )
-            where_params.extend(
-                [format_sqlite_datetime(start), format_sqlite_datetime(end)]
-            )
+            window = get_last_24h_window()
+            date_sql, date_params = build_last_24h_clause(f"l.\"{ts_col}\"", window)
+            where_clauses.append(date_sql.replace(" AND ", "", 1))
+            where_params.extend(date_params)
         elif key_base != "all" and ts_col:
             window_days = {"7d": 7, "30d": 30}.get(key_base)
             if window_days:
-                where_clauses.append(
-                    f"datetime(l.\"{ts_col}\") >= datetime('now', ?)"
+                date_sql, date_params = _build_market_ts_clause(
+                    ts_col, ts_kind or "none", window_days
                 )
-                where_params.append(f"-{window_days} days")
-        elif key_base != "all" and not ts_col:
-            stats["note"] = "Tarix məlumatı yoxdur, zaman filtri tətbiq edilmədi"
+                if date_sql:
+                    where_clauses.append(date_sql.replace(" AND ", "", 1))
+                    where_params.extend(date_params)
 
         where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
         query = f"SELECT {', '.join(select_parts)} FROM listings l{where_sql}"
@@ -13849,27 +13917,31 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
         cur = conn.cursor()
         base = "SELECT * FROM listings"
         flt, params = build_filters_sql(op_code, prop_code, None, mode="main")
-        date_col = detect_added_at_column(cur, "listings")
-        date_sql, date_params = build_today_clause(date_col, window)
-        rayon_sql, rayon_params = build_rayon_filter_sql(
-            cur, "listings", filters.get("rayon"), ""
-        )
-        order_col = date_col or "date_read"
-        where_sql = flt + date_sql + rayon_sql
-        logger.debug(
-            "today query main where=%s params=%s",
-            where_sql,
-            params + date_params + rayon_params,
-        )
-        cur.execute(
-            base + where_sql + f" ORDER BY {order_col} DESC, id DESC",
-            params + date_params + rayon_params,
-        )
-        for r in cur.fetchall():
-            d = dict(r)
-            d["__source"] = "main"
-            results.append(d)
-        close_main_conn(conn)
+        date_col = get_listings_timestamp_column(cur)
+        if not date_col:
+            logger.error("[STATS] No timestamp column found")
+            close_main_conn(conn)
+        else:
+            date_sql, date_params = build_today_clause(date_col, window)
+            rayon_sql, rayon_params = build_rayon_filter_sql(
+                cur, "listings", filters.get("rayon"), ""
+            )
+            order_col = date_col or "date_read"
+            where_sql = flt + date_sql + rayon_sql
+            logger.debug(
+                "today query main where=%s params=%s",
+                where_sql,
+                params + date_params + rayon_params,
+            )
+            cur.execute(
+                base + where_sql + f" ORDER BY {order_col} DESC, id DESC",
+                params + date_params + rayon_params,
+            )
+            for r in cur.fetchall():
+                d = dict(r)
+                d["__source"] = "main"
+                results.append(d)
+            close_main_conn(conn)
 
     conn = get_local_conn()
     cur = conn.cursor()
@@ -14960,7 +15032,7 @@ def render_prop_step(chat_id, message=None):
         types.InlineKeyboardButton("Həyət evi", callback_data="fs|tp|f"),
     )
     mk.add(
-        types.InlineKeyboardButton("Obyekt / Ofis", callback_data="fs|tp|q"),
+        types.InlineKeyboardButton("Ofis / Obyekt", callback_data="fs|tp|q"),
         types.InlineKeyboardButton("Bağ evi", callback_data="fs|tp|b"),
     )
     mk.add(
