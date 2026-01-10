@@ -407,6 +407,7 @@ UI_CONTEXT_TODAY = "browsing_today_listings"
 UI_CONTEXT_SEARCH = "browsing_search_results"
 UI_CONTEXT_ADMIN = "browsing_admin_users"
 ui_context_state: Dict[int, str] = defaultdict(lambda: UI_CONTEXT_MAIN)
+ui_message_state: Dict[int, int] = {}
 search_reminder_shown = set()  # Session-level reminder flag
 session_interactions = {}
 db_update_state_lock = threading.Lock()
@@ -426,10 +427,6 @@ DB_UPDATE_TMP_DIR = "/tmp/besthome_update"
 DB_UPDATE_BACKUP_DIR = "/tmp/besthome_backups"
 DB_UPDATE_ZIP_PATH = "/tmp/besthome_update.zip"
 DB_UPDATE_DB_PATH = "/tmp/besthome_update.db"
-complaint_flow_state = {}
-complaint_records = {}
-admin_reply_state = {}
-last_complaint_time = {}
 admin_stats_period = {}
 admin_bonus_stats_period = {}
 admin_direct_message_state = {}
@@ -482,7 +479,7 @@ TEXTS_AZ = {
     "admin_panel_title": "🛠 Admin Panel:",
     "admin_panel_nav_next": "▶️ Növbəti səhifə",
     "admin_panel_nav_prev": "◀️ Əvvəlki səhifə",
-    "admin_panel_back_main": "⬅️ Geri",
+    "admin_panel_back_main": "🔙 Geri",
     "admin_panel_pending_listings": "✅ Təsdiqlənməyən elanlar",
     "admin_panel_stats": "📊 Statistikalar",
     "admin_panel_customer_requests": "📌 Müştəri istəkləri",
@@ -503,7 +500,7 @@ TEXTS_AZ = {
     "admin_panel_customer_requests_access": "📌 Müştəri istəkləri icazəsi",
     "admin_panel_archived_requests": "🗄 Arxivlənmiş müştəri istəkləri",
     "admin_panel_support_chats": "💬 Online chat",
-    "financial_reports_back": "⬅️ Geri (Admin Panel)",
+    "financial_reports_back": "🔙 Geri",
     "financial_reports_history": "📜 Ödəniş tarixçəsi",
     "financial_reports_referral": "🤝 Referral statistikası",
     "financial_reports_monthly": "📈 Aylıq gəlir hesabatı",
@@ -569,7 +566,7 @@ TEXTS_AZ = {
     "admin_user_no_plan": "❌ Aktiv plan tapılmadı",
     "admin_user_activated": "✅ Aktiv edildi",
     "admin_user_demo_given": "🎁 Demo verildi",
-    "admin_back_button": "⬅️ Geri",
+    "admin_back_button": "🔙 Geri",
     "admin_promo_menu_title": "🎟 Promo kod idarəsi:",
     "admin_promo_generate_1": "🎁 1 gün",
     "admin_promo_generate_3": "🎁 3 gün",
@@ -679,7 +676,7 @@ ADMIN_STATS_MENU_BUTTONS = [
     "🎁 Şans statistikası",
     "📷 QR statistikası",
 ]
-ADMIN_STATS_MENU_BACK = "⬅️ Geri"
+ADMIN_STATS_MENU_BACK = "🔙 Geri"
 ADMIN_PANEL_ACTIONS = list(ADMIN_PANEL_BUTTONS)
 ADMIN_PANEL_ACTION_SET = set(ADMIN_PANEL_ACTIONS)
 ADMIN_PANEL_ACTION_KEYS = {
@@ -695,7 +692,6 @@ FEATURE_FLAG_DEFAULTS = {
     "try_your_luck": 1,
     "payment": 1,
     "about": 1,
-    "complaints": 1,
     "notifications": 1,
 }
 
@@ -709,7 +705,6 @@ FEATURE_FLAG_LABELS = {
     "try_your_luck": "Şansını sına",
     "payment": "Ödəniş",
     "about": "Haqqında",
-    "complaints": "Şikayət və təkliflər",
     "notifications": "Bildirişlər",
 }
 
@@ -751,14 +746,6 @@ NEW_LISTING_WINDOW_HOURS = 24
 HOT_VIEWS_THRESHOLD = 50
 PAGE_SIZE_REQ = 10
 PAGE_SIZE_DEMO_USERS = 5
-COMPLAINT_CATEGORIES = [
-    "🐞 Texniki problem",
-    "💡 Təklif",
-    "❗ Şikayət",
-    "💬 Digər",
-]
-COMPLAINT_BACK = "⬅️ Geri"
-COMPLAINT_COOLDOWN_SECONDS = 300
 
 # Admin user lists
 PAGE_SIZE_USERS = 10
@@ -5377,14 +5364,15 @@ def build_payment_menu_markup(chat_id: int):
 
 def send_payment_menu(chat_id: int):
     if not is_feature_enabled("payment", chat_id):
-        bot.send_message(chat_id, FEATURE_DISABLED_MESSAGE)
+        edit_or_send_message(chat_id, FEATURE_DISABLED_MESSAGE, None, ui_message_state)
         return
     mk = build_payment_menu_markup(chat_id)
-    bot.send_message(
+    edit_or_send_message(
         chat_id,
         "💳 Abunəlik planını seç və ödəniş et:\n\n"
         "✅ Demo bitibsə, yeniləmək üçün plan seçin.",
-        reply_markup=mk,
+        mk,
+        ui_message_state,
     )
 
 
@@ -5547,8 +5535,6 @@ def reset_user_state(chat_id: int):
     customer_request_rule_state.pop(chat_id, None)
     keyword_alert_state.pop(chat_id, None)
     notification_rule_state.pop(chat_id, None)
-    complaint_flow_state.pop(chat_id, None)
-    admin_reply_state.pop(chat_id, None)
     admin_direct_message_state.pop(chat_id, None)
     admin_user_message_state.pop(chat_id, None)
     admin_user_extend_state.pop(chat_id, None)
@@ -6969,6 +6955,44 @@ def send_with_reply_keyboard(
     send_menu_visibility_hint(chat_id)
 
 
+def edit_or_send_message(
+    user_id: int,
+    text: str,
+    keyboard: Optional[types.InlineKeyboardMarkup],
+    state: Dict[int, int],
+    *,
+    parse_mode: Optional[str] = None,
+    disable_preview: Optional[bool] = None,
+) -> Optional[int]:
+    message_id = state.get(user_id)
+    if message_id:
+        try:
+            bot.edit_message_text(
+                text,
+                user_id,
+                message_id,
+                reply_markup=keyboard,
+                parse_mode=parse_mode,
+                disable_web_page_preview=disable_preview,
+            )
+            return message_id
+        except Exception:
+            logger.debug("edit_or_send_message edit failed chat_id=%s", user_id)
+    try:
+        msg = bot.send_message(
+            user_id,
+            text,
+            reply_markup=keyboard,
+            parse_mode=parse_mode,
+            disable_web_page_preview=disable_preview,
+        )
+        state[user_id] = msg.message_id
+        return msg.message_id
+    except Exception:
+        logger.exception("edit_or_send_message send failed chat_id=%s", user_id)
+        return None
+
+
 def build_main_menu(
     chat_id: int,
     is_admin_user: bool,
@@ -6980,13 +7004,6 @@ def build_main_menu(
     )
 
     buttons: List[Union[str, types.KeyboardButton]] = []
-
-    if WEB_APP_URL:
-        buttons.append(
-            types.KeyboardButton(
-                "🌐 Web Panel", web_app=types.WebAppInfo(url=WEB_APP_URL)
-            )
-        )
 
     if is_feature_enabled("main_search", chat_id):
         buttons.append("🔎 Axtarış sistemi")
@@ -7012,9 +7029,6 @@ def build_main_menu(
 
     if is_feature_enabled("about", chat_id):
         buttons.append("ℹ️ Haqqında")
-
-    if is_feature_enabled("complaints", chat_id):
-        buttons.append("📨 Şikayət və təkliflər")
 
     if is_admin_user:
         buttons.append(TEXTS_AZ["admin_panel_button"])
@@ -7086,21 +7100,33 @@ def restore_reply_keyboard(chat_id: int, text: Optional[str] = None):
     logger.info("[UI] reply_keyboard_restored chat_id=%s", chat_id)
 
 
-def build_search_menu_keyboard(chat_id: int):
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row("🏠 Satılır", "🏢 Kirayə verilir")
-    kb.row("🔍 Açar sözlə axtar", "📞 Nömrə ilə axtar")
-    row = ["⭐ Favorilərim"]
+def build_search_menu_inline_markup(chat_id: int) -> types.InlineKeyboardMarkup:
+    mk = types.InlineKeyboardMarkup()
+    mk.row(
+        types.InlineKeyboardButton("🏠 Satılır", callback_data="search_menu:sale"),
+        types.InlineKeyboardButton("🏡 Kirayə verilir", callback_data="search_menu:rent"),
+    )
+    mk.row(
+        types.InlineKeyboardButton(
+            "🔍 Açar sözlə axtar", callback_data="search_menu:keyword"
+        ),
+        types.InlineKeyboardButton(
+            "📞 Nömrə ilə axtar", callback_data="search_menu:phone"
+        ),
+    )
+    mk.add(types.InlineKeyboardButton("⭐ Favorilərim", callback_data="search_menu:favs"))
     if is_feature_enabled("notifications", chat_id):
-        row.append("🔔 Bildirişlər")
-    kb.row(*row)
-    kb.row("⬅️ Geri")
-    return kb
+        mk.add(
+            types.InlineKeyboardButton(
+                "🔔 Bildirişlər", callback_data="search_menu:notifs"
+            )
+        )
+    return mk
 
 
 def send_search_menu(chat_id: int):
-    kb = build_search_menu_keyboard(chat_id)
-    send_with_reply_keyboard(chat_id, "\u2063", kb)
+    mk = build_search_menu_inline_markup(chat_id)
+    bot.send_message(chat_id, "🔎 Axtarış menyusu:", reply_markup=mk)
 
 
 # =============== ELAN KARTI (WhatsApp ilə) ===============
@@ -8789,256 +8815,6 @@ def handle_request_phone(message):
     return_to_main_menu(chat_id)
 
 
-# =============== 📩 Şikayət və təkliflər ===============
-
-
-def is_complaint_access_allowed(chat_id: int) -> bool:
-    if is_feature_enabled("complaints", chat_id):
-        return True
-    bot.send_message(chat_id, FEATURE_DISABLED_MESSAGE)
-    return False
-
-
-def build_complaint_categories_keyboard():
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    for cat in COMPLAINT_CATEGORIES:
-        kb.row(cat)
-    kb.row(COMPLAINT_BACK)
-    return kb
-
-
-def start_complaint_flow(chat_id: int):
-    now = time.time()
-    last_ts = last_complaint_time.get(chat_id)
-    if last_ts and now - last_ts < COMPLAINT_COOLDOWN_SECONDS:
-        bot.send_message(
-            chat_id, "⏳ Zəhmət olmasa bir neçə dəqiqə sonra yenidən göndərin."
-        )
-        return
-    complaint_flow_state[chat_id] = {"step": "category"}
-    send_with_reply_keyboard(
-        chat_id,
-        "📂 Kateqoriyanı seçin:",
-        build_complaint_categories_keyboard(),
-    )
-
-
-def notify_admin_complaint(message, category: str, user_text: str):
-    chat_id = message.chat.id
-    user = message.from_user
-    full_name = user.full_name if user else ""
-    username = f"@{user.username}" if user and user.username else "-"
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    complaint_id = str(int(time.time() * 1000)) + str(random.randint(1000, 9999))
-    complaint_records[complaint_id] = {
-        "complaint_id": complaint_id,
-        "user_id": chat_id,
-        "category": category,
-        "message": user_text,
-        "timestamp": ts,
-    }
-    text = (
-        "📩 Yeni şikayət / təklif\n\n"
-        "👤 İstifadəçi:\n"
-        f"ID: {chat_id}\n"
-        f"Ad: {full_name or '-'}\n"
-        f"Username: {username}\n\n"
-        "📂 Kateqoriya:\n"
-        f"{category}\n\n"
-        "📝 Mesaj:\n"
-        f"{user_text}\n\n"
-        "⏰ Tarix:\n"
-        f"{ts}\n\n"
-        f"🆔 ID: {complaint_id}"
-    )
-    mk = types.InlineKeyboardMarkup()
-    mk.add(
-        types.InlineKeyboardButton(
-            "✉️ Cavab yaz", callback_data=f"complaint_reply:{complaint_id}:{chat_id}"
-        )
-    )
-    bot.send_message(ADMIN_ID, text, reply_markup=mk)
-
-
-@bot.message_handler(func=lambda m: m.text == "📨 Şikayət və təkliflər")
-def complaint_entry(message):
-    if message.text and message.text.startswith('/'):
-        return
-
-    if not is_complaint_access_allowed(message.chat.id):
-        return
-    if is_admin(message.chat.id):
-        return
-    start_support_chat_for_user(message.chat.id, message.from_user)
-
-
-@bot.callback_query_handler(func=lambda c: c.data == "open_complaint")
-@callback_guard
-def cb_open_complaint(c):
-    if not is_complaint_access_allowed(c.message.chat.id):
-        return
-    try:
-        bot.answer_callback_query(c.id)
-    except Exception:
-        pass
-    if is_admin(c.from_user.id):
-        return
-    start_support_chat_for_user(c.message.chat.id, c.from_user)
-
-
-@bot.message_handler(
-    func=lambda m: complaint_flow_state.get(m.chat.id, {}).get("step") == "category"
-)
-def complaint_category_handler(message):
-    if message.text and message.text.startswith('/'):
-        return
-
-    chat_id = message.chat.id
-    choice = message.text
-    if choice == COMPLAINT_BACK:
-        complaint_flow_state.pop(chat_id, None)
-        set_ui_context(chat_id, UI_CONTEXT_MAIN)
-        send_with_reply_keyboard(
-            chat_id,
-            "✅ Şikayət göndərmə ləğv edildi.",
-            build_main_menu(
-                chat_id,
-                is_admin(chat_id),
-                has_customer_requests_access(chat_id),
-                should_show_bonus_button(chat_id),
-            ),
-        )
-        return
-    if choice not in COMPLAINT_CATEGORIES:
-        bot.send_message(
-            chat_id,
-            "📂 Kateqoriyanı seçin:",
-            reply_markup=build_complaint_categories_keyboard(),
-        )
-        send_menu_visibility_hint(chat_id)
-        return
-    complaint_flow_state[chat_id] = {"step": "message", "category": choice}
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row(COMPLAINT_BACK)
-    send_with_reply_keyboard(chat_id, "✍️ Zəhmət olmasa mesajınızı yazın.", kb)
-
-
-@bot.message_handler(
-    func=lambda m: complaint_flow_state.get(m.chat.id, {}).get("step") == "message",
-    content_types=["text"],
-)
-def complaint_message_handler(message):
-    chat_id = message.chat.id
-    if message.text and message.text.startswith("/"):
-        return
-    text = message.text
-    if text == COMPLAINT_BACK:
-        complaint_flow_state[chat_id] = {"step": "category"}
-        send_with_reply_keyboard(
-            chat_id,
-            "📂 Kateqoriyanı seçin:",
-            build_complaint_categories_keyboard(),
-        )
-        return
-    data = complaint_flow_state.pop(chat_id, {})
-    category = data.get("category", "-")
-    last_complaint_time[chat_id] = time.time()
-    try:
-        notify_admin_complaint(message, category, text)
-    except Exception:
-        pass
-    set_ui_context(chat_id, UI_CONTEXT_MAIN)
-    send_with_reply_keyboard(
-        chat_id,
-        "✅ Mesajınız qəbul edildi.\nTəşəkkür edirik! 🙏",
-        build_main_menu(
-            chat_id,
-            is_admin(chat_id),
-            has_customer_requests_access(chat_id),
-            should_show_bonus_button(chat_id),
-        ),
-    )
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("complaint_reply:"))
-@callback_guard
-def complaint_reply_callback(c):
-    if not is_admin(c.from_user.id):
-        try:
-            bot.answer_callback_query(c.id)
-        except Exception:
-            pass
-        return
-    parts = c.data.split(":")
-    if len(parts) < 3:
-        try:
-            bot.answer_callback_query(c.id, "Məlumat tapılmadı.")
-        except Exception:
-            pass
-        return
-    complaint_id = parts[1]
-    try:
-        target = int(parts[2])
-    except Exception:
-        target = None
-    if not target:
-        try:
-            bot.answer_callback_query(c.id, "Məlumat tapılmadı.")
-        except Exception:
-            pass
-        return
-
-    if complaint_id not in complaint_records:
-        complaint_records[complaint_id] = {
-            "complaint_id": complaint_id,
-            "user_id": target,
-            "category": "",
-            "message": "",
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        }
-
-    admin_reply_state[c.from_user.id] = {
-        "target": target,
-        "complaint_id": complaint_id,
-    }
-    try:
-        bot.answer_callback_query(c.id)
-    except Exception:
-        pass
-    bot.send_message(c.message.chat.id, "✍️ Cavabı yazın:")
-
-
-@bot.message_handler(
-    func=lambda m: admin_reply_state.get(m.chat.id) is not None,
-    content_types=["text"],
-)
-def admin_reply_to_user(message):
-    chat_id = message.chat.id
-    if message.text and message.text.startswith("/"):
-        return
-    if not is_admin(chat_id):
-        admin_reply_state.pop(chat_id, None)
-        return
-    data = admin_reply_state.pop(chat_id, {})
-    target = data.get("target")
-    complaint_id = data.get("complaint_id")
-    if not target:
-        return
-    try:
-        bot.send_message(target, f"📩 Admin cavabı:\n\n{message.text}")
-    except Exception:
-        bot.send_message(chat_id, "⚠️ Cavab göndərilə bilmədi.")
-        return
-
-    if complaint_id:
-        record = complaint_records.get(complaint_id, {})
-        record["reply"] = message.text
-        record["replied_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        complaint_records[complaint_id] = record
-
-    bot.send_message(chat_id, "✅ Cavab istifadəçiyə göndərildi.")
-
-
 # =============== 👤 Hesabım ===============
 
 
@@ -9053,7 +8829,7 @@ def show_account_status(message):
         return
     chat_id = message.chat.id
     text = build_account_status_text(chat_id)
-    bot.send_message(chat_id, text, parse_mode="HTML")
+    edit_or_send_message(chat_id, text, None, ui_message_state, parse_mode="HTML")
 
 
 # =============== 📊 Statistika ===============
@@ -9216,24 +8992,16 @@ def send_user_statistics(chat_id: int, period_key: str, message_id: Optional[int
         admin_flag = is_admin(chat_id)
         text = format_stats_text(base_stats, period_stats, selected, is_admin=admin_flag)
         keyboard = build_user_stats_keyboard(selected)
-
         if message_id:
-            bot.edit_message_text(
-                text,
-                chat_id,
-                message_id,
-                reply_markup=keyboard,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-        else:
-            bot.send_message(
-                chat_id,
-                text,
-                reply_markup=keyboard,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
+            ui_message_state[chat_id] = message_id
+        edit_or_send_message(
+            chat_id,
+            text,
+            keyboard,
+            ui_message_state,
+            parse_mode="HTML",
+            disable_preview=True,
+        )
         logger.info("STATS done chat_id=%s period=%s", chat_id, selected)
     except Exception as exc:
         logger.exception("STATISTICS handler failed", exc_info=exc)
@@ -9303,13 +9071,7 @@ def about(message):
         "Əlaqə\n"
         "Admin: @esedovesed"
     )
-    mk = types.InlineKeyboardMarkup()
-    mk.add(
-        types.InlineKeyboardButton(
-            "📨 Şikayət və təkliflər", callback_data="supportchat:start"
-        )
-    )
-    bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=mk)
+    bot.send_message(message.chat.id, text, parse_mode="Markdown")
 
 
 @bot.message_handler(func=lambda m: m.text == "💳 Ödəniş")
@@ -10356,11 +10118,7 @@ def show_favorites(message):
     if message.text and message.text.startswith('/'):
         return
 
-    if not ensure_allowed(message):
-        return
-    chat_id = message.chat.id
-    reset_search_state(chat_id)
-    send_paginated_results(chat_id, "favorites", params={}, page=1)
+    handle_favorites_menu(message.chat.id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("fav|"))
@@ -10467,6 +10225,31 @@ def search_system_menu(message):
     if not ensure_allowed(message):
         return
     send_search_menu(message.chat.id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("search_menu:"))
+@callback_guard
+def cb_search_menu(c):
+    if not ensure_feature_available_cb(c, "main_search"):
+        return
+    chat_id = c.message.chat.id if c.message else c.from_user.id
+    action = c.data.split(":", 1)[1]
+    if action == "sale":
+        handle_structured_search_menu(chat_id, "sat")
+    elif action == "rent":
+        handle_structured_search_menu(chat_id, "kir")
+    elif action == "keyword":
+        handle_keyword_search_menu(chat_id)
+    elif action == "phone":
+        handle_phone_search_menu(chat_id)
+    elif action == "favs":
+        handle_favorites_menu(chat_id)
+    elif action == "notifs":
+        handle_notifications_menu(chat_id)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
 
 
 @bot.message_handler(func=lambda m: m.text == "🎁 Şansını sına")
@@ -10725,29 +10508,18 @@ def start_structured_search_from_menu(chat_id: int, op_code: str):
     render_date_range_step(chat_id)
 
 
-@bot.message_handler(func=lambda m: m.text in ["🏠 Satılır", "🏢 Kirayə verilir"])
-def structured_search_from_menu(message):
-    if message.text and message.text.startswith('/'):
+def handle_structured_search_menu(chat_id: int, op_code: str):
+    if not check_subscription(chat_id):
         return
-
-    if not ensure_allowed(message):
-        return
-    chat_id = message.chat.id
     if not check_limit(chat_id, "structured", 200):
         bot.send_message(chat_id, "Günlük filtrli axtarış limitiniz bitib.")
         return
-    op_code = "sat" if message.text == "🏠 Satılır" else "kir"
     start_structured_search_from_menu(chat_id, op_code)
 
 
-@bot.message_handler(func=lambda m: m.text == "🔍 Açar sözlə axtar")
-def keyword_search_from_menu(message):
-    if message.text and message.text.startswith('/'):
+def handle_keyword_search_menu(chat_id: int):
+    if not check_subscription(chat_id):
         return
-
-    if not ensure_allowed(message):
-        return
-    chat_id = message.chat.id
     if not check_limit(chat_id, "keyword", 30):
         bot.send_message(chat_id, "Günlük açar sözlə axtarış limitiniz bitib.")
         return
@@ -10760,19 +10532,54 @@ def keyword_search_from_menu(message):
     send_keyword_operation_prompt(chat_id)
 
 
-@bot.message_handler(func=lambda m: m.text == "📞 Nömrə ilə axtar")
-def phone_search_from_menu(message):
-    if message.text and message.text.startswith('/'):
+def handle_phone_search_menu(chat_id: int):
+    if not check_subscription(chat_id):
         return
-
-    if not ensure_allowed(message):
-        return
-    chat_id = message.chat.id
     if not check_limit(chat_id, "phone", 50):
         bot.send_message(chat_id, "Günlük nömrə ilə axtarış limitiniz bitib.")
         return
     msg = bot.send_message(chat_id, "☎️ Axtarmaq istədiyiniz nömrəni yazın:")
     bot.register_next_step_handler(msg, phone_search_handler)
+
+
+def handle_favorites_menu(chat_id: int):
+    if not check_subscription(chat_id):
+        return
+    reset_search_state(chat_id)
+    send_paginated_results(chat_id, "favorites", params={}, page=1)
+
+
+def handle_notifications_menu(chat_id: int):
+    if not ensure_feature_available(chat_id, "notifications"):
+        return
+    if not check_subscription(chat_id):
+        return
+    show_notifications_menu(chat_id)
+
+
+@bot.message_handler(func=lambda m: m.text in ["🏠 Satılır", "🏢 Kirayə verilir"])
+def structured_search_from_menu(message):
+    if message.text and message.text.startswith('/'):
+        return
+
+    op_code = "sat" if message.text == "🏠 Satılır" else "kir"
+    handle_structured_search_menu(message.chat.id, op_code)
+
+
+@bot.message_handler(func=lambda m: m.text == "🔍 Açar sözlə axtar")
+def keyword_search_from_menu(message):
+    if message.text and message.text.startswith('/'):
+        return
+
+    handle_keyword_search_menu(message.chat.id)
+
+
+@bot.message_handler(func=lambda m: m.text == "📞 Nömrə ilə axtar")
+def phone_search_from_menu(message):
+    if message.text and message.text.startswith('/'):
+        return
+
+    handle_phone_search_menu(message.chat.id)
 
 
 @bot.message_handler(func=lambda m: m.text == "📌 Müştəri istəkləri")
@@ -12209,12 +12016,7 @@ def show_saved_notifications(message):
     if message.text and message.text.startswith('/'):
         return
 
-    if not ensure_feature_available(message.chat.id, "notifications"):
-        return
-    if not ensure_allowed(message):
-        return
-    chat_id = message.chat.id
-    show_notifications_menu(chat_id)
+    handle_notifications_menu(message.chat.id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "kw_alert_menu")
@@ -16724,11 +16526,16 @@ def build_admin_panel_keyboard(chat_id: int, page: int = 1):
 
 
 def send_admin_panel(
-    chat_id: int, page: int = 1, text: str = TEXTS_AZ["admin_panel_title"]
+    chat_id: int,
+    page: int = 1,
+    text: str = TEXTS_AZ["admin_panel_title"],
+    message: Optional[types.Message] = None,
 ):
     mk = build_admin_panel_keyboard(chat_id, page)
     set_user_state(chat_id, "ADMIN")
-    bot.send_message(chat_id, text, reply_markup=mk)
+    if message:
+        ui_message_state[chat_id] = message.message_id
+    edit_or_send_message(chat_id, text, mk, ui_message_state)
 
 
 def send_feature_flags_menu(chat_id: int, message: Optional[types.Message] = None):
@@ -16784,6 +16591,8 @@ def open_admin_panel(message):
 def _handle_admin_panel_action(
     chat_id: int, action_text: str, message: Optional[types.Message] = None
 ):
+    if message:
+        ui_message_state[chat_id] = message.message_id
     if action_text in {
         TEXTS_AZ["admin_panel_customer_requests"],
         TEXTS_AZ["admin_panel_customer_requests_access"],
@@ -16792,50 +16601,65 @@ def _handle_admin_panel_action(
         return
 
     if action_text == TEXTS_AZ["admin_panel_pending_listings"]:
-        show_pending_listings(chat_id)
+        show_pending_listings(chat_id, message=message)
     elif action_text == TEXTS_AZ["admin_panel_stats"]:
-        show_admin_stats_menu(chat_id)
+        show_admin_stats_menu(chat_id, message=message)
     elif action_text == TEXTS_AZ["admin_panel_bonus_stats"]:
-        show_bonus_stats(chat_id)
+        show_bonus_stats(chat_id, message=message)
     elif action_text == TEXTS_AZ["admin_panel_activity_stats"]:
-        show_admin_activity_stats_menu(chat_id)
+        show_admin_activity_stats_menu(chat_id, message=message)
     elif action_text == TEXTS_AZ["admin_panel_customer_requests"]:
-        show_customer_requests_overview(chat_id, "day")
+        show_customer_requests_overview(chat_id, "day", message=message)
     elif action_text == "📊 QR Statistikası":
-        send_qr_stats_menu(chat_id)
+        send_qr_stats_menu(chat_id, message=message)
     elif action_text == FINANCIAL_REPORTS_BUTTON:
-        send_financial_reports_menu(chat_id)
+        send_financial_reports_menu(chat_id, message=message)
     elif action_text == ADMIN_PAYMENTS_BUTTON:
-        send_admin_payments_menu(chat_id)
+        send_admin_payments_menu(chat_id, message=message)
     elif action_text == TEXTS_AZ["admin_panel_agents_notify"]:
-        msg = bot.send_message(chat_id, "✍️ Vasitəçilərə göndəriləcək mətni yaz:")
-        bot.register_next_step_handler(msg, admin_agents_broadcast)
+        edit_or_send_message(
+            chat_id,
+            "✍️ Vasitəçilərə göndəriləcək mətni yaz:",
+            build_admin_panel_keyboard(chat_id, page=admin_panel_page_state.get(chat_id, 1)),
+            ui_message_state,
+        )
+        if message:
+            bot.register_next_step_handler(message, admin_agents_broadcast)
     elif action_text == TEXTS_AZ["admin_panel_user_search"]:
-        msg = bot.send_message(chat_id, "🔍 İstifadəçi chat_id daxil et:")
-        bot.register_next_step_handler(msg, admin_search_by_id_step)
+        edit_or_send_message(
+            chat_id,
+            "🔍 İstifadəçi chat_id daxil et:",
+            build_admin_panel_keyboard(chat_id, page=admin_panel_page_state.get(chat_id, 1)),
+            ui_message_state,
+        )
+        if message:
+            bot.register_next_step_handler(message, admin_search_by_id_step)
     elif action_text == TEXTS_AZ["admin_panel_promos"]:
-        show_admin_promo_menu(chat_id)
+        show_admin_promo_menu(chat_id, message=message)
     elif action_text == TEXTS_AZ["admin_panel_users"]:
-        show_users_menu(chat_id)
+        show_users_menu(chat_id, message=message)
     elif action_text == TEXTS_AZ["admin_panel_feature_flags"]:
-        send_feature_flags_menu(chat_id)
+        send_feature_flags_menu(chat_id, message=message)
     elif action_text == TEXTS_AZ["admin_panel_send_update"]:
-        broadcast_bot_update(chat_id)
+        broadcast_bot_update(chat_id, message=message)
     elif action_text == TEXTS_AZ["admin_panel_topviews"]:
         reset_search_state(chat_id)
         send_paginated_results(chat_id, "topviews", params={"days": 7}, page=1)
     elif action_text == TEXTS_AZ["admin_panel_db_update"]:
-        bot.send_message(
-            chat_id, "ℹ️ /auto_update_db <dropbox_link> əmri ilə yeniləmə başladın."
+        edit_or_send_message(
+            chat_id,
+            "ℹ️ /auto_update_db <dropbox_link> əmri ilə yeniləmə başladın.",
+            build_admin_panel_keyboard(chat_id, page=admin_panel_page_state.get(chat_id, 1)),
+            ui_message_state,
         )
     elif action_text == TEXTS_AZ["admin_panel_direct_message"]:
-        start_direct_user_message_flow(chat_id)
+        start_direct_user_message_flow(chat_id, message=message)
     elif action_text == TEXTS_AZ["admin_panel_support_chats"]:
         show_support_sessions_list(chat_id, message=message)
     elif action_text == TEXTS_AZ["admin_panel_customer_requests_access"]:
-        show_customer_requests_access_admin(chat_id)
+        show_customer_requests_access_admin(chat_id, message=message)
     elif action_text == TEXTS_AZ["admin_panel_archived_requests"]:
-        show_archived_requests(chat_id, page=1)
+        show_archived_requests(chat_id, page=1, message=message)
 
 
 def trigger_auto_update_db(admin_id: int, url: str) -> None:
@@ -16910,11 +16734,11 @@ def cb_admin_panel(c):
         return
     chat_id = c.message.chat.id
     if c.data == "admin_qr_stats":
-        send_qr_stats_menu(chat_id)
+        send_qr_stats_menu(chat_id, message=c.message)
         return
 
     if c.data == "adm_back:main":
-        return_to_main_menu(chat_id)
+        send_admin_panel(chat_id, page=admin_panel_page_state.get(chat_id, 1), message=c.message)
         return
 
     if c.data.startswith("adm_act:"):
@@ -17050,20 +16874,22 @@ def cb_admin_stats_menu(c):
     chat_id = c.message.chat.id
     action = c.data.split(":", 1)[1]
     if action == "back":
-        send_admin_panel(chat_id, page=admin_panel_page_state.get(chat_id, 1))
+        send_admin_panel(
+            chat_id, page=admin_panel_page_state.get(chat_id, 1), message=c.message
+        )
         return
     if action == "overall":
         admin_stats_period[chat_id] = "day"
-        show_admin_stats(chat_id)
+        show_admin_stats(chat_id, message_id=c.message.message_id)
         return
     if action == "activity":
-        show_admin_activity_stats_menu(chat_id)
+        show_admin_activity_stats_menu(chat_id, message=c.message)
         return
     if action == "bonus":
-        show_bonus_stats(chat_id)
+        show_bonus_stats(chat_id, message=c.message)
         return
     if action == "qr":
-        send_qr_stats_menu(chat_id)
+        send_qr_stats_menu(chat_id, message=c.message)
         return
 
 
@@ -17083,7 +16909,9 @@ def cb_admin_activity_stats(c):
         return_to_main_menu(chat_id)
         return
     if c.data == "adm_activity_back":
-        send_admin_panel(chat_id, page=admin_panel_page_state.get(chat_id, 1))
+        send_admin_panel(
+            chat_id, page=admin_panel_page_state.get(chat_id, 1), message=c.message
+        )
         return
     if c.data == "adm_activity_stats":
         show_admin_activity_stats_menu(chat_id, message=c.message)
@@ -17334,17 +17162,22 @@ def build_qr_stats_menu() -> types.InlineKeyboardMarkup:
             "🏆 Ən çox lead gətirən ərazi", callback_data="qr_stats:top"
         )
     )
+    mk.add(types.InlineKeyboardButton(ADMIN_PANEL_BACK_MAIN, callback_data="adm_back:main"))
     return mk
 
 
-def send_qr_stats_menu(chat_id: int):
+def send_qr_stats_menu(chat_id: int, message: Optional[types.Message] = None):
     if not is_admin(chat_id):
         return
     mk = build_qr_stats_menu()
-    bot.send_message(chat_id, "📊 QR Statistikası", reply_markup=mk)
+    if message:
+        ui_message_state[chat_id] = message.message_id
+    edit_or_send_message(chat_id, "📊 QR Statistikası", mk, ui_message_state)
 
 
-def send_qr_stats(chat_id: int, range_key: str):
+def send_qr_stats(
+    chat_id: int, range_key: str, message: Optional[types.Message] = None
+):
     if not is_admin(chat_id):
         return
     rows, total, area_counts = fetch_qr_stats(range_key)
@@ -17384,10 +17217,18 @@ def send_qr_stats(chat_id: int, range_key: str):
             lines.append("— istifadəçi yoxdur")
             lines.append("")
     lines.append(f"👥 Cəmi QR ilə qoşulanlar: {total} nəfər")
-    bot.send_message(chat_id, "\n".join(lines))
+    mk = types.InlineKeyboardMarkup()
+    mk.add(
+        types.InlineKeyboardButton(
+            ADMIN_PANEL_BACK_MAIN, callback_data="adm_back:main"
+        )
+    )
+    if message:
+        ui_message_state[chat_id] = message.message_id
+    edit_or_send_message(chat_id, "\n".join(lines), mk, ui_message_state)
 
 
-def send_qr_top_areas(chat_id: int):
+def send_qr_top_areas(chat_id: int, message: Optional[types.Message] = None):
     if not is_admin(chat_id):
         return
     rows = fetch_qr_top_areas()
@@ -17401,7 +17242,15 @@ def send_qr_top_areas(chat_id: int):
             area_code = row["join_source"] if "join_source" in row.keys() else row[0]
             cnt = int(row["cnt"] if "cnt" in row.keys() else row[1])
             lines.append(f"{medal} {format_qr_area_label(area_code)} — {cnt} istifadəçi")
-    bot.send_message(chat_id, "\n".join(lines))
+    mk = types.InlineKeyboardMarkup()
+    mk.add(
+        types.InlineKeyboardButton(
+            ADMIN_PANEL_BACK_MAIN, callback_data="adm_back:main"
+        )
+    )
+    if message:
+        ui_message_state[chat_id] = message.message_id
+    edit_or_send_message(chat_id, "\n".join(lines), mk, ui_message_state)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("qr_stats:"))
@@ -17412,9 +17261,9 @@ def cb_qr_stats(c):
     chat_id = c.message.chat.id
     action = c.data.split(":", 1)[1]
     if action == "top":
-        send_qr_top_areas(chat_id)
+        send_qr_top_areas(chat_id, message=c.message)
     else:
-        send_qr_stats(chat_id, action)
+        send_qr_stats(chat_id, action, message=c.message)
 
 
 def admin_customer_requests_access_step(message):
@@ -17818,7 +17667,9 @@ def show_admin_requests_by_rayon(
     bot.send_message(chat_id, footer, reply_markup=mk)
 
 
-def show_customer_requests_overview(chat_id: int, period: str = "day"):
+def show_customer_requests_overview(
+    chat_id: int, period: str = "day", message: Optional[types.Message] = None
+):
     stats = fetch_customer_request_stats(period)
     text_lines = [
         f"📌 Müştəri istəkləri — {('Bu gün' if period=='day' else 'Bu həftə' if period=='week' else 'Bu ay')}",
@@ -17853,8 +17704,11 @@ def show_customer_requests_overview(chat_id: int, period: str = "day"):
                 )
             )
         mk.row(*row)
+    mk.add(types.InlineKeyboardButton(ADMIN_PANEL_BACK_MAIN, callback_data="adm_back:main"))
 
-    bot.send_message(chat_id, "\n".join(text_lines), reply_markup=mk)
+    if message:
+        ui_message_state[chat_id] = message.message_id
+    edit_or_send_message(chat_id, "\n".join(text_lines), mk, ui_message_state)
 
 
 def format_request_type(req_type: str) -> str:
@@ -18213,10 +18067,14 @@ def fetch_archived_requests(page: int = 1):
     return rows, total_pages
 
 
-def show_archived_requests(chat_id: int, page: int = 1):
+def show_archived_requests(
+    chat_id: int, page: int = 1, message: Optional[types.Message] = None
+):
     rows, total_pages = fetch_archived_requests(page)
     if not rows:
-        bot.send_message(chat_id, "🗄 Arxivlənmiş sorğu yoxdur.")
+        if message:
+            ui_message_state[chat_id] = message.message_id
+        edit_or_send_message(chat_id, "🗄 Arxivlənmiş sorğu yoxdur.", None, ui_message_state)
         return
     for req in rows:
         mk = types.InlineKeyboardMarkup()
@@ -18260,7 +18118,9 @@ def show_archived_requests(chat_id: int, page: int = 1):
             callback_data="adm_req_period:day",
         )
     )
-    bot.send_message(chat_id, "🗄 Arxivlənmiş sorğular:", reply_markup=mk)
+    if message:
+        ui_message_state[chat_id] = message.message_id
+    edit_or_send_message(chat_id, "🗄 Arxivlənmiş sorğular:", mk, ui_message_state)
 
 
 def fetch_user_archived_requests(user_id: int, page: int = 1):
@@ -18697,7 +18557,9 @@ def show_customer_request_alerts_inbox(
         pass
 
 
-def send_financial_reports_menu(chat_id: int):
+def send_financial_reports_menu(
+    chat_id: int, message: Optional[types.Message] = None
+):
     if not is_admin(chat_id):
         return
 
@@ -18718,10 +18580,12 @@ def send_financial_reports_menu(chat_id: int):
     mk.add(
         types.InlineKeyboardButton(FINANCIAL_REPORTS_BACK, callback_data="finrep:back")
     )
-    bot.send_message(chat_id, "💰 Maliyyə hesabatları:", reply_markup=mk)
+    if message:
+        ui_message_state[chat_id] = message.message_id
+    edit_or_send_message(chat_id, "💰 Maliyyə hesabatları:", mk, ui_message_state)
 
 
-def send_admin_payments_menu(chat_id: int):
+def send_admin_payments_menu(chat_id: int, message: Optional[types.Message] = None):
     if not is_admin(chat_id):
         return
 
@@ -18736,11 +18600,15 @@ def send_admin_payments_menu(chat_id: int):
             callback_data="admpayments:manual:1",
         ),
     )
-    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="adm_back:main"))
-    bot.send_message(chat_id, "💳 Ödənişlər", reply_markup=mk)
+    mk.add(types.InlineKeyboardButton(ADMIN_PANEL_BACK_MAIN, callback_data="adm_back:main"))
+    if message:
+        ui_message_state[chat_id] = message.message_id
+    edit_or_send_message(chat_id, "💳 Ödənişlər", mk, ui_message_state)
 
 
-def show_card_payments(chat_id: int, page: int = 1):
+def show_card_payments(
+    chat_id: int, page: int = 1, message: Optional[types.Message] = None
+):
     if not is_admin(chat_id):
         return
     PAGE_SIZE = 10
@@ -18759,7 +18627,9 @@ def show_card_payments(chat_id: int, page: int = 1):
                 "⬅️ Ödənişlər", callback_data="admpayments:menu"
             )
         )
-        bot.send_message(chat_id, "Kart ödənişi qeydi yoxdur.", reply_markup=mk)
+        if message:
+            ui_message_state[chat_id] = message.message_id
+        edit_or_send_message(chat_id, "Kart ödənişi qeydi yoxdur.", mk, ui_message_state)
         conn.close()
         return
 
@@ -18832,10 +18702,14 @@ def show_card_payments(chat_id: int, page: int = 1):
     if nav:
         mk.row(*nav)
     mk.add(types.InlineKeyboardButton("⬅️ Ödənişlər", callback_data="admpayments:menu"))
-    bot.send_message(chat_id, text, reply_markup=mk)
+    if message:
+        ui_message_state[chat_id] = message.message_id
+    edit_or_send_message(chat_id, text, mk, ui_message_state)
 
 
-def show_manual_payment_requests(chat_id: int, page: int = 1):
+def show_manual_payment_requests(
+    chat_id: int, page: int = 1, message: Optional[types.Message] = None
+):
     if not is_admin(chat_id):
         return
     PAGE_SIZE = 10
@@ -18854,7 +18728,11 @@ def show_manual_payment_requests(chat_id: int, page: int = 1):
                 "⬅️ Ödənişlər", callback_data="admpayments:menu"
             )
         )
-        bot.send_message(chat_id, "Manual ödəniş sorğusu yoxdur.", reply_markup=mk)
+        if message:
+            ui_message_state[chat_id] = message.message_id
+        edit_or_send_message(
+            chat_id, "Manual ödəniş sorğusu yoxdur.", mk, ui_message_state
+        )
         conn.close()
         return
 
@@ -18930,7 +18808,9 @@ def show_manual_payment_requests(chat_id: int, page: int = 1):
         mk.row(*nav)
     mk.add(types.InlineKeyboardButton("⬅️ Ödənişlər", callback_data="admpayments:menu"))
 
-    bot.send_message(chat_id, text, reply_markup=mk)
+    if message:
+        ui_message_state[chat_id] = message.message_id
+    edit_or_send_message(chat_id, text, mk, ui_message_state)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("finrep:"))
@@ -18941,14 +18821,14 @@ def handle_financial_reports_menu(c):
     action = c.data.split(":", 1)[1]
     chat_id = c.message.chat.id
     if action == "history":
-        show_payment_history_list(chat_id, page=1)
+        show_payment_history_list(chat_id, page=1, message=c.message)
     elif action == "referral":
-        show_referral_stats(chat_id)
+        show_referral_stats(chat_id, message=c.message)
     elif action == "monthly":
-        show_revenue_report(chat_id)
+        show_revenue_report(chat_id, message=c.message)
     elif action == "back":
         page = admin_panel_page_state.get(chat_id, 1)
-        send_admin_panel(chat_id, page=page)
+        send_admin_panel(chat_id, page=page, message=c.message)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("admpayments:"))
@@ -18965,11 +18845,11 @@ def handle_admin_payments_menu(c):
         except Exception:
             page = 1
     if section == "card":
-        show_card_payments(c.message.chat.id, page=page)
+        show_card_payments(c.message.chat.id, page=page, message=c.message)
     elif section == "manual":
-        show_manual_payment_requests(c.message.chat.id, page=page)
+        show_manual_payment_requests(c.message.chat.id, page=page, message=c.message)
     else:
-        send_admin_payments_menu(c.message.chat.id)
+        send_admin_payments_menu(c.message.chat.id, message=c.message)
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -18986,7 +18866,7 @@ def cb_admin_request_period(c):
     except Exception:
         pass
     period = c.data.split(":", 1)[1]
-    show_customer_requests_overview(c.message.chat.id, period)
+    show_customer_requests_overview(c.message.chat.id, period, message=c.message)
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "adm_req_types")
@@ -19855,14 +19735,25 @@ def cb_demo_users_actions(c):
             pass
 
 
-def start_direct_user_message_flow(chat_id: int):
+def start_direct_user_message_flow(
+    chat_id: int, message: Optional[types.Message] = None
+):
     if not is_admin(chat_id):
         return
 
     admin_direct_message_state[chat_id] = {"step": "awaiting_id"}
-    msg = bot.send_message(
-        chat_id, "📨 Mesaj göndərmək üçün istifadəçi ID-sini daxil et:"
-    )
+    prompt = "📨 Mesaj göndərmək üçün istifadəçi ID-sini daxil et:"
+    if message:
+        ui_message_state[chat_id] = message.message_id
+        edit_or_send_message(
+            chat_id,
+            prompt,
+            build_admin_panel_keyboard(chat_id, page=admin_panel_page_state.get(chat_id, 1)),
+            ui_message_state,
+        )
+        bot.register_next_step_handler(message, admin_direct_message_get_user)
+        return
+    msg = bot.send_message(chat_id, prompt)
     bot.register_next_step_handler(msg, admin_direct_message_get_user)
 
 
@@ -20007,7 +19898,7 @@ def cb_admin(c):
         show_payment_history_list(c.message.chat.id, page=1)
 
     elif cmd == "promos":
-        show_admin_promo_menu(c.message.chat.id)
+        show_admin_promo_menu(c.message.chat.id, message=c.message)
 
     try:
         bot.answer_callback_query(c.id)
@@ -20015,7 +19906,7 @@ def cb_admin(c):
         pass
 
 
-def show_admin_promo_menu(chat_id: int):
+def show_admin_promo_menu(chat_id: int, message: Optional[types.Message] = None):
     if not is_admin(chat_id):
         return
 
@@ -20046,10 +19937,17 @@ def show_admin_promo_menu(chat_id: int):
             TEXTS_AZ["admin_promo_stats"], callback_data="prm|stats|1"
         )
     )
-    bot.send_message(chat_id, TEXTS_AZ["admin_promo_menu_title"], reply_markup=mk)
+    mk.add(types.InlineKeyboardButton(ADMIN_PANEL_BACK_MAIN, callback_data="adm_back:main"))
+    if message:
+        ui_message_state[chat_id] = message.message_id
+    edit_or_send_message(
+        chat_id, TEXTS_AZ["admin_promo_menu_title"], mk, ui_message_state
+    )
 
 
-def show_admin_promo_list(chat_id: int, page: int = 1):
+def show_admin_promo_list(
+    chat_id: int, page: int = 1, message: Optional[types.Message] = None
+):
     if not is_admin(chat_id):
         return
 
@@ -20082,7 +19980,9 @@ def show_admin_promo_list(chat_id: int, page: int = 1):
                 TEXTS_AZ["admin_promo_back"], callback_data="adm|promos"
             )
         )
-        bot.send_message(chat_id, TEXTS_AZ["admin_promo_empty"], reply_markup=mk)
+        if message:
+            ui_message_state[chat_id] = message.message_id
+        edit_or_send_message(chat_id, TEXTS_AZ["admin_promo_empty"], mk, ui_message_state)
         return
 
     lines = [TEXTS_AZ["admin_promo_list_title"]]
@@ -20142,10 +20042,15 @@ def show_admin_promo_list(chat_id: int, page: int = 1):
             TEXTS_AZ["admin_promo_back"], callback_data="adm|promos"
         )
     )
-    bot.send_message(chat_id, txt, reply_markup=mk)
+    mk.add(types.InlineKeyboardButton(ADMIN_PANEL_BACK_MAIN, callback_data="adm_back:main"))
+    if message:
+        ui_message_state[chat_id] = message.message_id
+    edit_or_send_message(chat_id, txt, mk, ui_message_state)
 
 
-def show_admin_promo_stats(chat_id: int, page: int = 1):
+def show_admin_promo_stats(
+    chat_id: int, page: int = 1, message: Optional[types.Message] = None
+):
     if not is_admin(chat_id):
         return
 
@@ -20251,7 +20156,9 @@ def show_admin_promo_stats(chat_id: int, page: int = 1):
                 TEXTS_AZ["admin_promo_back"], callback_data="adm|promos"
             )
         )
-        bot.send_message(chat_id, TEXTS_AZ["admin_promo_empty"], reply_markup=mk)
+        if message:
+            ui_message_state[chat_id] = message.message_id
+        edit_or_send_message(chat_id, TEXTS_AZ["admin_promo_empty"], mk, ui_message_state)
         return
 
     lines = []
@@ -20300,8 +20207,11 @@ def show_admin_promo_stats(chat_id: int, page: int = 1):
             TEXTS_AZ["admin_promo_back"], callback_data="adm|promos"
         )
     )
+    mk.add(types.InlineKeyboardButton(ADMIN_PANEL_BACK_MAIN, callback_data="adm_back:main"))
 
-    bot.send_message(chat_id, txt, reply_markup=mk)
+    if message:
+        ui_message_state[chat_id] = message.message_id
+    edit_or_send_message(chat_id, txt, mk, ui_message_state)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("prm|"))
@@ -20322,13 +20232,14 @@ def cb_admin_promo(c):
         except Exception:
             days = 0
         code = generate_promo_code(days) if days > 0 else None
+        mk = types.InlineKeyboardMarkup()
+        mk.add(types.InlineKeyboardButton(TEXTS_AZ["admin_promo_back"], callback_data="adm|promos"))
         if code:
-            bot.send_message(
-                c.message.chat.id,
-                TEXTS_AZ["admin_promo_created"].format(days=days, code=code),
-            )
+            text = TEXTS_AZ["admin_promo_created"].format(days=days, code=code)
         else:
-            bot.send_message(c.message.chat.id, TEXTS_AZ["admin_promo_create_failed"])
+            text = TEXTS_AZ["admin_promo_create_failed"]
+        ui_message_state[c.message.chat.id] = c.message.message_id
+        edit_or_send_message(c.message.chat.id, text, mk, ui_message_state)
     elif action == "list":
         page = 1
         if len(parts) > 2:
@@ -20336,7 +20247,7 @@ def cb_admin_promo(c):
                 page = int(parts[2])
             except Exception:
                 page = 1
-        show_admin_promo_list(c.message.chat.id, page=page)
+        show_admin_promo_list(c.message.chat.id, page=page, message=c.message)
     elif action == "stats":
         page = 1
         if len(parts) > 2:
@@ -20344,7 +20255,7 @@ def cb_admin_promo(c):
                 page = int(parts[2])
             except Exception:
                 page = 1
-        show_admin_promo_stats(c.message.chat.id, page=page)
+        show_admin_promo_stats(c.message.chat.id, page=page, message=c.message)
     elif action in {"act", "deact"} and len(parts) > 2:
         code = parts[2]
         page = 1
@@ -20354,7 +20265,7 @@ def cb_admin_promo(c):
             except Exception:
                 page = 1
         set_promo_status(code, action == "act")
-        show_admin_promo_list(c.message.chat.id, page=page)
+        show_admin_promo_list(c.message.chat.id, page=page, message=c.message)
 
     try:
         bot.answer_callback_query(c.id)
@@ -20493,7 +20404,9 @@ def admin_show_user_panel(
     bot.send_message(admin_chat_id, info_txt, reply_markup=mk, parse_mode="HTML")
 
 
-def show_payment_history_list(chat_id: int, page: int = 1):
+def show_payment_history_list(
+    chat_id: int, page: int = 1, message: Optional[types.Message] = None
+):
     if not is_admin(chat_id):
         return
 
@@ -20505,7 +20418,11 @@ def show_payment_history_list(chat_id: int, page: int = 1):
     total_users = cur.fetchone()[0] or 0
     if total_users == 0:
         conn.close()
-        bot.send_message(chat_id, TEXTS_AZ["admin_payment_history_none"])
+        if message:
+            ui_message_state[chat_id] = message.message_id
+        edit_or_send_message(
+            chat_id, TEXTS_AZ["admin_payment_history_none"], None, ui_message_state
+        )
         return
 
     total_pages = max(1, math.ceil(total_users / PAGE_SIZE))
@@ -20568,12 +20485,19 @@ def show_payment_history_list(chat_id: int, page: int = 1):
         )
     if nav_buttons:
         mk.row(*nav_buttons)
+    mk.add(types.InlineKeyboardButton(FINANCIAL_REPORTS_BACK, callback_data="finrep:back"))
 
-    bot.send_message(chat_id, txt, reply_markup=mk)
+    if message:
+        ui_message_state[chat_id] = message.message_id
+    edit_or_send_message(chat_id, txt, mk, ui_message_state)
 
 
 def show_user_payment_details(
-    admin_chat_id: int, target_id: int, page: int = 1, list_page: int = 1
+    admin_chat_id: int,
+    target_id: int,
+    page: int = 1,
+    list_page: int = 1,
+    message: Optional[types.Message] = None,
 ):
     if not is_admin(admin_chat_id):
         return
@@ -20597,8 +20521,13 @@ def show_user_payment_details(
                 callback_data=f"payhist|{list_page}",
             )
         )
-        bot.send_message(
-            admin_chat_id, "❌ Bu istifadəçinin ödənişləri yoxdur.", reply_markup=mk
+        if message:
+            ui_message_state[admin_chat_id] = message.message_id
+        edit_or_send_message(
+            admin_chat_id,
+            "❌ Bu istifadəçinin ödənişləri yoxdur.",
+            mk,
+            ui_message_state,
         )
         return
 
@@ -20688,11 +20617,15 @@ def show_user_payment_details(
             callback_data=f"payhist|{list_page}",
         )
     )
+    mk.add(types.InlineKeyboardButton(FINANCIAL_REPORTS_BACK, callback_data="finrep:back"))
 
-    bot.send_message(
+    if message:
+        ui_message_state[admin_chat_id] = message.message_id
+    edit_or_send_message(
         admin_chat_id,
         header + "\n".join(lines),
-        reply_markup=mk,
+        mk,
+        ui_message_state,
     )
 
 
@@ -20708,7 +20641,7 @@ def cb_pay_history_list(c):
             page = int(parts[1])
         except Exception:
             page = 1
-    show_payment_history_list(c.message.chat.id, page=page)
+    show_payment_history_list(c.message.chat.id, page=page, message=c.message)
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -20737,7 +20670,11 @@ def cb_pay_user_detail(c):
         list_page = 1
 
     show_user_payment_details(
-        c.message.chat.id, target_id, page=page, list_page=list_page
+        c.message.chat.id,
+        target_id,
+        page=page,
+        list_page=list_page,
+        message=c.message,
     )
     try:
         bot.answer_callback_query(c.id)
@@ -21034,7 +20971,7 @@ def get_admin_state(chat_id: int) -> Optional[str]:
     return admin_state.get(chat_id)
 
 
-def show_users_menu(chat_id):
+def show_users_menu(chat_id, message: Optional[types.Message] = None):
     set_admin_state(chat_id, "admin_users_menu")
     set_user_state(chat_id, "ADMIN_USERS")
     mk = types.InlineKeyboardMarkup()
@@ -21059,10 +20996,11 @@ def show_users_menu(chat_id):
             TEXTS_AZ["admin_users_menu_pending"], callback_data="userlist|unverified"
         )
     )
-    bot.send_message(
-        chat_id,
-        TEXTS_AZ["admin_users_menu_prompt"],
-        reply_markup=mk,
+    mk.add(types.InlineKeyboardButton(ADMIN_PANEL_BACK_MAIN, callback_data="adm_back:main"))
+    if message:
+        ui_message_state[chat_id] = message.message_id
+    edit_or_send_message(
+        chat_id, TEXTS_AZ["admin_users_menu_prompt"], mk, ui_message_state
     )
 
 
@@ -22522,7 +22460,7 @@ def activate_user_for_days(user_id: int, days: int):
         pass
 
 
-def show_pending_listings(chat_id):
+def show_pending_listings(chat_id, message: Optional[types.Message] = None):
     return
     conn = get_local_conn()
     cur = conn.cursor()
@@ -22880,7 +22818,9 @@ def cb_user_block_pending(c):
 # =============== BOT YENİLƏMƏ BİLDİRİŞİ ===============
 
 
-def broadcast_bot_update(admin_chat_id):
+def broadcast_bot_update(
+    admin_chat_id: int, message: Optional[types.Message] = None
+):
     """Admin paneldən 'Yeniləmə göndər' basanda hamıya refresh düyməsi göndər."""
     if not is_admin(admin_chat_id):
         return
@@ -22895,7 +22835,11 @@ def broadcast_bot_update(admin_chat_id):
     conn.close()
 
     if not rows:
-        bot.send_message(admin_chat_id, "❌ Aktiv istifadəçi tapılmadı.")
+        if message:
+            ui_message_state[admin_chat_id] = message.message_id
+        edit_or_send_message(
+            admin_chat_id, "❌ Aktiv istifadəçi tapılmadı.", None, ui_message_state
+        )
         return
 
     message_text = (
@@ -22923,9 +22867,13 @@ def broadcast_bot_update(admin_chat_id):
             mark_user_delivery_failure(uid, str(exc))
             continue
 
-    bot.send_message(
+    if message:
+        ui_message_state[admin_chat_id] = message.message_id
+    edit_or_send_message(
         admin_chat_id,
         f"✅ Yeniləmə bildirişi {sent} istifadəçiyə göndərildi.",
+        None,
+        ui_message_state,
     )
 
 
@@ -22940,8 +22888,6 @@ def handle_bot_refresh(message):
     agent_request_lookup_state.pop(chat_id, None)
     today_flow_state.pop(chat_id, None)
     today_results_cache.pop(chat_id, None)
-    complaint_flow_state.pop(chat_id, None)
-    admin_reply_state.pop(chat_id, None)
     admin_stats_period.pop(chat_id, None)
     admin_direct_message_state.pop(chat_id, None)
     admin_user_message_state.pop(chat_id, None)
@@ -22952,6 +22898,7 @@ def handle_bot_refresh(message):
     admin_user_page_state.pop(chat_id, None)
     admin_navigation_state.pop(chat_id, None)
     admin_state.pop(chat_id, None)
+    ui_message_state.pop(chat_id, None)
     ui_state.pop(chat_id, None)
     session_interactions.pop(chat_id, None)
     search_reminder_shown.discard(chat_id)
@@ -23839,6 +23786,7 @@ def stats_period_keyboard(selected: str) -> types.InlineKeyboardMarkup:
         ),
     ]
     mk.row(*buttons)
+    mk.add(types.InlineKeyboardButton(ADMIN_PANEL_BACK_MAIN, callback_data="adm_back:main"))
     return mk
 
 
@@ -24251,7 +24199,7 @@ def handle_bonus_stats_period_callback(c):
         show_bonus_stats(chat_id, period=period, message_id=c.message.message_id)
 
 
-def show_referral_stats(chat_id: int):
+def show_referral_stats(chat_id: int, message: Optional[types.Message] = None):
     if not is_admin(chat_id):
         return
 
@@ -24300,7 +24248,15 @@ def show_referral_stats(chat_id: int):
     else:
         lines.append("Hələ referral qeydiyyatı yoxdur.")
 
-    bot.send_message(chat_id, "\n".join(lines))
+    mk = types.InlineKeyboardMarkup()
+    mk.add(
+        types.InlineKeyboardButton(
+            ADMIN_PANEL_BACK_MAIN, callback_data="adm_back:main"
+        )
+    )
+    if message:
+        ui_message_state[chat_id] = message.message_id
+    edit_or_send_message(chat_id, "\n".join(lines), mk, ui_message_state)
 
 
 
@@ -24325,7 +24281,12 @@ def bonus_stats_period_keyboard(selected: str) -> types.InlineKeyboardMarkup:
     return mk
 
 
-def show_bonus_stats(chat_id: int, period: Optional[str] = None, message_id: Optional[int] = None):
+def show_bonus_stats(
+    chat_id: int,
+    period: Optional[str] = None,
+    message_id: Optional[int] = None,
+    message: Optional[types.Message] = None,
+):
     if not is_admin(chat_id):
         return
 
@@ -24366,23 +24327,21 @@ def show_bonus_stats(chat_id: int, period: Optional[str] = None, message_id: Opt
         lines.append("• Heç bir istifadə yoxdur.")
 
     mk = bonus_stats_period_keyboard(period)
+    if message:
+        message_id = message.message_id
     if message_id:
-        try:
-            bot.edit_message_text(
-                "\n".join(lines),
-                chat_id,
-                message_id,
-                reply_markup=mk,
-                parse_mode="HTML",
-            )
-        except Exception:
-            bot.send_message(chat_id, "\n".join(lines), reply_markup=mk, parse_mode="HTML")
-    else:
-        bot.send_message(chat_id, "\n".join(lines), reply_markup=mk, parse_mode="HTML")
+        ui_message_state[chat_id] = message_id
+    edit_or_send_message(
+        chat_id,
+        "\n".join(lines),
+        mk,
+        ui_message_state,
+        parse_mode="HTML",
+    )
 
 
 
-def show_revenue_report(chat_id: int):
+def show_revenue_report(chat_id: int, message: Optional[types.Message] = None):
     if not is_admin(chat_id):
         return
 
@@ -24448,7 +24407,15 @@ def show_revenue_report(chat_id: int):
         "📈 Son 3 ay:\n" + "\n".join(history_lines),
     ]
 
-    bot.send_message(chat_id, "\n\n".join(report_lines))
+    mk = types.InlineKeyboardMarkup()
+    mk.add(
+        types.InlineKeyboardButton(
+            ADMIN_PANEL_BACK_MAIN, callback_data="adm_back:main"
+        )
+    )
+    if message:
+        ui_message_state[chat_id] = message.message_id
+    edit_or_send_message(chat_id, "\n\n".join(report_lines), mk, ui_message_state)
 
 
 def admin_agents_broadcast(message):
@@ -24742,8 +24709,6 @@ def support_admin_message_router(message):
 def has_active_text_flow(chat_id: int) -> bool:
     flow_states = [
         user_state,
-        complaint_flow_state,
-        admin_reply_state,
         admin_direct_message_state,
         admin_user_message_state,
         admin_user_extend_state,
