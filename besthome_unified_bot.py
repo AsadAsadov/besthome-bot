@@ -409,6 +409,8 @@ UI_CONTEXT_ADMIN = "browsing_admin_users"
 ui_context_state: Dict[int, str] = defaultdict(lambda: UI_CONTEXT_MAIN)
 ui_message_state: Dict[int, int] = {}
 last_ui_message_id: Dict[int, int] = ui_message_state
+last_user_message_id: Dict[int, int] = {}
+ui_anchor_user_message_id: Dict[int, int] = {}
 STATE_MAIN_MENU = "STATE_MAIN_MENU"
 STATE_SEARCH_MENU = "STATE_SEARCH_MENU"
 STATE_SEARCH_ACTION = "STATE_SEARCH_ACTION"
@@ -6998,6 +7000,31 @@ def update_ui_message(
     disable_preview: Optional[bool] = None,
 ) -> Optional[int]:
     message_id = last_ui_message_id.get(user_id)
+    last_user = last_user_message_id.get(user_id, 0)
+    anchor = ui_anchor_user_message_id.get(user_id, 0)
+    if message_id and last_user > anchor:
+        try:
+            bot.delete_message(chat_id, message_id)
+        except Exception:
+            logger.debug(
+                "update_ui_message delete failed chat_id=%s message_id=%s",
+                chat_id,
+                message_id,
+            )
+        try:
+            msg = bot.send_message(
+                chat_id,
+                text,
+                reply_markup=keyboard,
+                parse_mode=parse_mode,
+                disable_web_page_preview=disable_preview,
+            )
+            last_ui_message_id[user_id] = msg.message_id
+            ui_anchor_user_message_id[user_id] = last_user
+            return msg.message_id
+        except Exception:
+            logger.exception("update_ui_message send failed chat_id=%s", chat_id)
+            return None
     if message_id:
         edited = False
         try:
@@ -7040,6 +7067,7 @@ def update_ui_message(
             disable_web_page_preview=disable_preview,
         )
         last_ui_message_id[user_id] = msg.message_id
+        ui_anchor_user_message_id[user_id] = last_user
         return msg.message_id
     except Exception:
         logger.exception("update_ui_message send failed chat_id=%s", chat_id)
@@ -24943,6 +24971,29 @@ def has_active_support_session(chat_id: int) -> bool:
     if is_admin(chat_id):
         return bool(get_support_admin_active_session_id(chat_id))
     return is_support_session_open_for_user(chat_id)
+
+
+@bot.message_handler(
+    content_types=[
+        "text",
+        "audio",
+        "document",
+        "photo",
+        "sticker",
+        "video",
+        "video_note",
+        "voice",
+        "location",
+        "contact",
+        "venue",
+        "animation",
+        "dice",
+        "poll",
+        "web_app_data",
+    ]
+)
+def track_last_user_message(message: types.Message) -> None:
+    last_user_message_id[message.chat.id] = message.message_id
 
 
 @bot.message_handler(content_types=["text"])
