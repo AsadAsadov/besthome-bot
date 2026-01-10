@@ -1727,8 +1727,8 @@ def download_main_db_file(url: str) -> Tuple[str, bool, Dict[str, Optional[str]]
                         size = int(content_length)
                         if size > DB_UPDATE_MAX_ZIP_BYTES:
                             raise RuntimeError("Fayl çox böyükdür")
-                        if is_zip_response and size < DB_UPDATE_MIN_ZIP_BYTES:
-                            raise RuntimeError("ZIP fayl ölçüsü çox kiçikdir")
+                        if size < DB_UPDATE_MIN_ZIP_BYTES:
+                            raise RuntimeError("Fayl ölçüsü çox kiçikdir")
                     except ValueError:
                         pass
                 total = 0
@@ -1742,8 +1742,8 @@ def download_main_db_file(url: str) -> Tuple[str, bool, Dict[str, Optional[str]]
                         f.write(chunk)
                 if total <= 0:
                     raise RuntimeError("Fayl ölçüsü sıfırdır")
-                if is_zip_response and total < DB_UPDATE_MIN_ZIP_BYTES:
-                    raise RuntimeError("ZIP fayl ölçüsü çox kiçikdir")
+                if total < DB_UPDATE_MIN_ZIP_BYTES:
+                    raise RuntimeError("Fayl ölçüsü çox kiçikdir")
             is_zip = zipfile.is_zipfile(temp_path)
             if not is_zip:
                 os.replace(temp_path, DB_UPDATE_DB_PATH)
@@ -1782,7 +1782,7 @@ def extract_main_db_from_zip(zip_path: str) -> Tuple[str, str]:
     ensure_tmp_workspace()
     os.makedirs(DB_UPDATE_TMP_DIR, exist_ok=True)
     temp_dir = tempfile.mkdtemp(
-        prefix=f"db_update_{now_utc().strftime('%Y%m%d_%H%M%S')}_",
+        prefix=f"db_update_{now_utc().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}_",
         dir=DB_UPDATE_TMP_DIR,
     )
     with zipfile.ZipFile(zip_path, "r") as zf:
@@ -2520,8 +2520,8 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
                 "✅ Elanlar uğurla yeniləndi.\n"
                 f"{recent_line}\n"
                 f"📊 Bu yenilənmədə əlavə olunanlar: {total_added}\n"
-                f"1⃣ Satılır: {added_sale}\n"
-                f"2⃣ Kirayə verilir: {added_rent}"
+                f"• Satılır: {added_sale}\n"
+                f"• Kirayə verilir: {added_rent}"
             )
             safe_admin_step(admin_id, report)
             logger.info(
