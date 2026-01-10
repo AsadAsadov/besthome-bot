@@ -170,7 +170,10 @@ os.environ.setdefault("DATA_DIR", BASE_DATA_DIR)
 os.makedirs(BASE_DATA_DIR, exist_ok=True)
 DATA_DIR = BASE_DATA_DIR
 
-MAIN_DB = os.path.join(BASE_DATA_DIR, "besthome.db")
+MAIN_DB = os.path.realpath(os.getenv("BESTHOME_DB_PATH", "/data/besthome.db"))
+MAIN_DB_DIR = os.path.dirname(MAIN_DB)
+if MAIN_DB_DIR:
+    os.makedirs(MAIN_DB_DIR, exist_ok=True)
 LOCAL_DB = os.path.join(BASE_DATA_DIR, "local_data.db")
 AGENTS_DB = os.path.join(BASE_DATA_DIR, "agents.db")
 SUPPORT_SESSIONS_PATH = os.path.join(BASE_DATA_DIR, "support_sessions.json")
@@ -205,6 +208,18 @@ def _log_db_status():
                 logger.info("DB status %s path=%s exists", label, db_path)
         else:
             logger.warning("DB status %s path=%s MISSING", label, db_path)
+
+
+def _log_main_db_boot_status():
+    logger.info("[BOOT] MAIN_DB resolved to: %s", MAIN_DB)
+    logger.info("[BOOT] MAIN_DB real path: %s", os.path.realpath(MAIN_DB))
+    try:
+        size = os.path.getsize(MAIN_DB)
+        logger.info("[BOOT] MAIN_DB size: %s", size)
+    except FileNotFoundError:
+        logger.warning("[BOOT] MAIN_DB size: missing (file not found)")
+    except Exception as exc:
+        logger.warning("[BOOT] MAIN_DB size check failed: %s", exc)
 
 
 # ==============================
@@ -1477,14 +1492,14 @@ def prepare_main_db_for_swap():
         print("⚠️ DB checkpoint xətası:", e)
 
 
-def backup_main_db_file() -> Optional[str]:
-    if not os.path.exists(MAIN_DB):
+def backup_main_db_file(db_path: str) -> Optional[str]:
+    if not os.path.exists(db_path):
         return None
 
     os.makedirs(DB_UPDATE_BACKUP_DIR, exist_ok=True)
     ts = now_utc().strftime("%Y%m%d_%H%M")
     backup_path = os.path.join(DB_UPDATE_BACKUP_DIR, f"besthome_{ts}.db")
-    shutil.copy2(MAIN_DB, backup_path)
+    shutil.copy2(db_path, backup_path)
     return backup_path
 
 
@@ -1682,8 +1697,9 @@ def extract_main_db_from_zip(zip_path: str) -> Tuple[str, str]:
     extracted_path = find_db_file(temp_dir)
     if not extracted_path:
         raise RuntimeError("❌ ZIP içində besthome.db tapılmadı")
-    logger.info("📦 DB extracted to /tmp path=%s", extracted_path)
-    return extracted_path, temp_dir
+    resolved_path = os.path.realpath(extracted_path)
+    logger.info("📦 DB extracted to /tmp path=%s", resolved_path)
+    return resolved_path, temp_dir
 
 
 def validate_main_db_file(db_path: str) -> int:
@@ -1697,6 +1713,38 @@ def validate_main_db_file(db_path: str) -> int:
         if not row:
             raise RuntimeError("DB daxilində 'listings' cədvəli tapılmadı")
         cur.execute("SELECT COUNT(*) FROM listings")
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    finally:
+        conn.close()
+
+
+def get_listings_count(db_path: str) -> int:
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM listings")
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    finally:
+        conn.close()
+
+
+def count_recent_listings_by_created_at(db_path: str) -> Optional[int]:
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(listings)")
+        columns = {row[1] for row in cur.fetchall() if row and row[1]}
+        if "created_at" not in columns:
+            return None
+        cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM listings
+            WHERE created_at >= datetime('now','-24 hours')
+            """
+        )
         row = cur.fetchone()
         return int(row[0]) if row and row[0] is not None else 0
     finally:
@@ -2002,14 +2050,31 @@ def count_added_listings_by_operation(
 
 
 def atomic_replace_main_db(new_db_path: str) -> Optional[str]:
-    backup_path = backup_main_db_file()
+    previous_stat = None
+    if os.path.exists(MAIN_DB):
+        try:
+            previous_stat = os.stat(MAIN_DB)
+        except Exception:
+            previous_stat = None
+    backup_path = backup_main_db_file(MAIN_DB)
     if backup_path:
         logger.info("[UPDATE] Old DB backed up")
     shutil.move(new_db_path, MAIN_DB)
     if not os.path.exists(MAIN_DB):
         raise RuntimeError("❌ Yeni DB düzgün yerləşdirilmədi")
+    real_path = os.path.realpath(MAIN_DB)
+    new_stat = os.stat(MAIN_DB)
     logger.info("[UPDATE] New DB moved to: %s", MAIN_DB)
-    logger.info("[UPDATE] DB file size: %s", os.path.getsize(MAIN_DB))
+    logger.info("[UPDATE] DB REAL PATH AFTER MOVE: %s", real_path)
+    logger.info("[UPDATE] DB SIZE AFTER MOVE: %s", new_stat.st_size)
+    if real_path != MAIN_DB:
+        raise RuntimeError("❌ MAIN_DB real path mismatch after move")
+    if (
+        previous_stat
+        and new_stat.st_ino == previous_stat.st_ino
+        and new_stat.st_size == previous_stat.st_size
+    ):
+        raise RuntimeError("❌ DB dəyişdirilmədi (inode/size dəyişməz qaldı)")
     logger.info("✅ DB REAL olaraq yeniləndi: %s", MAIN_DB)
     return backup_path
 
@@ -2058,6 +2123,8 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             )
         else:
             extracted_db_path = temp_download_path
+        if extracted_db_path:
+            extracted_db_path = os.path.realpath(extracted_db_path)
 
         send_db_update_progress(admin_id, "🗄️ DB yoxlanır…")
         run_with_timeout(
@@ -2067,6 +2134,13 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             extracted_db_path,
         )
 
+        pre_update_count = None
+        try:
+            pre_update_count = get_listings_count(MAIN_DB)
+            logger.info("[UPDATE] Pre-update listings count: %s", pre_update_count)
+        except Exception:
+            logger.exception("[UPDATE] Failed to get pre-update listings count")
+
         try:
             old_listing_ids, listing_key_column = collect_existing_listing_ids(MAIN_DB)
             logger.info("[UPDATE] Old listings count: %s", len(old_listing_ids))
@@ -2075,6 +2149,16 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
 
         send_db_update_progress(admin_id, "🔁 DB əvəz olunur…")
         logger.info("[UPDATE] Using REPLACE mode")
+        incoming_db_path = os.path.realpath(extracted_db_path)
+        if incoming_db_path == MAIN_DB:
+            raise RuntimeError("❌ Incoming DB path matches runtime DB path")
+        try:
+            incoming_size = os.path.getsize(incoming_db_path)
+        except Exception as exc:
+            raise RuntimeError(f"❌ Incoming DB size check failed: {exc}") from exc
+        logger.info("[UPDATE] Runtime DB path: %s", MAIN_DB)
+        logger.info("[UPDATE] Incoming DB path: %s", incoming_db_path)
+        logger.info("[UPDATE] Incoming DB size: %s", incoming_size)
         with main_db_replace_lock:
             close_all_main_conns()
             prepare_main_db_for_swap()
@@ -2082,8 +2166,17 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
                 "db_replace",
                 DB_UPDATE_REPLACE_TIMEOUT_SECONDS,
                 atomic_replace_main_db,
-                extracted_db_path,
+                incoming_db_path,
             )
+
+        try:
+            post_update_count = get_listings_count(MAIN_DB)
+            logger.info("[VERIFY] listings count after update: %s", post_update_count)
+            if pre_update_count is not None and post_update_count == pre_update_count:
+                raise RuntimeError("DB update had no effect on runtime database")
+        except Exception:
+            logger.exception("[VERIFY] Runtime DB verification failed")
+            raise
 
         conn = sqlite3.connect(MAIN_DB)
         try:
@@ -2133,20 +2226,12 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             logger.info("[UPDATE] New listings computed from last 24h window")
             try:
                 time_based_new_count = count_listings_since(MAIN_DB, update_start_time)
-                total, new_sale, new_rent = count_last_24h_listings(MAIN_DB)
-                logger.info(
-                    "[UPDATE] 24h total=%s satilir=%s kiraye=%s",
-                    total,
-                    new_sale,
-                    new_rent,
-                )
                 logger.info(
                     "[UPDATE] Time-based new listings since start=%s",
                     time_based_new_count,
                 )
             except Exception:
                 logger.exception("[UPDATE] 24h listing count failed")
-                total, new_sale, new_rent = 0, 0, 0
                 time_based_new_count = 0
             try:
                 process_keyword_alerts_for_new_listings()
@@ -2154,9 +2239,20 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
                 logger.warning("keyword alert listing scan error: %s", e)
 
             new_total = len(added_listing_ids)
+            recent_total = count_recent_listings_by_created_at(MAIN_DB)
+            if recent_total is None:
+                logger.warning(
+                    "[WARN] listings table has no created_at column – cannot compute real new listings"
+                )
+                recent_line = (
+                    "📦 Son 24 saatda əlavə olunan elanlar: "
+                    "Tarix məlumatı olmadığı üçün yeni elan sayı dəqiq hesablana bilmir."
+                )
+            else:
+                recent_line = f"📦 Son 24 saatda əlavə olunan elanlar: {recent_total}"
             report = (
                 "✅ Elanlar uğurla yeniləndi.\n"
-                f"📦 Son 24 saatda əlavə olunan elanlar: {total}\n"
+                f"{recent_line}\n"
                 f"📊 Bu yenilənmədə: {new_total}\n"
                 f"1⃣ Satılır: {added_sale}\n"
                 f"2⃣ Kirayə verilir: {added_rent}"
@@ -24536,6 +24632,7 @@ def _initialize_app_state():
     if _app_initialized:
         return
     logger.info("DATA_DIR resolved to %s", BASE_DATA_DIR)
+    _log_main_db_boot_status()
     _log_db_status()
     init_local_db()
     init_agents_db()
