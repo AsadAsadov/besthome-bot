@@ -410,7 +410,7 @@ ui_context_state: Dict[int, str] = defaultdict(lambda: UI_CONTEXT_MAIN)
 ui_message_state: Dict[int, int] = {}
 last_ui_message_id: Dict[int, int] = ui_message_state
 last_user_message_id: Dict[int, int] = {}
-ui_anchor_user_message_id: Dict[int, int] = {}
+IN_ADMIN_CHAT: Dict[int, bool] = {}
 STATE_MAIN_MENU = "STATE_MAIN_MENU"
 STATE_SEARCH_MENU = "STATE_SEARCH_MENU"
 STATE_SEARCH_ACTION = "STATE_SEARCH_ACTION"
@@ -6963,31 +6963,18 @@ def edit_or_send_message(
 ) -> Optional[int]:
     message_id = state.get(user_id)
     if message_id:
-        try:
-            bot.edit_message_text(
-                text,
-                user_id,
-                message_id,
-                reply_markup=keyboard,
-                parse_mode=parse_mode,
-                disable_web_page_preview=disable_preview,
-            )
-            return message_id
-        except Exception:
-            logger.debug("edit_or_send_message edit failed chat_id=%s", user_id)
-    try:
-        msg = bot.send_message(
-            user_id,
-            text,
-            reply_markup=keyboard,
-            parse_mode=parse_mode,
-            disable_web_page_preview=disable_preview,
-        )
-        state[user_id] = msg.message_id
-        return msg.message_id
-    except Exception:
-        logger.exception("edit_or_send_message send failed chat_id=%s", user_id)
-        return None
+        last_ui_message_id[user_id] = message_id
+    msg_id = update_ui_message(
+        user_id,
+        user_id,
+        text,
+        keyboard,
+        parse_mode=parse_mode,
+        disable_preview=disable_preview,
+    )
+    if msg_id:
+        state[user_id] = msg_id
+    return msg_id
 
 
 def update_ui_message(
@@ -7000,9 +6987,11 @@ def update_ui_message(
     disable_preview: Optional[bool] = None,
 ) -> Optional[int]:
     message_id = last_ui_message_id.get(user_id)
-    last_user = last_user_message_id.get(user_id, 0)
-    anchor = ui_anchor_user_message_id.get(user_id, 0)
-    if message_id and last_user > anchor:
+    last_user = last_user_message_id.get(user_id)
+    in_admin_chat = IN_ADMIN_CHAT.get(user_id, False) or is_support_session_open_for_user(
+        user_id
+    )
+    if message_id and last_user and message_id < last_user:
         try:
             bot.delete_message(chat_id, message_id)
         except Exception:
@@ -7011,22 +7000,20 @@ def update_ui_message(
                 chat_id,
                 message_id,
             )
+        message_id = None
+        last_ui_message_id[user_id] = None
+    if in_admin_chat and message_id:
         try:
-            msg = bot.send_message(
-                chat_id,
-                text,
-                reply_markup=keyboard,
-                parse_mode=parse_mode,
-                disable_web_page_preview=disable_preview,
-            )
-            last_ui_message_id[user_id] = msg.message_id
-            ui_anchor_user_message_id[user_id] = last_user
-            return msg.message_id
+            bot.delete_message(chat_id, message_id)
         except Exception:
-            logger.exception("update_ui_message send failed chat_id=%s", chat_id)
-            return None
-    if message_id:
-        edited = False
+            logger.debug(
+                "update_ui_message delete failed chat_id=%s message_id=%s",
+                chat_id,
+                message_id,
+            )
+        message_id = None
+        last_ui_message_id[user_id] = None
+    if message_id and not in_admin_chat:
         try:
             bot.edit_message_text(
                 text,
@@ -7036,28 +7023,12 @@ def update_ui_message(
                 parse_mode=parse_mode,
                 disable_web_page_preview=disable_preview,
             )
-            edited = True
+            return message_id
         except Exception as exc:
             if "message is not modified" in str(exc).lower():
                 last_ui_message_id[user_id] = message_id
                 return message_id
-            logger.debug("update_ui_message edit text failed chat_id=%s", chat_id)
-        if not edited:
-            try:
-                bot.edit_message_reply_markup(
-                    chat_id,
-                    message_id,
-                    reply_markup=keyboard,
-                )
-                edited = True
-            except Exception as exc:
-                if "message is not modified" in str(exc).lower():
-                    last_ui_message_id[user_id] = message_id
-                    return message_id
-                logger.debug("update_ui_message edit markup failed chat_id=%s", chat_id)
-        if edited:
-            last_ui_message_id[user_id] = message_id
-            return message_id
+            logger.debug("update_ui_message edit failed chat_id=%s", chat_id)
     try:
         msg = bot.send_message(
             chat_id,
@@ -7067,7 +7038,6 @@ def update_ui_message(
             disable_web_page_preview=disable_preview,
         )
         last_ui_message_id[user_id] = msg.message_id
-        ui_anchor_user_message_id[user_id] = last_user
         return msg.message_id
     except Exception:
         logger.exception("update_ui_message send failed chat_id=%s", chat_id)
@@ -7152,7 +7122,10 @@ def build_main_menu(
         buttons.append("💳 Ödəniş")
 
     if not is_admin_user:
-        buttons.append("💬 Adminlə əlaqə")
+        if IN_ADMIN_CHAT.get(chat_id) or is_support_session_open_for_user(chat_id):
+            buttons.append("🔚 Çatı sonlandır")
+        else:
+            buttons.append("💬 Adminlə əlaqə")
         buttons.append("🤝 Dostunu dəvət et")
 
     if is_feature_enabled("about", chat_id):
@@ -9271,8 +9244,27 @@ def open_support_chat_from_menu(message):
     start_support_chat_for_user(message.chat.id, message.from_user)
 
 
+@bot.message_handler(func=lambda m: m.text == "🔚 Çatı sonlandır")
+def close_support_chat_from_menu(message):
+    if message.text and message.text.startswith("/"):
+        return
+    if is_admin(message.chat.id):
+        return
+    session = get_support_session_by_user(
+        message.chat.id, SUPPORT_SESSION_STATUS_OPEN
+    )
+    if session:
+        close_support_session(session["session_id"])
+    IN_ADMIN_CHAT[message.chat.id] = False
+    bot.send_message(
+        message.chat.id, "✅ Çat bağlandı. Menüyə qayıda bilərsiniz."
+    )
+    send_main_menu(message.chat.id, force=True)
+
+
 def start_support_chat_for_user(chat_id: int, user: types.User):
     reset_user_state(chat_id)
+    IN_ADMIN_CHAT[chat_id] = True
     existing_session = get_support_session_by_user(
         chat_id, SUPPORT_SESSION_STATUS_OPEN
     )
@@ -17030,6 +17022,7 @@ def cb_support_chat_admin(c):
         session_id = c.data.split(":", 2)[2]
         session = close_support_session(session_id)
         if session and session.get("user_id"):
+            IN_ADMIN_CHAT[session["user_id"]] = False
             bot.send_message(
                 session["user_id"],
                 "❌ Çat bağlandı. Yeni sorğu üçün 💬 Adminlə əlaqə seçin.",
@@ -24900,6 +24893,7 @@ def admin_search_handler(message):
 def support_user_message_router(message):
     if message.content_type == "text" and message.text and message.text.startswith("/"):
         return
+    IN_ADMIN_CHAT[message.chat.id] = True
     session = get_support_session_by_user(message.chat.id, SUPPORT_SESSION_STATUS_OPEN)
     if not session:
         return
