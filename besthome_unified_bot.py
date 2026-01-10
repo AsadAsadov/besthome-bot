@@ -1130,6 +1130,66 @@ def _save_db_update_state_file(state: Dict[str, Any]) -> None:
         logger.exception("Failed to write db update state file")
 
 
+def _parse_db_update_ts(raw: Any) -> Optional[datetime]:
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def record_db_update_stats(
+    previous_total: Optional[int], new_total: Optional[int]
+) -> Dict[str, Any]:
+    data = _load_db_update_state_file()
+    updates = data.get("updates")
+    if not isinstance(updates, list):
+        updates = []
+
+    prev_val = int(previous_total) if previous_total is not None else None
+    new_val = int(new_total) if new_total is not None else None
+    added = (new_val - prev_val) if prev_val is not None and new_val is not None else 0
+
+    entry = {
+        "timestamp": now_utc().isoformat(),
+        "previous_total": prev_val,
+        "new_total": new_val,
+        "added": added,
+    }
+    updates.append(entry)
+    data["updates"] = updates
+    data["last_update_ts"] = entry["timestamp"]
+    data["last_total_count"] = new_val
+    data["last_total_diff"] = added
+    _save_db_update_state_file(data)
+    return entry
+
+
+def get_last24h_added_from_updates() -> int:
+    data = _load_db_update_state_file()
+    updates = data.get("updates")
+    if not isinstance(updates, list):
+        return 0
+    cutoff = now_utc() - timedelta(hours=24)
+    total = 0
+    for entry in updates:
+        ts = _parse_db_update_ts(entry.get("timestamp"))
+        if not ts or ts < cutoff:
+            continue
+        added = entry.get("added")
+        try:
+            added_val = int(added)
+        except Exception:
+            added_val = 0
+        if added_val > 0:
+            total += added_val
+    return total
+
+
 def load_last_update_max_id() -> Optional[int]:
     data = _load_db_update_state_file()
     try:
@@ -2420,6 +2480,12 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             logger.exception("[VERIFY] Runtime DB verification failed")
             raise
 
+        update_entry = record_db_update_stats(pre_update_count, post_update_count)
+        update_added = update_entry.get("added", 0)
+        last24h_from_updates = get_last24h_added_from_updates()
+        logger.info("[STATS] update_added=%s", update_added)
+        logger.info("[STATS] last24h_from_updates=%s", last24h_from_updates)
+
         try:
             post_fp = compute_db_fingerprint(MAIN_DB)
         except Exception:
@@ -2504,17 +2570,15 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
                 logger.warning("keyword alert listing scan error: %s", e)
 
             new_total = len(added_listing_ids)
-            recent_total = count_recent_listings_by_created_at(MAIN_DB)
-            if recent_total is None:
-                logger.warning(
-                    "[WARN] listings table has no created_at column – cannot compute real new listings"
-                )
+            if update_added == 0:
                 recent_line = (
                     "📦 Son 24 saatda əlavə olunan elanlar: "
-                    "Tarix məlumatı olmadığı üçün yeni elan sayı dəqiq hesablana bilmir."
+                    "Yeni DB əvvəlki ilə eynidir – real yeni elan yoxdur."
                 )
             else:
-                recent_line = f"📦 Son 24 saatda əlavə olunan elanlar: {recent_total}"
+                recent_line = (
+                    f"📦 Son 24 saatda əlavə olunan elanlar: {last24h_from_updates}"
+                )
             total_added = added_sale + added_rent
             report = (
                 "✅ Elanlar uğurla yeniləndi.\n"
