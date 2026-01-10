@@ -11,6 +11,7 @@ CURRENT_VERSION = "v10"
 import os
 import io
 import time
+import errno
 import zipfile
 import sqlite3
 import threading
@@ -1569,6 +1570,11 @@ DB_ALLOWED_MIME_TYPES = {
     "application/octet-stream",
     "application/x-sqlite3",
 }
+ZIP_ALLOWED_MIME_TYPES = {
+    "application/zip",
+    "application/x-zip-compressed",
+    "application/octet-stream",
+}
 
 
 def normalize_dropbox_urls(url: str) -> List[str]:
@@ -1578,16 +1584,72 @@ def normalize_dropbox_urls(url: str) -> List[str]:
     parts = urlsplit(url)
     if parts.scheme.lower() != "https":
         return []
+    cache_bust = str(int(time.time()))
     query = parse_qs(parts.query)
     query["dl"] = ["1"]
+    query["cb"] = [cache_bust]
     base = urlunsplit(
         (parts.scheme, parts.netloc, parts.path, urlencode(query, doseq=True), "")
     )
     candidates = [base]
     if "dropbox.com" in parts.netloc:
         alt_netloc = "dl.dropboxusercontent.com"
-        candidates.append(urlunsplit((parts.scheme, alt_netloc, parts.path, "", "")))
+        candidates.append(
+            urlunsplit(
+                (parts.scheme, alt_netloc, parts.path, urlencode(query, doseq=True), "")
+            )
+        )
     return list(dict.fromkeys(candidates))
+
+
+def _log_download_response(
+    normalized_url: str,
+    response: requests.Response,
+) -> Dict[str, Optional[str]]:
+    headers = response.headers or {}
+    info = {
+        "normalized_url": normalized_url,
+        "effective_url": response.url,
+        "status": str(response.status_code),
+        "content_type": headers.get("Content-Type"),
+        "content_length": headers.get("Content-Length"),
+        "etag": headers.get("ETag"),
+        "last_modified": headers.get("Last-Modified"),
+    }
+    logger.info(
+        "[DL] normalized_url=%s effective_url=%s status=%s type=%s len=%s etag=%s last_modified=%s",
+        info["normalized_url"],
+        info["effective_url"],
+        info["status"],
+        info["content_type"],
+        info["content_length"],
+        info["etag"],
+        info["last_modified"],
+    )
+    return info
+
+
+def _response_looks_like_zip(response: requests.Response) -> bool:
+    content_type = (response.headers.get("Content-Type") or "").lower()
+    if "text/html" in content_type:
+        return False
+    if any(mt in content_type for mt in ZIP_ALLOWED_MIME_TYPES):
+        return True
+    if "zip" in content_type:
+        return True
+    content_disposition = (response.headers.get("Content-Disposition") or "").lower()
+    if ".zip" in content_disposition:
+        return True
+    effective_url = (response.url or "").lower().split("?", 1)[0]
+    return effective_url.endswith(".zip")
+
+
+def _response_looks_like_db(response: requests.Response) -> bool:
+    content_type = (response.headers.get("Content-Type") or "").lower()
+    if any(mt in content_type for mt in DB_ALLOWED_MIME_TYPES):
+        return True
+    effective_url = (response.url or "").lower().split("?", 1)[0]
+    return effective_url.endswith(".db")
 
 
 def download_zip_stream(url: str) -> str:
@@ -1635,7 +1697,7 @@ def download_zip_stream(url: str) -> str:
     raise RuntimeError(f"ZIP yükləmə alınmadı: {last_error}")
 
 
-def download_main_db_file(url: str) -> Tuple[str, bool]:
+def download_main_db_file(url: str) -> Tuple[str, bool, Dict[str, Optional[str]]]:
     last_error = None
     for candidate in normalize_dropbox_urls(url):
         os.makedirs(DB_UPDATE_TMP_DIR, exist_ok=True)
@@ -1650,8 +1712,25 @@ def download_main_db_file(url: str) -> Tuple[str, bool]:
                 timeout=(10, 120),
                 allow_redirects=True,
             ) as r:
+                download_info = _log_download_response(candidate, r)
                 if r.status_code != 200:
                     raise RuntimeError(f"HTTP status {r.status_code}")
+                is_zip_response = _response_looks_like_zip(r)
+                is_db_response = _response_looks_like_db(r)
+                if not is_zip_response and not is_db_response:
+                    raise RuntimeError(
+                        f"Unexpected response type: {download_info.get('content_type')}"
+                    )
+                content_length = r.headers.get("Content-Length")
+                if content_length:
+                    try:
+                        size = int(content_length)
+                        if size > DB_UPDATE_MAX_ZIP_BYTES:
+                            raise RuntimeError("Fayl çox böyükdür")
+                        if is_zip_response and size < DB_UPDATE_MIN_ZIP_BYTES:
+                            raise RuntimeError("ZIP fayl ölçüsü çox kiçikdir")
+                    except ValueError:
+                        pass
                 total = 0
                 for chunk in r.iter_content(chunk_size=1024 * 1024):
                     if not chunk:
@@ -1663,11 +1742,13 @@ def download_main_db_file(url: str) -> Tuple[str, bool]:
                         f.write(chunk)
                 if total <= 0:
                     raise RuntimeError("Fayl ölçüsü sıfırdır")
+                if is_zip_response and total < DB_UPDATE_MIN_ZIP_BYTES:
+                    raise RuntimeError("ZIP fayl ölçüsü çox kiçikdir")
             is_zip = zipfile.is_zipfile(temp_path)
             if not is_zip:
                 os.replace(temp_path, DB_UPDATE_DB_PATH)
                 temp_path = DB_UPDATE_DB_PATH
-            return temp_path, is_zip
+            return temp_path, is_zip, download_info
         except Exception as exc:
             last_error = exc
             if os.path.exists(temp_path):
@@ -1677,10 +1758,21 @@ def download_main_db_file(url: str) -> Tuple[str, bool]:
 
 
 def find_db_file(root: str) -> Optional[str]:
+    candidates: List[Tuple[int, str]] = []
     for current_root, _dirs, files in os.walk(root):
-        if "besthome.db" in files:
-            return os.path.join(current_root, "besthome.db")
-    return None
+        for filename in files:
+            if filename.lower() != "besthome.db":
+                continue
+            path = os.path.join(current_root, filename)
+            try:
+                size = os.path.getsize(path)
+            except Exception:
+                size = 0
+            candidates.append((size, path))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
 
 
 def extract_main_db_from_zip(zip_path: str) -> Tuple[str, str]:
@@ -1688,17 +1780,40 @@ def extract_main_db_from_zip(zip_path: str) -> Tuple[str, str]:
         raise RuntimeError("Fayl ZIP formatında deyil")
 
     ensure_tmp_workspace()
-    temp_dir = DB_UPDATE_TMP_DIR
+    os.makedirs(DB_UPDATE_TMP_DIR, exist_ok=True)
+    temp_dir = tempfile.mkdtemp(
+        prefix=f"db_update_{now_utc().strftime('%Y%m%d_%H%M%S')}_",
+        dir=DB_UPDATE_TMP_DIR,
+    )
     with zipfile.ZipFile(zip_path, "r") as zf:
         bad_file = zf.testzip()
         if bad_file:
             raise RuntimeError(f"ZIP faylında zədəli fayl var: {bad_file}")
         zf.extractall(temp_dir)
+    candidates: List[Tuple[int, str]] = []
+    for current_root, _dirs, files in os.walk(temp_dir):
+        for filename in files:
+            if filename.lower() != "besthome.db":
+                continue
+            path = os.path.join(current_root, filename)
+            try:
+                size = os.path.getsize(path)
+            except Exception:
+                size = 0
+            candidates.append((size, path))
     extracted_path = find_db_file(temp_dir)
     if not extracted_path:
         raise RuntimeError("❌ ZIP içində besthome.db tapılmadı")
     resolved_path = os.path.realpath(extracted_path)
-    logger.info("📦 DB extracted to /tmp path=%s", resolved_path)
+    candidate_labels = [
+        f"{os.path.relpath(path, temp_dir)} ({size})" for size, path in candidates
+    ]
+    logger.info(
+        "[ZIP] extracted_dir=%s candidates=%s chosen=%s",
+        temp_dir,
+        candidate_labels,
+        os.path.relpath(resolved_path, temp_dir),
+    )
     return resolved_path, temp_dir
 
 
@@ -1717,6 +1832,83 @@ def validate_main_db_file(db_path: str) -> int:
         return int(row[0]) if row and row[0] is not None else 0
     finally:
         conn.close()
+
+
+def _sha256_file(path: str) -> str:
+    hasher = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _listings_table_exists(cur: sqlite3.Cursor) -> bool:
+    cur.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='listings'"
+    )
+    return cur.fetchone() is not None
+
+
+def _get_listings_freshness_marker(cur: sqlite3.Cursor) -> Tuple[str, Any]:
+    cur.execute("PRAGMA table_info(listings)")
+    columns = {row[1] for row in cur.fetchall() if row and row[1]}
+    for col in ("updated_at", "created_at"):
+        if col in columns:
+            cur.execute(f"SELECT MAX({col}) FROM listings")
+            return col, cur.fetchone()[0]
+    for col in ("id", "listing_id"):
+        if col in columns:
+            cur.execute(f"SELECT MAX({col}) FROM listings")
+            return col, cur.fetchone()[0]
+    cur.execute("SELECT MAX(rowid) FROM listings")
+    return "rowid", cur.fetchone()[0]
+
+
+def compute_db_fingerprint(db_path: str) -> Dict[str, Any]:
+    file_size = os.path.getsize(db_path)
+    sha256 = _sha256_file(db_path)
+    user_version = None
+    schema_version = None
+    listings_count = None
+    freshness_marker = None
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute("PRAGMA user_version")
+        row = cur.fetchone()
+        user_version = row[0] if row else None
+        cur.execute("PRAGMA schema_version")
+        row = cur.fetchone()
+        schema_version = row[0] if row else None
+        if _listings_table_exists(cur):
+            cur.execute("SELECT COUNT(*) FROM listings")
+            row = cur.fetchone()
+            listings_count = int(row[0]) if row and row[0] is not None else 0
+            col, value = _get_listings_freshness_marker(cur)
+            freshness_marker = {"column": col, "value": value}
+    finally:
+        conn.close()
+    return {
+        "file_size": file_size,
+        "sha256": sha256,
+        "user_version": user_version,
+        "schema_version": schema_version,
+        "listings_count": listings_count,
+        "freshness_marker": freshness_marker,
+    }
+
+
+def _fingerprint_log_payload(fp: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not fp:
+        return None
+    return {
+        "file_size": fp.get("file_size"),
+        "sha256": fp.get("sha256"),
+        "user_version": fp.get("user_version"),
+        "schema_version": fp.get("schema_version"),
+        "listings_count": fp.get("listings_count"),
+        "freshness_marker": fp.get("freshness_marker"),
+    }
 
 
 def get_listings_count(db_path: str) -> int:
@@ -2051,15 +2243,32 @@ def count_added_listings_by_operation(
 
 def atomic_replace_main_db(new_db_path: str) -> Optional[str]:
     previous_stat = None
+    previous_mode = None
     if os.path.exists(MAIN_DB):
         try:
             previous_stat = os.stat(MAIN_DB)
+            previous_mode = previous_stat.st_mode & 0o777
         except Exception:
             previous_stat = None
     backup_path = backup_main_db_file(MAIN_DB)
     if backup_path:
         logger.info("[UPDATE] Old DB backed up")
-    shutil.move(new_db_path, MAIN_DB)
+    try:
+        os.replace(new_db_path, MAIN_DB)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        shutil.move(new_db_path, MAIN_DB)
+    if previous_mode is not None:
+        try:
+            os.chmod(MAIN_DB, previous_mode)
+        except Exception:
+            logger.exception("[UPDATE] Failed to restore DB permissions")
+    else:
+        try:
+            os.chmod(MAIN_DB, 0o644)
+        except Exception:
+            logger.exception("[UPDATE] Failed to set DB permissions")
     if not os.path.exists(MAIN_DB):
         raise RuntimeError("❌ Yeni DB düzgün yerləşdirilmədi")
     real_path = os.path.realpath(MAIN_DB)
@@ -2090,9 +2299,13 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
     extracted_db_path = None
     extracted_dir = None
     backup_path = None
+    download_info: Optional[Dict[str, Optional[str]]] = None
     old_listing_ids: Set[Any] = set()
     listing_key_column: Optional[str] = None
     update_start_time = datetime.now()
+    pre_fp: Optional[Dict[str, Any]] = None
+    incoming_fp: Optional[Dict[str, Any]] = None
+    post_fp: Optional[Dict[str, Any]] = None
     try:
         main_db_update_in_progress.set()
         global LISTINGS_TS_COLUMN
@@ -2107,7 +2320,7 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
                     pass
         ensure_sufficient_disk_space(admin_id)
         send_db_update_progress(admin_id, "⬇️ Fayl yüklənir…")
-        temp_download_path, is_zip = run_with_timeout(
+        temp_download_path, is_zip, download_info = run_with_timeout(
             "db_download",
             DB_UPDATE_DOWNLOAD_TIMEOUT_SECONDS,
             download_main_db_file,
@@ -2133,6 +2346,37 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             validate_main_db_file,
             extracted_db_path,
         )
+
+        try:
+            pre_fp = compute_db_fingerprint(MAIN_DB)
+        except Exception:
+            logger.exception("[FP] Failed to compute pre-update fingerprint")
+            pre_fp = None
+
+        incoming_fp = compute_db_fingerprint(extracted_db_path)
+
+        if pre_fp and incoming_fp and incoming_fp.get("sha256") == pre_fp.get("sha256"):
+            try:
+                post_fp = compute_db_fingerprint(MAIN_DB)
+            except Exception:
+                logger.exception("[FP] Failed to compute post-update fingerprint")
+                post_fp = pre_fp
+            logger.info(
+                "[FP] pre=%s incoming=%s post=%s",
+                json.dumps(_fingerprint_log_payload(pre_fp), separators=(",", ":")),
+                json.dumps(_fingerprint_log_payload(incoming_fp), separators=(",", ":")),
+                json.dumps(_fingerprint_log_payload(post_fp), separators=(",", ":")),
+            )
+            logger.info("[VERIFY] outcome=INCOMING_SAME_AS_PREV")
+            sha_prefix = (incoming_fp.get("sha256") or "")[:12]
+            etag = (download_info or {}).get("etag") or "-"
+            last_modified = (download_info or {}).get("last_modified") or "-"
+            safe_admin_step(
+                admin_id,
+                "ℹ️ Yeni DB əvvəlki ilə eynidir — Dropbox faylı yenilənməyib və ya cache verilir.\n"
+                f"sha256={sha_prefix} etag={etag} last_modified={last_modified}",
+            )
+            return
 
         pre_update_count = None
         try:
@@ -2172,11 +2416,32 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
         try:
             post_update_count = get_listings_count(MAIN_DB)
             logger.info("[VERIFY] listings count after update: %s", post_update_count)
-            if pre_update_count is not None and post_update_count == pre_update_count:
-                raise RuntimeError("DB update had no effect on runtime database")
         except Exception:
             logger.exception("[VERIFY] Runtime DB verification failed")
             raise
+
+        try:
+            post_fp = compute_db_fingerprint(MAIN_DB)
+        except Exception:
+            logger.exception("[FP] Failed to compute post-update fingerprint")
+            post_fp = None
+
+        logger.info(
+            "[FP] pre=%s incoming=%s post=%s",
+            json.dumps(_fingerprint_log_payload(pre_fp), separators=(",", ":")),
+            json.dumps(_fingerprint_log_payload(incoming_fp), separators=(",", ":")),
+            json.dumps(_fingerprint_log_payload(post_fp), separators=(",", ":")),
+        )
+
+        if (
+            not post_fp
+            or not incoming_fp
+            or post_fp.get("sha256") != incoming_fp.get("sha256")
+            or post_fp.get("file_size") != incoming_fp.get("file_size")
+        ):
+            logger.info("[VERIFY] outcome=REPLACE_FAILED")
+            raise RuntimeError("DB replace failed: runtime fingerprint mismatch")
+        logger.info("[VERIFY] outcome=REPLACED_OK")
 
         conn = sqlite3.connect(MAIN_DB)
         try:
@@ -2250,10 +2515,11 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
                 )
             else:
                 recent_line = f"📦 Son 24 saatda əlavə olunan elanlar: {recent_total}"
+            total_added = added_sale + added_rent
             report = (
                 "✅ Elanlar uğurla yeniləndi.\n"
                 f"{recent_line}\n"
-                f"📊 Bu yenilənmədə: {new_total}\n"
+                f"📊 Bu yenilənmədə əlavə olunanlar: {total_added}\n"
                 f"1⃣ Satılır: {added_sale}\n"
                 f"2⃣ Kirayə verilir: {added_rent}"
             )
@@ -8700,6 +8966,20 @@ def format_market_pulse_text(records: List[Dict[str, Any]]) -> str:
     return "\n".join(lines).rstrip()
 
 
+STATS_PROP_TYPE_LABEL_REPLACEMENTS = {
+    "fərdi yaşayış evi": "Həyət evi",
+    "qeyri yaşayış sahəsi": "Ofis/Obyekt",
+}
+
+
+def _format_stats_prop_type_label(value: Any) -> str:
+    label = str(value or "").strip()
+    if not label:
+        return "-"
+    replacement = STATS_PROP_TYPE_LABEL_REPLACEMENTS.get(label.lower())
+    return replacement or label
+
+
 def format_stats_text(
     base_stats: dict, period_stats: dict, period_key: str, is_admin: bool = False
 ) -> str:
@@ -8718,8 +8998,9 @@ def format_stats_text(
 
     if base_prop_types:
         for prop_type, count in base_prop_types.items():
-            emoji = PROP_TYPE_EMOJI_MAP.get(prop_type, "🏠")
-            lines.append(f"• {emoji} {prop_type}: {count}")
+            label = _format_stats_prop_type_label(prop_type)
+            emoji = PROP_TYPE_EMOJI_MAP.get(label, "🏠")
+            lines.append(f"• {emoji} {label}: {count}")
 
     lines.extend(
         [
@@ -8733,8 +9014,9 @@ def format_stats_text(
 
     if period_prop_types:
         for prop_type, count in period_prop_types.items():
-            emoji = PROP_TYPE_EMOJI_MAP.get(prop_type, "🏠")
-            lines.append(f"• {emoji} {prop_type}: {count}")
+            label = _format_stats_prop_type_label(prop_type)
+            emoji = PROP_TYPE_EMOJI_MAP.get(label, "🏠")
+            lines.append(f"• {emoji} {label}: {count}")
 
     if period_stats.get("note"):
         lines.append(f"({period_stats['note']})")
