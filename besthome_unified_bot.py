@@ -411,6 +411,7 @@ ui_message_state: Dict[int, int] = {}
 last_ui_message_id: Dict[int, int] = ui_message_state
 last_user_message_id: Dict[int, int] = {}
 IN_ADMIN_CHAT: Dict[int, bool] = {}
+support_sessions: Dict[int, Dict[str, Any]] = {}
 STATE_MAIN_MENU = "STATE_MAIN_MENU"
 STATE_SEARCH_MENU = "STATE_SEARCH_MENU"
 STATE_SEARCH_ACTION = "STATE_SEARCH_ACTION"
@@ -1115,6 +1116,31 @@ def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def get_support_session_state(user_id: int) -> Dict[str, Any]:
+    state = support_sessions.get(user_id)
+    if not state:
+        state = {"active": False, "started_at": None, "last_ui_message_id": None}
+        support_sessions[user_id] = state
+    return state
+
+
+def set_support_session_active(
+    user_id: int, active: bool, started_at: Optional[str] = None
+) -> Dict[str, Any]:
+    state = get_support_session_state(user_id)
+    state["active"] = active
+    state["started_at"] = started_at if active else None
+    return state
+
+
+def set_support_session_last_ui_message_id(
+    user_id: int, message_id: Optional[int]
+) -> Dict[str, Any]:
+    state = get_support_session_state(user_id)
+    state["last_ui_message_id"] = message_id
+    return state
+
+
 def _load_db_update_state_file() -> Dict[str, Any]:
     if not os.path.exists(DB_UPDATE_STATE_PATH):
         return {}
@@ -1281,8 +1307,17 @@ def create_or_get_support_session(
     existing = get_support_session_by_user(user_id)
     if existing:
         display_name = _build_support_display_name(user_id, fallback_name)
+        changed = False
         if display_name and existing.get("display_name") != display_name:
             existing["display_name"] = display_name
+            changed = True
+        if not existing.get("started_at"):
+            existing["started_at"] = existing.get("created_at") or now_utc().isoformat()
+            changed = True
+        if "unread_count" not in existing:
+            existing["unread_count"] = 0
+            changed = True
+        if changed:
             save_support_session(existing)
         return existing
     session_id = uuid.uuid4().hex
@@ -1292,8 +1327,10 @@ def create_or_get_support_session(
         "user_id": user_id,
         "status": SUPPORT_SESSION_STATUS_OPEN,
         "created_at": created_at,
+        "started_at": created_at,
         "last_message_at": created_at,
         "display_name": _build_support_display_name(user_id, fallback_name),
+        "unread_count": 0,
     }
     save_support_session(session)
     return session
@@ -5405,6 +5442,13 @@ def get_support_admin_active_session_id(admin_id: int) -> Optional[str]:
     return support_admin_state.get(admin_id, {}).get("active_session_id")
 
 
+def is_support_session_viewed_by_admin(session_id: str) -> bool:
+    for state in support_admin_state.values():
+        if state.get("active_session_id") == session_id:
+            return True
+    return False
+
+
 def start_support_session(
     user_id: int, fallback_name: Optional[str] = None
 ) -> dict:
@@ -7002,6 +7046,7 @@ def update_ui_message(
             )
         message_id = None
         last_ui_message_id[user_id] = None
+        set_support_session_last_ui_message_id(user_id, None)
     if in_admin_chat and message_id:
         try:
             bot.delete_message(chat_id, message_id)
@@ -7013,6 +7058,7 @@ def update_ui_message(
             )
         message_id = None
         last_ui_message_id[user_id] = None
+        set_support_session_last_ui_message_id(user_id, None)
     if message_id and not in_admin_chat:
         try:
             bot.edit_message_text(
@@ -7023,10 +7069,12 @@ def update_ui_message(
                 parse_mode=parse_mode,
                 disable_web_page_preview=disable_preview,
             )
+            set_support_session_last_ui_message_id(user_id, message_id)
             return message_id
         except Exception as exc:
             if "message is not modified" in str(exc).lower():
                 last_ui_message_id[user_id] = message_id
+                set_support_session_last_ui_message_id(user_id, message_id)
                 return message_id
             logger.debug("update_ui_message edit failed chat_id=%s", chat_id)
     try:
@@ -7038,6 +7086,7 @@ def update_ui_message(
             disable_web_page_preview=disable_preview,
         )
         last_ui_message_id[user_id] = msg.message_id
+        set_support_session_last_ui_message_id(user_id, msg.message_id)
         return msg.message_id
     except Exception:
         logger.exception("update_ui_message send failed chat_id=%s", chat_id)
@@ -7123,7 +7172,7 @@ def build_main_menu(
 
     if not is_admin_user:
         if IN_ADMIN_CHAT.get(chat_id) or is_support_session_open_for_user(chat_id):
-            buttons.append("🔚 Çatı sonlandır")
+            buttons.append("⛔ Çatı sonlandır")
         else:
             buttons.append("💬 Adminlə əlaqə")
         buttons.append("🤝 Dostunu dəvət et")
@@ -9244,7 +9293,7 @@ def open_support_chat_from_menu(message):
     start_support_chat_for_user(message.chat.id, message.from_user)
 
 
-@bot.message_handler(func=lambda m: m.text == "🔚 Çatı sonlandır")
+@bot.message_handler(func=lambda m: m.text in ("⛔ Çatı sonlandır", "🔚 Çatı sonlandır"))
 def close_support_chat_from_menu(message):
     if message.text and message.text.startswith("/"):
         return
@@ -9256,10 +9305,25 @@ def close_support_chat_from_menu(message):
     if session:
         close_support_session(session["session_id"])
     IN_ADMIN_CHAT[message.chat.id] = False
-    bot.send_message(
-        message.chat.id, "✅ Çat bağlandı. Menüyə qayıda bilərsiniz."
-    )
+    set_support_session_active(message.chat.id, False)
+    bot.send_message(message.chat.id, "🔴 Çat sonlandırıldı")
     send_main_menu(message.chat.id, force=True)
+
+
+def delete_last_ui_message_for_support(chat_id: int) -> None:
+    state = get_support_session_state(chat_id)
+    message_id = last_ui_message_id.get(chat_id) or state.get("last_ui_message_id")
+    if message_id:
+        try:
+            bot.delete_message(chat_id, message_id)
+        except Exception:
+            logger.debug(
+                "Failed to delete UI message for support chat_id=%s message_id=%s",
+                chat_id,
+                message_id,
+            )
+    last_ui_message_id[chat_id] = None
+    set_support_session_last_ui_message_id(chat_id, None)
 
 
 def start_support_chat_for_user(chat_id: int, user: types.User):
@@ -9273,18 +9337,19 @@ def start_support_chat_for_user(chat_id: int, user: types.User):
         fallback_name=(f"{user.first_name or ''} {user.last_name or ''}").strip()
         or user.username,
     )
-    if existing_session:
-        bot.send_message(
-            chat_id,
-            "💬 Aktiv söhbətiniz davam edir\n\n"
-            "Adminlə olan əvvəlki yazışmanı buradan davam edə bilərsiniz.\n"
-            "Mesajınızı yazın 👇",
-        )
-        return
-    notify_admins_new_support_session(session)
+    delete_last_ui_message_for_support(chat_id)
+    set_support_session_active(
+        chat_id,
+        True,
+        session.get("started_at")
+        or session.get("created_at")
+        or now_utc().isoformat(),
+    )
+    if not existing_session:
+        notify_admins_new_support_session(session)
     bot.send_message(
         chat_id,
-        "💬 Online dəstək aktivdir\n\n"
+        "🟢 Online dəstək aktivdir\n\n"
         "Siz indi adminlə birbaşa bot daxilində əlaqə saxlayırsınız.\n\n"
         "Buradan:\n"
         "• Mətn yaza bilərsiniz\n"
@@ -9292,6 +9357,13 @@ def start_support_chat_for_user(chat_id: int, user: types.User):
         "• 📎 Fayl və şəkil göndərə bilərsiniz\n\n"
         "Suallarınızı yazın — admin real vaxtda cavab verəcək.",
     )
+    kb = build_main_menu(
+        chat_id,
+        is_admin(chat_id),
+        has_customer_requests_access(chat_id),
+        should_show_bonus_button(chat_id),
+    )
+    send_with_reply_keyboard(chat_id, "\u2063", kb)
 
 
 @bot.callback_query_handler(func=lambda c: c.data in ("open_pay_menu", "ui_payment_menu"))
@@ -16661,7 +16733,11 @@ def show_inactive_users_summary(
 
 def _format_support_session_label(session: dict) -> str:
     name = session.get("display_name") or f"User {session.get('user_id')}"
-    return f"{name} — ID {session.get('user_id')}"
+    label = f"{name} — ID {session.get('user_id')}"
+    unread_count = int(session.get("unread_count") or 0)
+    if unread_count > 0:
+        label = f"{label} • 🔴 {unread_count}"
+    return label
 
 
 def build_support_sessions_list_markup() -> types.InlineKeyboardMarkup:
@@ -16697,14 +16773,29 @@ def format_support_sessions_text() -> str:
         return "📩 Açıq sorğular\n────────────────────\n❌ Açıq sorğu yoxdur."
     lines = ["📩 Açıq sorğular", "────────────────────"]
     for session in sessions:
-        lines.append(f"• {_format_support_session_label(session)}")
+        started_at = format_display_time(
+            session.get("started_at") or session.get("created_at")
+        )
+        unread_count = int(session.get("unread_count") or 0)
+        name = session.get("display_name") or f"User {session.get('user_id')}"
+        lines.append(
+            f"• {name} — ID {session.get('user_id')} | 🕒 {started_at} | 🔴 {unread_count}"
+        )
     return "\n".join(lines)
 
 
 def format_support_chat_header(session: dict) -> str:
     name = session.get("display_name") or f"User {session.get('user_id')}"
     status = (session.get("status") or SUPPORT_SESSION_STATUS_OPEN).upper()
-    return f"💬 Çat — {name}\nID: {session.get('user_id')}\nStatus: {status}"
+    started_at = format_display_time(session.get("started_at") or session.get("created_at"))
+    unread_count = int(session.get("unread_count") or 0)
+    return (
+        f"💬 Çat — {name}\n"
+        f"ID: {session.get('user_id')}\n"
+        f"Status: {status}\n"
+        f"Başlama: {started_at}\n"
+        f"Oxunmamış: {unread_count}"
+    )
 
 
 def show_support_sessions_list(chat_id: int, message: Optional[types.Message] = None):
@@ -16732,6 +16823,9 @@ def show_support_sessions_list(chat_id: int, message: Optional[types.Message] = 
 def show_support_chat_view(
     chat_id: int, session: dict, message: Optional[types.Message] = None
 ):
+    if session.get("unread_count"):
+        session["unread_count"] = 0
+        save_support_session(session)
     text = format_support_chat_header(session)
     mk = build_support_chat_view_markup(session["session_id"])
     if message:
@@ -17023,6 +17117,7 @@ def cb_support_chat_admin(c):
         session = close_support_session(session_id)
         if session and session.get("user_id"):
             IN_ADMIN_CHAT[session["user_id"]] = False
+            set_support_session_active(session["user_id"], False)
             bot.send_message(
                 session["user_id"],
                 "❌ Çat bağlandı. Yeni sorğu üçün 💬 Adminlə əlaqə seçin.",
@@ -24894,6 +24989,7 @@ def support_user_message_router(message):
     if message.content_type == "text" and message.text and message.text.startswith("/"):
         return
     IN_ADMIN_CHAT[message.chat.id] = True
+    set_support_session_active(message.chat.id, True)
     session = get_support_session_by_user(message.chat.id, SUPPORT_SESSION_STATUS_OPEN)
     if not session:
         return
@@ -24902,6 +24998,9 @@ def support_user_message_router(message):
     ).strip() or message.from_user.username
     if display_name and session.get("display_name") != display_name:
         session["display_name"] = display_name
+        save_support_session(session)
+    if not is_support_session_viewed_by_admin(session["session_id"]):
+        session["unread_count"] = int(session.get("unread_count") or 0) + 1
         save_support_session(session)
     touch_support_session(session["session_id"])
     notify_admins_support_incoming(session, message)
