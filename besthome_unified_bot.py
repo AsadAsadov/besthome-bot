@@ -335,8 +335,7 @@ def handle_menu(message):
 
 @bot.message_handler(content_types=["web_app_data"])
 def handle_web_app_data(message):
-    chat_id = message.chat.id
-    restore_reply_keyboard(chat_id)
+    return
 
 
 def handle_start_attribution_and_demo(message, start_arg: str):
@@ -409,6 +408,13 @@ UI_CONTEXT_ADMIN = "browsing_admin_users"
 ui_context_state: Dict[int, str] = defaultdict(lambda: UI_CONTEXT_MAIN)
 ui_message_state: Dict[int, int] = {}
 last_ui_message_id: Dict[int, int] = ui_message_state
+STATE_MAIN_MENU = "STATE_MAIN_MENU"
+STATE_SEARCH_MENU = "STATE_SEARCH_MENU"
+STATE_SEARCH_ACTION = "STATE_SEARCH_ACTION"
+STATE_ADMIN_MENU = "STATE_ADMIN_MENU"
+STATE_ADMIN_ACTION = "STATE_ADMIN_ACTION"
+navigation_state: Dict[int, str] = defaultdict(lambda: STATE_MAIN_MENU)
+search_menu_active: Dict[int, bool] = defaultdict(bool)
 search_reminder_shown = set()  # Session-level reminder flag
 session_interactions = {}
 db_update_state_lock = threading.Lock()
@@ -5558,10 +5564,7 @@ def reset_search_state(chat_id: int):
         and state.get("mode") == "structured"
         and state.get("awaiting_floor_range")
     ):
-        try:
-            bot.send_message(chat_id, "↩️ Filter mərhələsi ləğv edildi.")
-        except:
-            pass
+        pass
     search_state.pop(chat_id, None)
 
 
@@ -6231,7 +6234,7 @@ def build_listing_navigation_keyboard(
         types.InlineKeyboardButton("⏭ +5", callback_data="nav:+5"),
         types.InlineKeyboardButton("⏮ -5", callback_data="nav:-5"),
     )
-    mk.add(types.InlineKeyboardButton("🏠 Əsas menyu", callback_data="nav:home"))
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="nav:back"))
     return mk
 
 
@@ -6903,9 +6906,6 @@ def send_logo_if_exists(chat_id: int):
 
 
 MENU_REFRESH_BUTTON = "🔄 Botu yenilə"
-MENU_VISIBILITY_HINT_TEXT = "ℹ️ Əsas menyu görünmür?\n" "➡️ /start yazın."
-MENU_VISIBILITY_HINT_COOLDOWN_SECONDS = 300
-menu_visibility_hint_last_sent = {}
 STATISTICS_CACHE_TTL_SECONDS = 60
 statistics_cache: Dict[str, Dict[str, Any]] = {}
 MARKET_PULSE_CACHE_TTL_SECONDS = 300
@@ -6919,15 +6919,6 @@ def send_refresh_button(chat_id: int):
     mk = types.InlineKeyboardMarkup()
     mk.add(types.InlineKeyboardButton(MENU_REFRESH_BUTTON, callback_data="bot_refresh"))
     bot.send_message(chat_id, MENU_REFRESH_BUTTON, reply_markup=mk)
-
-
-def send_menu_visibility_hint(chat_id: int):
-    now = time.time()
-    last_ts = menu_visibility_hint_last_sent.get(chat_id, 0)
-    if now - last_ts < MENU_VISIBILITY_HINT_COOLDOWN_SECONDS:
-        return
-    menu_visibility_hint_last_sent[chat_id] = now
-    bot.send_message(chat_id, MENU_VISIBILITY_HINT_TEXT)
 
 
 def recover_main_menu(
@@ -6965,7 +6956,6 @@ def send_with_reply_keyboard(
         parse_mode=parse_mode,
         disable_web_page_preview=disable_preview,
     )
-    send_menu_visibility_hint(chat_id)
 
 
 def delete_user_command_message(message: types.Message) -> None:
@@ -7039,7 +7029,10 @@ def update_ui_message(
                 disable_web_page_preview=disable_preview,
             )
             edited = True
-        except Exception:
+        except Exception as exc:
+            if "message is not modified" in str(exc).lower():
+                last_ui_message_id[user_id] = message_id
+                return message_id
             logger.debug("update_ui_message edit text failed chat_id=%s", chat_id)
         if not edited:
             try:
@@ -7049,7 +7042,10 @@ def update_ui_message(
                     reply_markup=keyboard,
                 )
                 edited = True
-            except Exception:
+            except Exception as exc:
+                if "message is not modified" in str(exc).lower():
+                    last_ui_message_id[user_id] = message_id
+                    return message_id
                 logger.debug("update_ui_message edit markup failed chat_id=%s", chat_id)
         if edited:
             last_ui_message_id[user_id] = message_id
@@ -7085,6 +7081,35 @@ def send_or_edit_ui_message(
         parse_mode=parse_mode,
         disable_preview=disable_preview,
     )
+
+
+def set_navigation_state(chat_id: int, state: str) -> None:
+    navigation_state[chat_id] = state
+
+
+def get_navigation_state(chat_id: int) -> str:
+    return navigation_state.get(chat_id, STATE_MAIN_MENU)
+
+
+def set_search_menu_active(chat_id: int, active: bool) -> None:
+    search_menu_active[chat_id] = active
+
+
+def is_search_menu_active(chat_id: int) -> bool:
+    return search_menu_active.get(chat_id, False)
+
+
+def return_to_previous_menu(chat_id: int) -> None:
+    nav_state = get_navigation_state(chat_id)
+    if nav_state in {STATE_SEARCH_MENU, STATE_SEARCH_ACTION} or is_search_menu_active(
+        chat_id
+    ):
+        send_search_menu(chat_id)
+        return
+    if nav_state in {STATE_ADMIN_MENU, STATE_ADMIN_ACTION}:
+        send_admin_panel(chat_id, page=admin_panel_page_state.get(chat_id, 1))
+        return
+    return_to_main_menu(chat_id)
 
 
 def build_main_menu(
@@ -7139,7 +7164,8 @@ def build_main_menu_inline_markup() -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup()
     mk.row(
         types.InlineKeyboardButton(
-            text="🌐 Əmlak bazası", web_app=types.WebAppInfo(url=EMLAK_BAZASI_URL)
+            text="🌐 Əmlak bazası / Nömrə ilə axtarış",
+            web_app=types.WebAppInfo(url=EMLAK_BAZASI_URL),
         )
     )
     return mk
@@ -7167,18 +7193,21 @@ def send_main_menu(
         )
         return
     set_ui_context(chat_id, UI_CONTEXT_MAIN)
+    set_navigation_state(chat_id, STATE_MAIN_MENU)
+    set_search_menu_active(chat_id, False)
     kb = build_main_menu(
         chat_id,
         is_admin(chat_id),
         has_customer_requests_access(chat_id),
         should_show_bonus_button(chat_id),
     )
-    bot.send_message(
+    update_ui_message(
+        chat_id,
         chat_id,
         text or "🏠 Əsas menyu:",
-        reply_markup=build_main_menu_inline_markup(),
+        build_main_menu_inline_markup(),
         parse_mode=parse_mode,
-        disable_web_page_preview=disable_preview,
+        disable_preview=disable_preview,
     )
     send_with_reply_keyboard(
         chat_id,
@@ -7215,11 +7244,14 @@ def build_search_menu_inline_markup(chat_id: int) -> types.InlineKeyboardMarkup:
                 "🔔 Bildirişlər", callback_data="search_menu:notifs"
             )
         )
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="search_menu:back"))
     return mk
 
 
 def send_search_menu(chat_id: int):
     mk = build_search_menu_inline_markup(chat_id)
+    set_navigation_state(chat_id, STATE_SEARCH_MENU)
+    set_search_menu_active(chat_id, True)
     send_or_edit_ui_message(chat_id, "🔎 Axtarış menyusu:", mk)
 
 
@@ -8780,7 +8812,6 @@ def handle_request_type_selection(message):
         "📍 Rayon / ərazini seçin və ya yazın:",
         reply_markup=build_request_rayon_keyboard(),
     )
-    send_menu_visibility_hint(chat_id)
 
 
 @bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "rayon")
@@ -8805,7 +8836,6 @@ def handle_request_rayon(message):
         "🚪 Otaq sayını seçin və ya yazın:",
         reply_markup=build_request_rooms_keyboard(),
     )
-    send_menu_visibility_hint(chat_id)
 
 
 @bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "rooms")
@@ -10335,6 +10365,7 @@ def show_top_viewed(message):
         return
     chat_id = message.chat.id
     reset_search_state(chat_id)
+    set_navigation_state(chat_id, STATE_ADMIN_ACTION)
     send_paginated_results(chat_id, "topviews", params={"days": 7}, page=1)
 
 
@@ -10363,6 +10394,11 @@ def cb_search_menu(c):
     if c.message:
         last_ui_message_id[chat_id] = c.message.message_id
     action = c.data.split(":", 1)[1]
+    if action == "back":
+        set_search_menu_active(chat_id, False)
+        return_to_main_menu(chat_id)
+        return
+    set_navigation_state(chat_id, STATE_SEARCH_ACTION)
     if action == "sale":
         handle_structured_search_menu(chat_id, "sat")
     elif action == "rent":
@@ -10398,7 +10434,7 @@ def return_to_main_menu(message):
     reset_search_state(chat_id)
     reset_user_state(chat_id)
     set_ui_context(chat_id, UI_CONTEXT_MAIN)
-    restore_reply_keyboard(chat_id, "🏠 Əsas menyu")
+    return_to_previous_menu(chat_id)
 
 
 def prompt_today_operation(chat_id: int):
@@ -10636,6 +10672,8 @@ def start_structured_search_from_menu(chat_id: int, op_code: str):
 def handle_structured_search_menu(chat_id: int, op_code: str):
     if not check_subscription(chat_id):
         return
+    set_navigation_state(chat_id, STATE_SEARCH_ACTION)
+    set_search_menu_active(chat_id, True)
     if not check_limit(chat_id, "structured", 200):
         update_ui_message(
             chat_id,
@@ -10650,6 +10688,8 @@ def handle_structured_search_menu(chat_id: int, op_code: str):
 def handle_keyword_search_menu(chat_id: int):
     if not check_subscription(chat_id):
         return
+    set_navigation_state(chat_id, STATE_SEARCH_ACTION)
+    set_search_menu_active(chat_id, True)
     if not check_limit(chat_id, "keyword", 30):
         update_ui_message(
             chat_id,
@@ -10671,6 +10711,8 @@ def handle_keyword_search_menu(chat_id: int):
 def handle_phone_search_menu(chat_id: int):
     if not check_subscription(chat_id):
         return
+    set_navigation_state(chat_id, STATE_SEARCH_ACTION)
+    set_search_menu_active(chat_id, True)
     if not check_limit(chat_id, "phone", 50):
         update_ui_message(
             chat_id,
@@ -10692,6 +10734,8 @@ def handle_phone_search_menu(chat_id: int):
 def handle_favorites_menu(chat_id: int):
     if not check_subscription(chat_id):
         return
+    set_navigation_state(chat_id, STATE_SEARCH_ACTION)
+    set_search_menu_active(chat_id, True)
     reset_search_state(chat_id)
     send_paginated_results(chat_id, "favorites", params={}, page=1)
 
@@ -10701,6 +10745,8 @@ def handle_notifications_menu(chat_id: int):
         return
     if not check_subscription(chat_id):
         return
+    set_navigation_state(chat_id, STATE_SEARCH_ACTION)
+    set_search_menu_active(chat_id, True)
     show_notifications_menu(chat_id)
 
 
@@ -10904,6 +10950,8 @@ def return_to_main_menu(chat_id: int):
     reset_user_state(chat_id)
     set_user_state(chat_id, "MAIN")
     set_ui_context(chat_id, UI_CONTEXT_MAIN)
+    set_navigation_state(chat_id, STATE_MAIN_MENU)
+    set_search_menu_active(chat_id, False)
     if is_admin(chat_id):
         send_main_menu(chat_id, force=True)
     else:
@@ -10951,6 +10999,8 @@ def show_notifications_menu(chat_id: int, message=None):
     if not is_feature_enabled("notifications", chat_id):
         update_ui_message(chat_id, chat_id, FEATURE_DISABLED_MESSAGE, None)
         return
+    set_navigation_state(chat_id, STATE_SEARCH_ACTION)
+    set_search_menu_active(chat_id, True)
     mk = types.InlineKeyboardMarkup()
     mk.add(
         types.InlineKeyboardButton(
@@ -12551,7 +12601,7 @@ def cb_notifications_back(c):
         return
     if not ensure_allowed_cb(c):
         return
-    return_to_main_menu(c.message.chat.id)
+    return_to_previous_menu(c.message.chat.id)
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -15501,12 +15551,12 @@ def cb_listing_nav(c):
 
     action = c.data.split(":", 1)[1]
     deltas = {"next": 1, "prev": -1, "+5": 5, "-5": -5}
-    if action == "home":
+    if action == "back":
         session["timestamp"] = time.time()
         reset_user_state(chat_id)
-        restore_reply_keyboard(chat_id, "🏠 Əsas menyu")
+        return_to_previous_menu(chat_id)
         try:
-            bot.answer_callback_query(c.id, "Əsas menyu")
+            bot.answer_callback_query(c.id)
         except Exception:
             pass
         return
@@ -15698,7 +15748,7 @@ def structured_go_back(chat_id, message=None):
         reset_search_state(chat_id)
         if message:
             last_ui_message_id[chat_id] = message.message_id
-        update_ui_message(chat_id, chat_id, "❌ Filtr ləğv edildi.", None)
+        return_to_previous_menu(chat_id)
         return
 
     prev = hist.pop()
@@ -15747,7 +15797,7 @@ def cb_structured(c):
     if action == "cancel":
         reset_search_state(chat_id)
         last_ui_message_id[chat_id] = c.message.message_id
-        update_ui_message(chat_id, chat_id, "❌ Filtr ləğv edildi.", None)
+        return_to_previous_menu(chat_id)
         return
 
     if action == "bk":
@@ -16673,6 +16723,8 @@ def send_admin_panel(
 ):
     mk = build_admin_panel_keyboard(chat_id, page)
     set_user_state(chat_id, "ADMIN")
+    set_navigation_state(chat_id, STATE_ADMIN_MENU)
+    set_search_menu_active(chat_id, False)
     if message:
         last_ui_message_id[chat_id] = message.message_id
     update_ui_message(chat_id, chat_id, text, mk)
@@ -16728,6 +16780,7 @@ def _handle_admin_panel_action(
 ):
     if message:
         last_ui_message_id[chat_id] = message.message_id
+    set_navigation_state(chat_id, STATE_ADMIN_ACTION)
     if action_text in {
         TEXTS_AZ["admin_panel_customer_requests"],
         TEXTS_AZ["admin_panel_customer_requests_access"],
@@ -24869,8 +24922,7 @@ def guard_idle_messages(message):
         return
     bot.send_message(
         message.chat.id,
-        "Əvvəlcə menudan seçim edin, sonra yazın.\n"
-        "Əgər menyu görünmürsə /start yazın, menyu açılacaq.",
+        "Əvvəlcə menudan seçim edin, sonra yazın.",
     )
 
 
