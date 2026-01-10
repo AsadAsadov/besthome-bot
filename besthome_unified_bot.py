@@ -9447,11 +9447,6 @@ def close_support_chat_for_user(chat_id: int) -> None:
             last_message_from=thread.get("last_message_from"),
         )
     set_support_session_active(chat_id, False)
-    bot.send_message(
-        chat_id,
-        "🔴 Dəstək bağlandı.",
-    )
-    send_main_menu(chat_id, force=True)
 
 
 def delete_last_ui_message_for_support(chat_id: int) -> None:
@@ -9496,32 +9491,10 @@ def start_support_chat_for_user(chat_id: int, user: types.User):
         True,
         now_ts,
     )
-    bot.send_message(
-        chat_id,
-        "🟢 Dəstək aktivdir. Mesajınızı yazın.\n"
-        "İstənilən vaxt menyudan istifadə edə bilərsiniz.",
-    )
 
 
 def send_support_sent_toast(chat_id: int) -> None:
-    try:
-        msg = bot.send_message(chat_id, "📨 Mesajınız dəstəyə göndərildi.")
-    except Exception:
-        logger.exception("Failed to send support confirmation chat_id=%s", chat_id)
-        return
-
-    def _cleanup():
-        time.sleep(2.5)
-        try:
-            bot.delete_message(chat_id, msg.message_id)
-        except Exception:
-            logger.debug(
-                "Failed to delete support confirmation chat_id=%s message_id=%s",
-                chat_id,
-                msg.message_id,
-            )
-
-    threading.Thread(target=_cleanup, daemon=True).start()
+    return
 
 
 def send_support_reply_notification(chat_id: int) -> None:
@@ -9540,8 +9513,9 @@ def format_user_support_inbox_text(messages: List[dict]) -> str:
     for msg in messages:
         sender = msg.get("sender")
         prefix = "🛠 Dəstək" if sender == "admin" else "👤 Siz"
+        timestamp = format_display_time(msg.get("created_at"))
         text = _truncate_support_text(msg.get("text"), limit=240)
-        lines.append(f"{prefix}: {text}")
+        lines.append(f"[{timestamp}]\n{prefix}:\n{text}")
     return f"{header}\n\n" + "\n".join(lines)
 
 
@@ -17599,10 +17573,12 @@ def cb_support_user_inbox(c):
         return
     if action == "reply":
         start_support_chat_for_user(chat_id, c.from_user)
+        show_user_support_inbox(chat_id)
         safe_answer_callback_query(c.id)
         return
     if action == "end":
         close_support_chat_for_user(chat_id)
+        show_user_support_inbox(chat_id)
         safe_answer_callback_query(c.id)
         return
     if action == "back":
@@ -25520,10 +25496,17 @@ def support_admin_message_router(message):
     reply_user_id = get_support_admin_reply_user_id(message.chat.id)
     if not reply_user_id:
         return
+    try:
+        bot.delete_message(message.chat.id, message.message_id)
+    except Exception:
+        logger.debug(
+            "Failed to delete support admin message chat_id=%s message_id=%s",
+            message.chat.id,
+            message.message_id,
+        )
     thread = get_support_thread_by_user(reply_user_id)
     if not thread:
         _set_support_admin_state(message.chat.id, reply_to_user_id=None)
-        bot.send_message(message.chat.id, "Thread not found")
         return
     add_support_message(thread["id"], "admin", message.text)
     update_support_thread(
