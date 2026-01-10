@@ -6493,15 +6493,19 @@ def show_loading_message(chat_id: int, edit_target=None):
     text = "🔎 Elanlar axtarılır... zəhmət olmasa gözləyin."
     if edit_target:
         try:
-            bot.edit_message_text(
-                text, chat_id=edit_target[0], message_id=edit_target[1]
+            last_ui_message_id[chat_id] = edit_target[1]
+            msg_id = update_ui_message(
+                chat_id,
+                edit_target[0],
+                text,
+                None,
             )
-            return edit_target
+            return (edit_target[0], msg_id) if msg_id else edit_target
         except Exception:
             pass
     try:
-        msg = bot.send_message(chat_id, text)
-        return (msg.chat.id, msg.message_id)
+        msg_id = update_ui_message(chat_id, chat_id, text, None)
+        return (chat_id, msg_id) if msg_id else None
     except Exception:
         return None
 
@@ -6510,8 +6514,9 @@ def replace_loading_message(ref, text):
     if not ref:
         return False
     try:
-        bot.edit_message_text(text, chat_id=ref[0], message_id=ref[1])
-        return True
+        last_ui_message_id[ref[0]] = ref[1]
+        msg_id = update_ui_message(ref[0], ref[0], text, None)
+        return bool(msg_id)
     except Exception:
         return False
 
@@ -10238,6 +10243,7 @@ def show_favorites(message):
     if message.text and message.text.startswith('/'):
         return
 
+    delete_user_command_message(message)
     handle_favorites_menu(message.chat.id)
 
 
@@ -10354,6 +10360,8 @@ def cb_search_menu(c):
     if not ensure_feature_available_cb(c, "main_search"):
         return
     chat_id = c.message.chat.id if c.message else c.from_user.id
+    if c.message:
+        last_ui_message_id[chat_id] = c.message.message_id
     action = c.data.split(":", 1)[1]
     if action == "sale":
         handle_structured_search_menu(chat_id, "sat")
@@ -10629,7 +10637,12 @@ def handle_structured_search_menu(chat_id: int, op_code: str):
     if not check_subscription(chat_id):
         return
     if not check_limit(chat_id, "structured", 200):
-        bot.send_message(chat_id, "Günlük filtrli axtarış limitiniz bitib.")
+        update_ui_message(
+            chat_id,
+            chat_id,
+            "Günlük filtrli axtarış limitiniz bitib.",
+            build_search_menu_inline_markup(chat_id),
+        )
         return
     start_structured_search_from_menu(chat_id, op_code)
 
@@ -10638,13 +10651,19 @@ def handle_keyword_search_menu(chat_id: int):
     if not check_subscription(chat_id):
         return
     if not check_limit(chat_id, "keyword", 30):
-        bot.send_message(chat_id, "Günlük açar sözlə axtarış limitiniz bitib.")
+        update_ui_message(
+            chat_id,
+            chat_id,
+            "Günlük açar sözlə axtarış limitiniz bitib.",
+            build_search_menu_inline_markup(chat_id),
+        )
         return
     reset_search_state(chat_id)
     search_state[chat_id] = {
         "mode": "keyword",
         "operation": None,
         "date_selected": False,
+        "step": "WAITING_FOR_KEYWORD",
     }
     send_keyword_operation_prompt(chat_id)
 
@@ -10653,10 +10672,21 @@ def handle_phone_search_menu(chat_id: int):
     if not check_subscription(chat_id):
         return
     if not check_limit(chat_id, "phone", 50):
-        bot.send_message(chat_id, "Günlük nömrə ilə axtarış limitiniz bitib.")
+        update_ui_message(
+            chat_id,
+            chat_id,
+            "Günlük nömrə ilə axtarış limitiniz bitib.",
+            build_search_menu_inline_markup(chat_id),
+        )
         return
-    msg = bot.send_message(chat_id, "☎️ Axtarmaq istədiyiniz nömrəni yazın:")
-    bot.register_next_step_handler(msg, phone_search_handler)
+    reset_search_state(chat_id)
+    search_state[chat_id] = {"mode": "phone", "step": "WAITING_FOR_PHONE"}
+    update_ui_message(
+        chat_id,
+        chat_id,
+        "Telefon nömrəsini daxil edin…",
+        None,
+    )
 
 
 def handle_favorites_menu(chat_id: int):
@@ -10679,6 +10709,7 @@ def structured_search_from_menu(message):
     if message.text and message.text.startswith('/'):
         return
 
+    delete_user_command_message(message)
     op_code = "sat" if message.text == "🏠 Satılır" else "kir"
     handle_structured_search_menu(message.chat.id, op_code)
 
@@ -10688,6 +10719,7 @@ def keyword_search_from_menu(message):
     if message.text and message.text.startswith('/'):
         return
 
+    delete_user_command_message(message)
     handle_keyword_search_menu(message.chat.id)
 
 
@@ -10696,6 +10728,7 @@ def phone_search_from_menu(message):
     if message.text and message.text.startswith('/'):
         return
 
+    delete_user_command_message(message)
     handle_phone_search_menu(message.chat.id)
 
 
@@ -10916,7 +10949,7 @@ def format_saved_search_entry(row: dict) -> str:
 
 def show_notifications_menu(chat_id: int, message=None):
     if not is_feature_enabled("notifications", chat_id):
-        bot.send_message(chat_id, FEATURE_DISABLED_MESSAGE)
+        update_ui_message(chat_id, chat_id, FEATURE_DISABLED_MESSAGE, None)
         return
     mk = types.InlineKeyboardMarkup()
     mk.add(
@@ -10931,18 +10964,9 @@ def show_notifications_menu(chat_id: int, message=None):
     )
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="notif_back"))
     text = "🔔 Bildirişlər"
-    try:
-        if message:
-            bot.edit_message_text(
-                text,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-        else:
-            bot.send_message(chat_id, text, reply_markup=mk)
-    except Exception:
-        pass
+    if message:
+        last_ui_message_id[chat_id] = message.message_id
+    update_ui_message(chat_id, chat_id, text, mk)
 
 
 def format_notification_listing_line(idx: int, listing: dict) -> str:
@@ -12981,10 +13005,11 @@ def send_keyword_operation_prompt(chat_id: int):
         types.InlineKeyboardButton("🏠 Satılır", callback_data="kwop|sale"),
         types.InlineKeyboardButton("🏢 Kirayə verilir", callback_data="kwop|rent"),
     )
-    bot.send_message(
+    update_ui_message(
         chat_id,
-        "Əməliyyat növünü seçin və sonra açar sözü yazın:",
-        reply_markup=mk,
+        chat_id,
+        "Açar sözü daxil edin…",
+        mk,
     )
 
 
@@ -13004,17 +13029,8 @@ def send_keyword_date_prompt(chat_id: int, message=None):
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kwdr|back"))
     text = "📆 Tarix aralığını seçin:"
     if message:
-        try:
-            bot.edit_message_text(
-                text,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-            return
-        except Exception:
-            pass
-    bot.send_message(chat_id, text, reply_markup=mk)
+        last_ui_message_id[chat_id] = message.message_id
+    update_ui_message(chat_id, chat_id, text, mk)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("kwop|"))
@@ -13024,38 +13040,31 @@ def cb_keyword_operation(c):
         return
     action = c.data.split("|")[1]
     chat_id = c.message.chat.id
+    last_ui_message_id[chat_id] = c.message.message_id
 
     if action == "back":
         search_state[chat_id] = {
             "mode": "keyword",
             "operation": None,
             "date_selected": False,
+            "step": "WAITING_FOR_KEYWORD",
         }
         send_keyword_operation_prompt(chat_id)
-        try:
-            bot.answer_callback_query(c.id)
-        except:
-            pass
         return
 
     if action not in ("sale", "rent"):
-        try:
-            bot.answer_callback_query(c.id, "Naməlum seçim")
-        except:
-            pass
         return
 
     st = search_state.get(chat_id, {})
     st.update(
-        {"mode": "keyword", "operation": normalize_operation_value(action) or action}
+        {
+            "mode": "keyword",
+            "operation": normalize_operation_value(action) or action,
+            "step": "WAITING_FOR_KEYWORD",
+        }
     )
     search_state[chat_id] = st
     send_keyword_date_prompt(chat_id, c.message)
-
-    try:
-        bot.answer_callback_query(c.id)
-    except:
-        pass
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("kwdr|"))
@@ -13065,40 +13074,35 @@ def cb_keyword_date_range(c):
         return
     action = c.data.split("|")[1]
     chat_id = c.message.chat.id
+    last_ui_message_id[chat_id] = c.message.message_id
 
     if action == "back":
         search_state[chat_id] = {
             "mode": "keyword",
             "operation": None,
             "date_selected": False,
+            "step": "WAITING_FOR_KEYWORD",
         }
         send_keyword_operation_prompt(chat_id)
-        try:
-            bot.answer_callback_query(c.id)
-        except:
-            pass
         return
 
     date_days = DATE_RANGE_DAYS.get(action)
     st = search_state.get(chat_id, {})
-    st.update({"date_days": date_days, "date_selected": True})
+    st.update(
+        {"date_days": date_days, "date_selected": True, "step": "WAITING_FOR_KEYWORD"}
+    )
     search_state[chat_id] = st
 
     mk = types.InlineKeyboardMarkup()
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kwop|back"))
 
-    msg = bot.send_message(
+    update_ui_message(
         chat_id,
-        "🔍 Açar söz və ya bir neçə söz yazın (məs: *yasamal 3 otaqlı 600 azn*):",
+        chat_id,
+        "Açar sözü daxil edin…",
+        mk,
         parse_mode="Markdown",
-        reply_markup=mk,
     )
-    bot.register_next_step_handler(msg, keyword_search_handler)
-
-    try:
-        bot.answer_callback_query(c.id)
-    except:
-        pass
 
 
 # ===== FİLTRLİ AXTARIŞ (STRUCTURED) =====
@@ -13378,17 +13382,8 @@ DATE_RANGE_DAYS = {"d7": 7, "d30": 30, "d60": 60, "d90": 90, "all": None}
 
 def structured_send(chat_id, message, text, markup):
     if message:
-        try:
-            bot.edit_message_text(
-                text,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=markup,
-            )
-            return
-        except Exception:
-            pass
-    bot.send_message(chat_id, text, reply_markup=markup)
+        last_ui_message_id[chat_id] = message.message_id
+    update_ui_message(chat_id, chat_id, text, markup)
 
 
 def structured_push_history(chat_id):
@@ -15272,7 +15267,7 @@ def render_listing_for_user(
             session["current_index"] = max(0, min(idx, len(session["result_ids"]) - 1))
             return render_listing_for_user(chat_id, session.get("session_id"), target_message)
         listing_sessions.pop(chat_id, None)
-        bot.send_message(chat_id, "⚠️ Elan artıq mövcud deyil.")
+        update_ui_message(chat_id, chat_id, "⚠️ Elan artıq mövcud deyil.", None)
         return
 
     progress_text = f"📍 Elan {idx + 1} / {len(refs)}"
@@ -15306,36 +15301,49 @@ def render_listing_for_user(
     session["timestamp"] = time.time()
 
     if session.get("message_id"):
+        last_ui_message_id[chat_id] = session["message_id"]
         if session.get("last_signature") == signature:
             return
         try:
-            bot.edit_message_text(
+            msg_id = update_ui_message(
+                chat_id,
+                chat_id,
                 text,
-                chat_id=chat_id,
-                message_id=session["message_id"],
-                reply_markup=markup,
-                disable_web_page_preview=True,
+                markup,
+                disable_preview=True,
             )
+            if msg_id:
+                session["message_id"] = msg_id
             session["last_signature"] = signature
             return
         except Exception as e:
             if "message is not modified" in str(e):
                 return
             try:
-                msg = bot.send_message(
-                    chat_id, text, reply_markup=markup, disable_web_page_preview=True
+                msg_id = update_ui_message(
+                    chat_id,
+                    chat_id,
+                    text,
+                    markup,
+                    disable_preview=True,
                 )
-                session["message_id"] = msg.message_id
+                if msg_id:
+                    session["message_id"] = msg_id
                 session["last_signature"] = signature
                 return
             except Exception:
                 return
 
     try:
-        msg = bot.send_message(
-            chat_id, text, reply_markup=markup, disable_web_page_preview=True
+        msg_id = update_ui_message(
+            chat_id,
+            chat_id,
+            text,
+            markup,
+            disable_preview=True,
         )
-        session["message_id"] = msg.message_id
+        if msg_id:
+            session["message_id"] = msg_id
         session["last_signature"] = signature
     except Exception:
         session.pop("message_id", None)
@@ -15354,7 +15362,7 @@ def start_listing_session(
     refs, cache = prepare_listing_session_items(items)
     if not refs:
         if not replace_loading_message(loading_ref, "Siyahı boşdur."):
-            bot.send_message(chat_id, "Siyahı boşdur.")
+            update_ui_message(chat_id, chat_id, "Siyahı boşdur.", None)
         return
 
     start_index = max(0, min(start_index, len(refs) - 1))
@@ -15408,7 +15416,7 @@ def send_paginated_results(
         }
     if total == 0:
         if not replace_loading_message(loading_ref, "Siyahı boşdur."):
-            bot.send_message(chat_id, "Siyahı boşdur.")
+            update_ui_message(chat_id, chat_id, "Siyahı boşdur.", None)
         return
 
     total_pages = compute_total_pages(total) if total else 1
@@ -15433,22 +15441,20 @@ def cb_pagination(c):
     if not ensure_allowed_cb(c):
         return
     chat_id = c.message.chat.id
+    last_ui_message_id[chat_id] = c.message.message_id
     st = search_state.get(chat_id)
     if not st:
-        try:
-            bot.answer_callback_query(c.id, "Səhifə tapılmadı.")
-        except Exception:
-            pass
         set_ui_context(chat_id, UI_CONTEXT_MAIN)
-        bot.send_message(chat_id, "⚠️ Axtarış məlumatı tapılmadı. Yeni axtarışa başlayın.")
+        update_ui_message(
+            chat_id,
+            chat_id,
+            "⚠️ Axtarış məlumatı tapılmadı. Yeni axtarışa başlayın.",
+            None,
+        )
         return
 
     action = c.data.split(":", 1)[1]
     if action == "noop":
-        try:
-            bot.answer_callback_query(c.id)
-        except Exception:
-            pass
         return
 
     current_page = st.get("page", 1)
@@ -15470,11 +15476,6 @@ def cb_pagination(c):
         send_paginated_results(
             chat_id, mode=mode, params=params, page=target, show_summary=False
         )
-
-    try:
-        bot.answer_callback_query(c.id)
-    except Exception:
-        pass
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("nav:"))
@@ -15696,16 +15697,8 @@ def structured_go_back(chat_id, message=None):
     if not hist:
         reset_search_state(chat_id)
         if message:
-            try:
-                bot.edit_message_text(
-                    "❌ Filtr ləğv edildi.",
-                    chat_id=message.chat.id,
-                    message_id=message.message_id,
-                )
-            except Exception:
-                bot.send_message(chat_id, "❌ Filtr ləğv edildi.")
-        else:
-            bot.send_message(chat_id, "❌ Filtr ləğv edildi.")
+            last_ui_message_id[chat_id] = message.message_id
+        update_ui_message(chat_id, chat_id, "❌ Filtr ləğv edildi.", None)
         return
 
     prev = hist.pop()
@@ -15738,6 +15731,7 @@ def cb_structured(c):
     parts = c.data.split("|")
     action = parts[1]
     chat_id = c.message.chat.id
+    last_ui_message_id[chat_id] = c.message.message_id
     st = search_state.setdefault(
         chat_id,
         {
@@ -15752,22 +15746,12 @@ def cb_structured(c):
 
     if action == "cancel":
         reset_search_state(chat_id)
-        try:
-            bot.edit_message_text(
-                "❌ Filtr ləğv edildi.",
-                chat_id=c.message.chat.id,
-                message_id=c.message.message_id,
-            )
-        except Exception:
-            bot.send_message(chat_id, "❌ Filtr ləğv edildi.")
+        last_ui_message_id[chat_id] = c.message.message_id
+        update_ui_message(chat_id, chat_id, "❌ Filtr ləğv edildi.", None)
         return
 
     if action == "bk":
         structured_go_back(chat_id, c.message)
-        try:
-            bot.answer_callback_query(c.id)
-        except Exception:
-            pass
         return
 
     if st.get("mode") != "structured":
@@ -15850,10 +15834,11 @@ def cb_structured(c):
         st.setdefault("filters", {})["max_price"] = None
         st["awaiting_price_min"] = True
         st["step"] = "price_min"
-        bot.send_message(
+        update_ui_message(
+            chat_id,
             chat_id,
             "💰 Minimum qiymət yazın (rəqəm ilə):",
-            reply_markup=build_back_reply_keyboard(),
+            build_back_reply_keyboard(),
         )
     elif action == "rm":
         filters = st.setdefault("filters", {})
@@ -15888,11 +15873,9 @@ def cb_structured(c):
         structured_push_history(chat_id)
         st["awaiting_floor_range"] = True
         st["step"] = "floor_manual"
-        bot.send_message(chat_id, "✏️ Mərtəbəni yazın (məs: 3 və ya 1-3):")
-    try:
-        bot.answer_callback_query(c.id)
-    except Exception:
-        pass
+        update_ui_message(
+            chat_id, chat_id, "✏️ Mərtəbəni yazın (məs: 3 və ya 1-3):", None
+        )
 
 
 @bot.message_handler(
@@ -15906,6 +15889,7 @@ def handle_floor_range_input(message):
 
     if not st:
         return
+    delete_user_command_message(message)
 
     txt_clean = _re.sub(r"\s+", "", txt)
 
@@ -15920,10 +15904,14 @@ def handle_floor_range_input(message):
             mn = int(parts[0])
             mx = int(parts[1])
         except Exception:
-            bot.send_message(chat_id, "❌ Yanlış format. Məsələn: 3 və ya 1-2")
+            update_ui_message(
+                chat_id, chat_id, "❌ Yanlış format. Məsələn: 3 və ya 1-2", None
+            )
             return
     else:
-        bot.send_message(chat_id, "❌ Yanlış format. Məsələn: 3 və ya 1-2")
+        update_ui_message(
+            chat_id, chat_id, "❌ Yanlış format. Məsələn: 3 və ya 1-2", None
+        )
         return
 
     st.setdefault("filters", {})["floor_range"] = (mn, mx)
@@ -15942,29 +15930,29 @@ def handle_price_min_input(message):
     text = (message.text or "").strip()
     if not st:
         return
+    delete_user_command_message(message)
     if text == "⬅️ Geri":
         st["awaiting_price_min"] = False
-        bot.send_message(
-            chat_id,
-            "↩️ Qiymət seçiminə qayıdıldı.",
-        )
+        update_ui_message(chat_id, chat_id, "↩️ Qiymət seçiminə qayıdıldı.", None)
         render_price_step(chat_id)
         return
     value = parse_number(text)
     if value is None:
-        bot.send_message(
+        update_ui_message(
+            chat_id,
             chat_id,
             "⚠️ Minimum qiyməti rəqəm ilə yazın.",
-            reply_markup=build_back_reply_keyboard(),
+            build_back_reply_keyboard(),
         )
         return
     st.setdefault("filters", {})["min_price"] = value
     st["awaiting_price_min"] = False
     st["awaiting_price_max"] = True
-    bot.send_message(
+    update_ui_message(
+        chat_id,
         chat_id,
         "💰 Maksimum qiymət yazın (rəqəm ilə):",
-        reply_markup=build_back_reply_keyboard(),
+        build_back_reply_keyboard(),
     )
 
 
@@ -15979,36 +15967,40 @@ def handle_price_max_input(message):
     text = (message.text or "").strip()
     if not st:
         return
+    delete_user_command_message(message)
     if text == "⬅️ Geri":
         st["awaiting_price_max"] = False
         st["awaiting_price_min"] = True
-        bot.send_message(
+        update_ui_message(
+            chat_id,
             chat_id,
             "💰 Minimum qiymət yazın (rəqəm ilə):",
-            reply_markup=build_back_reply_keyboard(),
+            build_back_reply_keyboard(),
         )
         return
     value = parse_number(text)
     if value is None:
-        bot.send_message(
+        update_ui_message(
+            chat_id,
             chat_id,
             "⚠️ Maksimum qiyməti rəqəm ilə yazın.",
-            reply_markup=build_back_reply_keyboard(),
+            build_back_reply_keyboard(),
         )
         return
     min_price = st.get("filters", {}).get("min_price")
     if min_price is not None and value < min_price:
-        bot.send_message(
+        update_ui_message(
+            chat_id,
             chat_id,
             "⚠️ Maksimum qiymət minimumdan kiçik ola bilməz.",
-            reply_markup=build_back_reply_keyboard(),
+            build_back_reply_keyboard(),
         )
         return
     st.setdefault("filters", {})["max_price"] = value
     st["awaiting_price_max"] = False
     st["step"] = "price"
     structured_push_history(chat_id)
-    bot.send_message(chat_id, "✅ Qiymət aralığı seçildi.")
+    update_ui_message(chat_id, chat_id, "✅ Qiymət aralığı seçildi.", None)
     prop = st.get("filters", {}).get("prop")
     if prop == "t":
         perform_structured_search(chat_id, offset=0, edit_msg=None)
@@ -16019,7 +16011,7 @@ def handle_price_max_input(message):
 def perform_structured_search(chat_id, offset=0, edit_msg=None):
     st = search_state.get(chat_id)
     if not st or st.get("mode") != "structured":
-        bot.send_message(chat_id, "Sessiya tapılmadı. Yenidən başlayın.")
+        update_ui_message(chat_id, chat_id, "Sessiya tapılmadı. Yenidən başlayın.", None)
         return
 
     filters = st.get("filters", {})
@@ -16057,17 +16049,30 @@ def perform_structured_search(chat_id, offset=0, edit_msg=None):
 # ===== AÇAR SÖZLƏ AXTARIŞ (paging ilə) =====
 
 
+@bot.message_handler(
+    func=lambda m: search_state.get(m.chat.id, {}).get("step") == "WAITING_FOR_KEYWORD"
+)
+def keyword_search_input(message):
+    keyword_search_handler(message)
+
+
 def keyword_search_handler(message):
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
+    delete_user_command_message(message)
     if not check_limit(chat_id, "keyword", 30):
-        bot.send_message(chat_id, "Günlük açar sözlə axtarış limitiniz bitib.")
+        update_ui_message(
+            chat_id,
+            chat_id,
+            "Günlük açar sözlə axtarış limitiniz bitib.",
+            build_search_menu_inline_markup(chat_id),
+        )
         return
 
     text = normalize_text(message.text or "")
     if not text:
-        bot.send_message(chat_id, "Boş sorğu göndərdiniz.")
+        update_ui_message(chat_id, chat_id, "Boş sorğu göndərdiniz.", None)
         return
 
     st = search_state.get(chat_id, {})
@@ -16090,6 +16095,7 @@ def keyword_search_handler(message):
     words = [w for w in text.split() if w]
 
     inc_limit(chat_id, "keyword", 1)
+    st["step"] = "results"
     send_paginated_results(
         chat_id,
         mode="keyword",
@@ -16140,24 +16146,44 @@ def smart_search_handler(message):
 # ===== NÖMRƏ İLƏ AXTARIŞ =====
 
 
+@bot.message_handler(
+    func=lambda m: search_state.get(m.chat.id, {}).get("step") == "WAITING_FOR_PHONE"
+)
+def phone_search_input(message):
+    phone_search_handler(message)
+
+
 def phone_search_handler(message):
     if not ensure_allowed(message):
         return
     chat_id = message.chat.id
+    delete_user_command_message(message)
     if not check_limit(chat_id, "phone", 50):
-        bot.send_message(chat_id, "Günlük nömrə ilə axtarış limitiniz bitib.")
+        update_ui_message(
+            chat_id,
+            chat_id,
+            "Günlük nömrə ilə axtarış limitiniz bitib.",
+            build_search_menu_inline_markup(chat_id),
+        )
         return
 
     digits = "".join(ch for ch in (message.text or "") if ch.isdigit())
     raw = digits[-9:] if len(digits) > 9 else digits
     if len(raw) < 7:
-        bot.send_message(chat_id, "⚠️ Zəhmət olmasa düzgün nömrə yazın (min. 7 rəqəm).")
+        update_ui_message(
+            chat_id,
+            chat_id,
+            "⚠️ Zəhmət olmasa düzgün nömrə yazın (min. 7 rəqəm).",
+            None,
+        )
         return
 
     loading_ref = show_loading_message(chat_id)
     log_search_event(chat_id, "phone", query_text=raw)
 
     inc_limit(chat_id, "phone", 1)
+    st = search_state.setdefault(chat_id, {})
+    st["step"] = "results"
     send_paginated_results(
         chat_id,
         mode="phone",
