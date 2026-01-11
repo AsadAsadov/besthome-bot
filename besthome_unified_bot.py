@@ -23627,12 +23627,14 @@ def broadcast_bot_update(
         return
 
     message_text = (
-        "🚀 Best Home Əmlak Axtarış Botu yeniləndi! (v10)\n\n"
-        "Yeniliklər:\n"
-        "🎁 Şansını sına — 3 gündə 1 dəfə pulsuz gün qazan\n"
-        "🔍 Ağıllı axtarış — satılan və kirayə evlər\n"
-        "💳 Kartla ödəniş — çox yaxında aktiv olacaq\n\n"
-        "Yenilikləri görmək üçün yenilə düyməsinə kliklə 👇"
+        "🚀 Bot yeniləndi!\n\n"
+        "Artıq mesajlar alt-alta yığılmır —\n"
+        "bütün əməliyyatlar tək ekranda, daha səliqəli görünür. ✨\n\n"
+        "📊 Yeni elanlar\n"
+        "🆕 Yeni funksiyalar\n"
+        "⚡ Daha stabil işləmə\n\n"
+        "Hamısını görmək üçün botu yeniləyin 🔄\n"
+        "və yeniliklərlə tanış olun!"
     )
 
     mk = types.InlineKeyboardMarkup()
