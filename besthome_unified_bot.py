@@ -7307,8 +7307,6 @@ def build_main_menu(
 
     if not is_admin_user:
         buttons.append("💬 Adminlə əlaqə")
-        if is_user_support_active(chat_id):
-            buttons.append("⛔ Çatı sonlandır")
         buttons.append("🤝 Dostunu dəvət et")
 
     if is_feature_enabled("about", chat_id):
@@ -9428,16 +9426,6 @@ def open_support_chat_from_menu(message):
     toggle_support_inbox(message.chat.id, message.from_user)
 
 
-@bot.message_handler(func=lambda m: m.text in ("⛔ Çatı sonlandır", "🔚 Çatı sonlandır"))
-def close_support_chat_from_menu(message):
-    if message.text and message.text.startswith("/"):
-        return
-    if is_admin(message.chat.id):
-        return
-    delete_user_command_message(message)
-    close_support_session(message.chat.id)
-
-
 def close_support_chat_for_user(chat_id: int) -> None:
     now_ts = now_utc().isoformat()
     thread = get_support_thread_by_user(chat_id)
@@ -9488,36 +9476,27 @@ def end_support_session_from_admin(chat_id: int) -> None:
     )
 
 
-def is_main_menu_button_text(chat_id: int, text: Optional[str]) -> bool:
-    if not text:
-        return False
-    kb = build_main_menu(
-        chat_id,
-        is_admin(chat_id),
-        has_customer_requests_access(chat_id),
-        should_show_bonus_button(chat_id),
-    )
-    for row in kb.keyboard:
-        for button in row:
-            label = None
-            if isinstance(button, dict):
-                label = button.get("text")
-            else:
-                label = getattr(button, "text", None)
-            if label is None:
-                label = str(button)
-            if label == text:
-                return True
-    return False
-
-
 def is_menu_action(message: Union[types.Message, types.CallbackQuery]) -> bool:
-    if isinstance(message, types.CallbackQuery):
+    if isinstance(message, types.CallbackQuery) or getattr(message, "callback_query", None):
         return True
-    return bool(
-        getattr(message, "text", None)
-        and is_main_menu_button_text(message.chat.id, message.text)
-    )
+    if not getattr(message, "text", None):
+        return False
+    menu_buttons = [
+        "Axtarış sistemi",
+        "Hesabım",
+        "Statistika",
+        "Şansını sına",
+        "Ödəniş",
+        "Adminlə əlaqə",
+        "Haqqında",
+        "Botu yenilə",
+    ]
+    text = message.text.strip()
+    if text in menu_buttons:
+        return True
+    if " " in text:
+        return text.split(" ", 1)[1] in menu_buttons
+    return False
 
 
 def is_support_callback(call: types.CallbackQuery) -> bool:
@@ -25476,25 +25455,11 @@ def admin_search_handler(message):
     content_types=["text"],
     func=lambda m: not is_admin(m.chat.id)
     and is_user_support_active(m.chat.id)
-    and is_menu_action(m),
-)
-def support_user_menu_router(message):
-    if message.text and message.text.startswith("/"):
-        return
-    clear_support_ui(message.chat.id)
-
-
-@bot.message_handler(
-    content_types=["text"],
-    func=lambda m: not is_admin(m.chat.id)
-    and is_user_support_active(m.chat.id)
     and m.text
     and not is_menu_action(m),
 )
 def support_user_message_router(message):
     if message.text and message.text.startswith("/"):
-        return
-    if message.text in ("⛔ Çatı sonlandır", "🔚 Çatı sonlandır"):
         return
     if has_active_text_flow(message.chat.id):
         return
