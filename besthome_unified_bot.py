@@ -145,7 +145,11 @@ class _BotProxy:
                     logger.warning(f"Telegram send error ignored: {e}")
                     return None
                 chat_id = _extract_send_chat_id(args, kwargs)
-                _track_sent_message(chat_id, result)
+                reply_markup = kwargs.get("reply_markup")
+                editable = name == "send_message" and isinstance(
+                    reply_markup, types.InlineKeyboardMarkup
+                )
+                _track_sent_message(chat_id, result, editable=editable)
                 return result
 
             return wrapped
@@ -272,13 +276,14 @@ payment_plan_selection: Dict[int, Dict[str, Any]] = {}
 logger = logging.getLogger("besthome_bot")
 
 
-def _record_last_bot_message_id(
-    chat_id: Optional[int], message_id: Optional[int]
+def _record_last_bot_message(
+    chat_id: Optional[int], message_id: Optional[int], editable: bool
 ) -> None:
     if not chat_id or not message_id:
         return
     user_last_message_id[chat_id] = message_id
     last_ui_message_id[chat_id] = message_id
+    user_last_message[chat_id] = {"message_id": message_id, "editable": editable}
 
 
 def _extract_send_chat_id(args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> Optional[int]:
@@ -299,10 +304,12 @@ def _extract_message_id_from_result(result: Any) -> Optional[int]:
     return getattr(result, "message_id", None)
 
 
-def _track_sent_message(chat_id: Optional[int], result: Any) -> None:
+def _track_sent_message(
+    chat_id: Optional[int], result: Any, *, editable: bool
+) -> None:
     message_id = _extract_message_id_from_result(result)
     if message_id:
-        _record_last_bot_message_id(chat_id, message_id)
+        _record_last_bot_message(chat_id, message_id, editable)
 
 
 def _extract_edit_text_payload(
@@ -341,33 +348,23 @@ def _edit_last_message_text(proxy: _BotProxy, edit_func, *args, **kwargs):
     text, chat_id, payload = _extract_edit_text_payload(args, kwargs)
     if chat_id is None or text is None:
         return edit_func(*args, **kwargs)
-    message_id = user_last_message_id.get(chat_id)
-    if message_id:
-        result = edit_func(
-            text,
-            chat_id,
-            message_id,
-            **payload,
-        )
-        _record_last_bot_message_id(chat_id, message_id)
-        return result
-    send_kwargs = {
-        key: payload.get(key)
-        for key in (
-            "reply_markup",
-            "parse_mode",
-            "disable_web_page_preview",
-            "entities",
-        )
-        if payload.get(key) is not None
-    }
-    return proxy.send_message(chat_id, text, **send_kwargs)
+    reply_markup = payload.get("reply_markup")
+    return render_ui(
+        chat_id,
+        text,
+        reply_markup,
+        parse_mode=payload.get("parse_mode"),
+        disable_preview=payload.get("disable_web_page_preview"),
+    )
 
 
 def _edit_last_message_reply_markup(proxy: _BotProxy, edit_func, *args, **kwargs):
     chat_id, reply_markup, payload = _extract_edit_reply_markup_payload(args, kwargs)
     if chat_id is None:
         return edit_func(*args, **kwargs)
+    last = user_last_message.get(chat_id)
+    if not last or not last.get("editable"):
+        return None
     message_id = user_last_message_id.get(chat_id)
     if message_id:
         result = edit_func(
@@ -376,7 +373,7 @@ def _edit_last_message_reply_markup(proxy: _BotProxy, edit_func, *args, **kwargs
             reply_markup=reply_markup,
             **payload,
         )
-        _record_last_bot_message_id(chat_id, message_id)
+        _record_last_bot_message(chat_id, message_id, editable=True)
         return result
     fallback_text = payload.pop("fallback_text", "\u2063")
     return proxy.send_message(chat_id, fallback_text, reply_markup=reply_markup)
@@ -547,6 +544,7 @@ ui_message_state: Dict[int, int] = {}
 last_ui_message_id: Dict[int, int] = ui_message_state
 last_user_message_id: Dict[int, int] = {}
 user_last_message_id: Dict[int, int] = {}
+user_last_message: Dict[int, Dict[str, Any]] = {}
 support_sessions: Dict[int, Dict[str, Any]] = {}
 STATE_MAIN_MENU = "STATE_MAIN_MENU"
 STATE_SEARCH_MENU = "STATE_SEARCH_MENU"
@@ -4333,17 +4331,9 @@ def show_customer_requests_access_admin(
                 ),
             )
     if message:
-        try:
-            bot.edit_message_text(
-                text,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-            return
-        except Exception:
-            pass
-    bot.send_message(chat_id, text, reply_markup=mk)
+        render_ui(message.chat.id, text, mk)
+        return
+    render_ui(chat_id, text, mk)
 
 
 def get_first_start_flag(chat_id: int) -> bool:
@@ -7364,6 +7354,80 @@ def delete_user_command_message(message: types.Message) -> None:
         )
 
 
+def _is_inline_keyboard(
+    keyboard: Optional[Union[types.InlineKeyboardMarkup, types.ReplyKeyboardMarkup]],
+) -> bool:
+    return isinstance(keyboard, types.InlineKeyboardMarkup)
+
+
+def _clear_last_message_record(user_id: int) -> None:
+    last_ui_message_id[user_id] = None
+    user_last_message_id[user_id] = None
+    user_last_message.pop(user_id, None)
+    set_support_session_last_ui_message_id(user_id, None)
+
+
+def _store_last_message_record(user_id: int, message_id: int, editable: bool) -> None:
+    last_ui_message_id[user_id] = message_id
+    user_last_message_id[user_id] = message_id
+    user_last_message[user_id] = {"message_id": message_id, "editable": editable}
+    set_support_session_last_ui_message_id(user_id, message_id)
+
+
+def render_ui(
+    user_id: int,
+    text: str,
+    keyboard: Optional[Union[types.InlineKeyboardMarkup, types.ReplyKeyboardMarkup]],
+    prefer_edit: bool = True,
+    *,
+    parse_mode: Optional[str] = None,
+    disable_preview: Optional[bool] = None,
+    chat_id: Optional[int] = None,
+) -> Optional[int]:
+    target_chat_id = chat_id or user_id
+    last = user_last_message.get(user_id)
+    can_edit = (
+        prefer_edit
+        and last
+        and last.get("editable")
+        and (_is_inline_keyboard(keyboard) or keyboard is None)
+    )
+    if can_edit:
+        message_id = user_last_message_id.get(user_id)
+        if message_id:
+            try:
+                real_bot = bot._bot if getattr(bot, "_bot", None) is not None else bot
+                real_bot.edit_message_text(
+                    text,
+                    target_chat_id,
+                    message_id,
+                    reply_markup=keyboard,
+                    parse_mode=parse_mode,
+                    disable_web_page_preview=disable_preview,
+                )
+                _store_last_message_record(user_id, message_id, editable=True)
+                return message_id
+            except Exception as exc:
+                if "message is not modified" in str(exc).lower():
+                    _store_last_message_record(user_id, message_id, editable=True)
+                    return message_id
+                logger.debug("render_ui edit failed chat_id=%s", target_chat_id)
+    try:
+        msg = bot.send_message(
+            target_chat_id,
+            text,
+            reply_markup=keyboard,
+            parse_mode=parse_mode,
+            disable_web_page_preview=disable_preview,
+        )
+    except Exception:
+        logger.exception("render_ui send failed chat_id=%s", target_chat_id)
+        return None
+    editable = _is_inline_keyboard(keyboard)
+    _store_last_message_record(user_id, msg.message_id, editable=editable)
+    return msg.message_id
+
+
 def edit_or_send_message(
     user_id: int,
     text: str,
@@ -7376,8 +7440,7 @@ def edit_or_send_message(
     message_id = state.get(user_id)
     if message_id:
         last_ui_message_id[user_id] = message_id
-    msg_id = update_ui_message(
-        user_id,
+    msg_id = render_ui(
         user_id,
         text,
         keyboard,
@@ -7393,7 +7456,7 @@ def update_ui_message(
     user_id: int,
     chat_id: int,
     text: str,
-    keyboard: Optional[types.InlineKeyboardMarkup],
+    keyboard: Optional[Union[types.InlineKeyboardMarkup, types.ReplyKeyboardMarkup]],
     *,
     parse_mode: Optional[str] = None,
     disable_preview: Optional[bool] = None,
@@ -7411,9 +7474,7 @@ def update_ui_message(
                 message_id,
             )
         message_id = None
-        last_ui_message_id[user_id] = None
-        user_last_message_id[user_id] = None
-        set_support_session_last_ui_message_id(user_id, None)
+        _clear_last_message_record(user_id)
     if in_admin_chat and message_id:
         try:
             bot.delete_message(chat_id, message_id)
@@ -7424,44 +7485,15 @@ def update_ui_message(
                 message_id,
             )
         message_id = None
-        last_ui_message_id[user_id] = None
-        user_last_message_id[user_id] = None
-        set_support_session_last_ui_message_id(user_id, None)
-    if message_id and not in_admin_chat:
-        try:
-            bot.edit_message_text(
-                text,
-                chat_id,
-                message_id,
-                reply_markup=keyboard,
-                parse_mode=parse_mode,
-                disable_web_page_preview=disable_preview,
-            )
-            set_support_session_last_ui_message_id(user_id, message_id)
-            user_last_message_id[user_id] = message_id
-            return message_id
-        except Exception as exc:
-            if "message is not modified" in str(exc).lower():
-                last_ui_message_id[user_id] = message_id
-                user_last_message_id[user_id] = message_id
-                set_support_session_last_ui_message_id(user_id, message_id)
-                return message_id
-            logger.debug("update_ui_message edit failed chat_id=%s", chat_id)
-    try:
-        msg = bot.send_message(
-            chat_id,
-            text,
-            reply_markup=keyboard,
-            parse_mode=parse_mode,
-            disable_web_page_preview=disable_preview,
-        )
-        last_ui_message_id[user_id] = msg.message_id
-        user_last_message_id[user_id] = msg.message_id
-        set_support_session_last_ui_message_id(user_id, msg.message_id)
-        return msg.message_id
-    except Exception:
-        logger.exception("update_ui_message send failed chat_id=%s", chat_id)
-        return None
+        _clear_last_message_record(user_id)
+    return render_ui(
+        user_id,
+        text,
+        keyboard,
+        parse_mode=parse_mode,
+        disable_preview=disable_preview,
+        chat_id=chat_id,
+    )
 
 
 def send_or_edit_ui_message(
@@ -8540,18 +8572,10 @@ def build_customer_requests_operation_menu(
     text = TEXTS_AZ["admin_stats_customer_requests"]
     if not row:
         text = "😕 Aktiv müştəri istəyi yoxdur."
-    try:
-        if message:
-            bot.edit_message_text(
-                text,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-        else:
-            bot.send_message(chat_id, text, reply_markup=mk)
-    except Exception:
-        pass
+    if message:
+        render_ui(message.chat.id, text, mk)
+        return
+    render_ui(chat_id, text, mk)
 
 
 def show_customer_request_district_menu(
@@ -8579,18 +8603,10 @@ def show_customer_request_district_menu(
     text = f"{title} — rayon seçin:"
     if not districts:
         text = f"😕 {title} üzrə aktiv sorğu yoxdur."
-    try:
-        if message:
-            bot.edit_message_text(
-                text,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-        else:
-            bot.send_message(chat_id, text, reply_markup=mk)
-    except Exception:
-        pass
+    if message:
+        render_ui(message.chat.id, text, mk)
+        return
+    render_ui(chat_id, text, mk)
 
 
 def agent_has_interest(agent_chat_id: int, request_id: int) -> bool:
@@ -9528,10 +9544,6 @@ def send_user_statistics(chat_id: int, period_key: str, message_id: Optional[int
         admin_flag = is_admin(chat_id)
         text = format_stats_text(period_stats, selected, is_admin=admin_flag)
         keyboard = build_user_stats_keyboard(selected)
-        if message_id:
-            ui_message_state[chat_id] = message_id
-            last_ui_message_id[chat_id] = message_id
-            set_support_session_last_ui_message_id(chat_id, message_id)
         send_or_edit_ui_message(
             chat_id,
             text,
@@ -9579,8 +9591,7 @@ def cb_ui_stats(c):
         return
     chat_id = c.message.chat.id if c.message else c.from_user.id
     default_period = user_stats_filter.get(chat_id, "24h")
-    message_id = c.message.message_id if c.message else None
-    send_user_statistics(chat_id, default_period, message_id=message_id)
+    send_user_statistics(chat_id, default_period)
 
 
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("stats:"))
@@ -9598,7 +9609,7 @@ def handle_user_stats_callback(c):
     except Exception:
         pass
     if c.message:
-        send_user_statistics(chat_id, period, message_id=c.message.message_id)
+        send_user_statistics(chat_id, period)
 
 
 # =============== ℹ️ Haqqında ===============
@@ -9833,48 +9844,43 @@ def render_support_ui(
     disable_preview: Optional[bool] = None,
     fallback_message_id: Optional[int] = None,
 ) -> Optional[int]:
-    message_id = None
-    if is_admin(chat_id):
-        message_id = support_admin_state.get(chat_id, {}).get("message_id")
-    else:
-        state = get_support_session_state(chat_id)
-        message_id = state.get("last_ui_message_id")
-    if message_id:
-        try:
-            bot.edit_message_text(
-                text,
-                chat_id,
-                int(message_id),
-                reply_markup=keyboard,
-                parse_mode=parse_mode,
-                disable_web_page_preview=disable_preview,
-            )
-            if is_admin(chat_id):
-                _set_support_admin_state(chat_id, message_id=message_id)
-            else:
-                set_support_session_last_ui_message_id(chat_id, message_id)
-            return int(message_id)
-        except Exception as exc:
-            if "message is not modified" in str(exc).lower():
-                return int(message_id)
-            logger.debug("Support UI edit failed chat_id=%s message_id=%s", chat_id, message_id)
-    delete_last_support_ui(chat_id, fallback_message_id=fallback_message_id)
-    try:
-        msg = bot.send_message(
+    last = user_last_message.get(chat_id)
+    can_edit = (
+        last
+        and last.get("editable")
+        and (keyboard is None or isinstance(keyboard, types.InlineKeyboardMarkup))
+    )
+    if can_edit:
+        msg_id = render_ui(
             chat_id,
             text,
-            reply_markup=keyboard,
+            keyboard,
             parse_mode=parse_mode,
-            disable_web_page_preview=disable_preview,
+            disable_preview=disable_preview,
+            chat_id=chat_id,
         )
-    except Exception:
-        logger.exception("Failed to send support UI chat_id=%s", chat_id)
-        return None
-    if is_admin(chat_id):
-        _set_support_admin_state(chat_id, message_id=msg.message_id)
-    else:
-        set_support_session_last_ui_message_id(chat_id, msg.message_id)
-    return msg.message_id
+        if msg_id:
+            if is_admin(chat_id):
+                _set_support_admin_state(chat_id, message_id=msg_id)
+            else:
+                set_support_session_last_ui_message_id(chat_id, msg_id)
+            return msg_id
+    delete_last_support_ui(chat_id, fallback_message_id=fallback_message_id)
+    msg_id = render_ui(
+        chat_id,
+        text,
+        keyboard,
+        prefer_edit=False,
+        parse_mode=parse_mode,
+        disable_preview=disable_preview,
+        chat_id=chat_id,
+    )
+    if msg_id:
+        if is_admin(chat_id):
+            _set_support_admin_state(chat_id, message_id=msg_id)
+        else:
+            set_support_session_last_ui_message_id(chat_id, msg_id)
+    return msg_id
 
 
 def clear_support_ui(chat_id: int, fallback_message_id: Optional[int] = None) -> None:
@@ -11029,8 +11035,6 @@ def cb_search_menu(c):
     if not ensure_feature_available_cb(c, "main_search"):
         return
     chat_id = c.message.chat.id if c.message else c.from_user.id
-    if c.message:
-        last_ui_message_id[chat_id] = c.message.message_id
     action = c.data.split(":", 1)[1]
     if action == "back":
         set_search_menu_active(chat_id, False)
@@ -11057,8 +11061,6 @@ def cb_search_flow_back(c):
     if not ensure_allowed_cb(c):
         return
     chat_id = c.message.chat.id if c.message else c.from_user.id
-    if c.message:
-        last_ui_message_id[chat_id] = c.message.message_id
     if get_navigation_state(chat_id) in {
         STATE_PRICE_RANGE_STEP_1,
         STATE_PRICE_RANGE_STEP_2,
@@ -11310,7 +11312,7 @@ def handle_today_callbacks(c):
             st["rayon"] = value if value in rayons else "all"
         send_today_stats_message(chat_id, st)
         send_today_results(
-            chat_id, st, message=(c.message.chat.id, c.message.message_id)
+            chat_id, st
         )
     else:
         recover_main_menu(chat_id, c.message, "Əsas menyu bərpa edildi")
@@ -11838,18 +11840,10 @@ def show_notifications_inbox(chat_id: int, period: str, page: int = 1, message=N
         )
         mk_empty.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="notif_menu"))
         text = "🔔 Bildiriş elanları tapılmadı."
-        try:
-            if message:
-                bot.edit_message_text(
-                    text,
-                    chat_id=message.chat.id,
-                    message_id=message.message_id,
-                    reply_markup=mk_empty,
-                )
-            else:
-                bot.send_message(chat_id, text, reply_markup=mk_empty)
-        except Exception:
-            pass
+        if message:
+            render_ui(message.chat.id, text, mk_empty)
+        else:
+            render_ui(chat_id, text, mk_empty)
         return
 
     start_index = max(
@@ -11892,22 +11886,11 @@ def show_agent_notifications_inbox(chat_id: int, page: int = 1, message=None):
                 "🎯 Müştəri istəkləri", callback_data="agent_requests"
             )
         )
-        try:
-            if message:
-                bot.edit_message_text(
-                    "🔔 Müştəri istəyi bildirişi yoxdur.",
-                    chat_id=message.chat.id,
-                    message_id=message.message_id,
-                    reply_markup=mk_empty,
-                )
-            else:
-                bot.send_message(
-                    chat_id,
-                    "🔔 Müştəri istəyi bildirişi yoxdur.",
-                    reply_markup=mk_empty,
-                )
-        except Exception:
-            pass
+        text = "🔔 Müştəri istəyi bildirişi yoxdur."
+        if message:
+            render_ui(message.chat.id, text, mk_empty)
+        else:
+            render_ui(chat_id, text, mk_empty)
         return
 
     total_pages = max(1, math.ceil(total / PAGE_SIZE_NOTIFICATIONS))
@@ -11967,18 +11950,10 @@ def show_agent_notifications_inbox(chat_id: int, page: int = 1, message=None):
     )
 
     header_text = "\n".join(header_lines)
-    try:
-        if message:
-            bot.edit_message_text(
-                header_text,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-        else:
-            bot.send_message(chat_id, header_text, reply_markup=mk)
-    except Exception:
-        pass
+    if message:
+        render_ui(message.chat.id, header_text, mk)
+    else:
+        render_ui(chat_id, header_text, mk)
 
     for r in rows:
         card = format_agent_request_card(r)
@@ -12009,22 +11984,11 @@ def send_criteria_list(chat_id: int, message=None):
     )
     if not rows:
         mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="crit_alert_menu"))
-        try:
-            if message:
-                bot.edit_message_text(
-                    "⚙️ Saxlanılmış kriteriya yoxdur.",
-                    chat_id=message.chat.id,
-                    message_id=message.message_id,
-                    reply_markup=mk,
-                )
-            else:
-                bot.send_message(
-                    chat_id,
-                    "⚙️ Saxlanılmış kriteriya yoxdur.",
-                    reply_markup=mk,
-                )
-        except Exception:
-            pass
+        text = "⚙️ Saxlanılmış kriteriya yoxdur."
+        if message:
+            render_ui(message.chat.id, text, mk)
+        else:
+            render_ui(chat_id, text, mk)
         return
 
     for row in rows:
@@ -12041,18 +12005,11 @@ def send_criteria_list(chat_id: int, message=None):
         mk.add(types.InlineKeyboardButton("🗑 Sil", callback_data=f"crit_del:{cid}"))
 
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="crit_alert_menu"))
-    try:
-        if message:
-            bot.edit_message_text(
-                "⚙️ Bildiriş kriteriyaları:",
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-        else:
-            bot.send_message(chat_id, "⚙️ Bildiriş kriteriyaları:", reply_markup=mk)
-    except Exception:
-        pass
+    text = "⚙️ Bildiriş kriteriyaları:"
+    if message:
+        render_ui(message.chat.id, text, mk)
+    else:
+        render_ui(chat_id, text, mk)
 
 
 def build_notification_rule_operation_keyboard() -> types.ReplyKeyboardMarkup:
@@ -12092,17 +12049,9 @@ def send_notification_rayon_prompt(chat_id: int, message=None):
     mk = build_notification_rayon_markup(selected)
     text = "📍 Rayon seçin (bir neçəsini seçə bilərsiniz):"
     if message:
-        try:
-            bot.edit_message_text(
-                text,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-            return
-        except Exception:
-            pass
-    bot.send_message(chat_id, text, reply_markup=mk)
+        render_ui(message.chat.id, text, mk)
+        return
+    render_ui(chat_id, text, mk)
 
 
 def build_notification_property_type_markup() -> types.InlineKeyboardMarkup:
@@ -12123,17 +12072,9 @@ def send_notification_property_type_prompt(chat_id: int, message=None):
     text = "🏠 Əmlak növü seçin:"
     mk = build_notification_property_type_markup()
     if message:
-        try:
-            bot.edit_message_text(
-                text,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-            return
-        except Exception:
-            pass
-    bot.send_message(chat_id, text, reply_markup=mk)
+        render_ui(message.chat.id, text, mk)
+        return
+    render_ui(chat_id, text, mk)
 
 
 def start_notification_rule_flow(chat_id: int):
@@ -12188,18 +12129,10 @@ def show_keyword_alert_menu(chat_id: int, message=None):
     )
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kw_alert_back"))
     text = "📌 Açar söz bildirişləri"
-    try:
-        if message:
-            bot.edit_message_text(
-                text,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-        else:
-            bot.send_message(chat_id, text, reply_markup=mk)
-    except Exception:
-        pass
+    if message:
+        render_ui(message.chat.id, text, mk)
+    else:
+        render_ui(chat_id, text, mk)
 
 
 def show_criteria_alert_menu(chat_id: int, message=None):
@@ -12212,18 +12145,10 @@ def show_criteria_alert_menu(chat_id: int, message=None):
     )
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="notif_menu"))
     text = "🎯 Kriteriya bildirişləri"
-    try:
-        if message:
-            bot.edit_message_text(
-                text,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-        else:
-            bot.send_message(chat_id, text, reply_markup=mk)
-    except Exception:
-        pass
+    if message:
+        render_ui(message.chat.id, text, mk)
+    else:
+        render_ui(chat_id, text, mk)
 
 
 def save_keyword_alert(user_id: int, keyword: str, regions: List[str]) -> int:
@@ -12327,20 +12252,11 @@ def show_keyword_alert_list(chat_id: int, page: int = 1, message=None):
             )
         )
         mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kw_alert_menu"))
-        try:
-            if message:
-                bot.edit_message_text(
-                    "🔔 Açar söz bildirişi yoxdur.",
-                    chat_id=message.chat.id,
-                    message_id=message.message_id,
-                    reply_markup=mk,
-                )
-            else:
-                bot.send_message(
-                    chat_id, "🔔 Açar söz bildirişi yoxdur.", reply_markup=mk
-                )
-        except Exception:
-            pass
+        text = "🔔 Açar söz bildirişi yoxdur."
+        if message:
+            render_ui(message.chat.id, text, mk)
+        else:
+            render_ui(chat_id, text, mk)
         return
 
     header = f"🔔 Açar sözlər\nSəhifə: {current_page} / {total_pages}\nCəmi: {total}"
@@ -12367,18 +12283,10 @@ def show_keyword_alert_list(chat_id: int, page: int = 1, message=None):
         types.InlineKeyboardButton("➕ Açar söz əlavə et", callback_data="kw_alert_add")
     )
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kw_alert_menu"))
-    try:
-        if message:
-            bot.edit_message_text(
-                header,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-        else:
-            bot.send_message(chat_id, header, reply_markup=mk)
-    except Exception:
-        pass
+    if message:
+        render_ui(message.chat.id, header, mk)
+    else:
+        render_ui(chat_id, header, mk)
 
     for row in rows:
         alert_id = _row_value_safe(row, "id")
@@ -12424,18 +12332,10 @@ def send_keyword_alert_rayon_prompt(chat_id: int, message=None):
     selected = keyword_alert_state.get(chat_id, {}).get("regions", [])
     text = "📍 Açar söz üçün rayonları seçin (çoxlu seçim mümkündür):"
     mk = build_keyword_alert_rayon_markup(selected)
-    try:
-        if message:
-            bot.edit_message_text(
-                text,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-        else:
-            bot.send_message(chat_id, text, reply_markup=mk)
-    except Exception:
-        pass
+    if message:
+        render_ui(message.chat.id, text, mk)
+    else:
+        render_ui(chat_id, text, mk)
 
 
 def period_start(period: str) -> Optional[datetime]:
@@ -12640,21 +12540,10 @@ def render_notification_listing(
     progress_text = f"🔔 Bildiriş {idx + 1} / {total}"
     text = build_listing_text(listing, source, progress_text=progress_text)
 
-    try:
-        if message:
-            bot.edit_message_text(
-                text,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-        else:
-            bot.send_message(chat_id, text, reply_markup=mk)
-    except Exception:
-        try:
-            bot.send_message(chat_id, text, reply_markup=mk)
-        except Exception:
-            pass
+    if message:
+        render_ui(message.chat.id, text, mk)
+    else:
+        render_ui(chat_id, text, mk)
 
 
 def show_keyword_alert_hits(chat_id: int, period: str, index: int = 0, message=None):
@@ -12669,18 +12558,10 @@ def show_keyword_alert_hits(chat_id: int, period: str, index: int = 0, message=N
         mk = types.InlineKeyboardMarkup()
         mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kw_hits_menu"))
         text = f"🔔 {period_label} üçün bildiriş yoxdur."
-        try:
-            if message:
-                bot.edit_message_text(
-                    text,
-                    chat_id=message.chat.id,
-                    message_id=message.message_id,
-                    reply_markup=mk,
-                )
-            else:
-                bot.send_message(chat_id, text, reply_markup=mk)
-        except Exception:
-            pass
+        if message:
+            render_ui(message.chat.id, text, mk)
+        else:
+            render_ui(chat_id, text, mk)
         return
 
     listings = load_notification_listings(chat_id, "keyword", period)
@@ -12688,22 +12569,11 @@ def show_keyword_alert_hits(chat_id: int, period: str, index: int = 0, message=N
     if not listings:
         mk = types.InlineKeyboardMarkup()
         mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kw_hits_menu"))
-        try:
-            if message:
-                bot.edit_message_text(
-                    f"🔔 {period_label} üçün bildiriş elanları tapılmadı.",
-                    chat_id=message.chat.id,
-                    message_id=message.message_id,
-                    reply_markup=mk,
-                )
-            else:
-                bot.send_message(
-                    chat_id,
-                    f"🔔 {period_label} üçün bildiriş elanları tapılmadı.",
-                    reply_markup=mk,
-                )
-        except Exception:
-            pass
+        text = f"🔔 {period_label} üçün bildiriş elanları tapılmadı."
+        if message:
+            render_ui(message.chat.id, text, mk)
+        else:
+            render_ui(chat_id, text, mk)
         return
 
     render_notification_listing(
@@ -12724,18 +12594,10 @@ def show_keyword_hits_filter_menu(chat_id: int, message=None):
     mk.add(types.InlineKeyboardButton("Bu ay", callback_data="kw_hits:month:0"))
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kw_alert_menu"))
     text = "🔔 Açar söz bildirişləri\n\n🗓 Zaman aralığı seç:"
-    try:
-        if message:
-            bot.edit_message_text(
-                text,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-        else:
-            bot.send_message(chat_id, text, reply_markup=mk)
-    except Exception:
-        pass
+    if message:
+        render_ui(message.chat.id, text, mk)
+    else:
+        render_ui(chat_id, text, mk)
 
 
 def show_criteria_hits_filter_menu(chat_id: int, message=None):
@@ -12745,18 +12607,10 @@ def show_criteria_hits_filter_menu(chat_id: int, message=None):
     mk.add(types.InlineKeyboardButton("Bu ay", callback_data="crit_hits:month:0"))
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="crit_alert_menu"))
     text = "🎯 Kriteriya bildirişləri\n\n🗓 Zaman aralığı seç:"
-    try:
-        if message:
-            bot.edit_message_text(
-                text,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-        else:
-            bot.send_message(chat_id, text, reply_markup=mk)
-    except Exception:
-        pass
+    if message:
+        render_ui(message.chat.id, text, mk)
+    else:
+        render_ui(chat_id, text, mk)
 
 
 def show_criteria_alert_hits(chat_id: int, period: str, index: int = 0, message=None):
@@ -12773,18 +12627,10 @@ def show_criteria_alert_hits(chat_id: int, period: str, index: int = 0, message=
         mk = types.InlineKeyboardMarkup()
         mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="crit_hits_menu"))
         text = f"🔔 {period_label} üçün bildiriş yoxdur."
-        try:
-            if message:
-                bot.edit_message_text(
-                    text,
-                    chat_id=message.chat.id,
-                    message_id=message.message_id,
-                    reply_markup=mk,
-                )
-            else:
-                bot.send_message(chat_id, text, reply_markup=mk)
-        except Exception:
-            pass
+        if message:
+            render_ui(message.chat.id, text, mk)
+        else:
+            render_ui(chat_id, text, mk)
         return
 
     listings = load_notification_listings(chat_id, "criteria", period)
@@ -12792,22 +12638,11 @@ def show_criteria_alert_hits(chat_id: int, period: str, index: int = 0, message=
     if not listings:
         mk = types.InlineKeyboardMarkup()
         mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="crit_hits_menu"))
-        try:
-            if message:
-                bot.edit_message_text(
-                    f"🔔 {period_label} üçün bildiriş elanları tapılmadı.",
-                    chat_id=message.chat.id,
-                    message_id=message.message_id,
-                    reply_markup=mk,
-                )
-            else:
-                bot.send_message(
-                    chat_id,
-                    f"🔔 {period_label} üçün bildiriş elanları tapılmadı.",
-                    reply_markup=mk,
-                )
-        except Exception:
-            pass
+        text = f"🔔 {period_label} üçün bildiriş elanları tapılmadı."
+        if message:
+            render_ui(message.chat.id, text, mk)
+        else:
+            render_ui(chat_id, text, mk)
         return
 
     render_notification_listing(
@@ -13753,7 +13588,6 @@ def cb_keyword_operation(c):
         return
     action = c.data.split("|")[1]
     chat_id = c.message.chat.id
-    last_ui_message_id[chat_id] = c.message.message_id
 
     if action == "menu":
         reset_search_state(chat_id)
@@ -13794,7 +13628,6 @@ def cb_keyword_date_range(c):
         return
     action = c.data.split("|")[1]
     chat_id = c.message.chat.id
-    last_ui_message_id[chat_id] = c.message.message_id
 
     if action == "back":
         search_state[chat_id] = {
@@ -16225,7 +16058,6 @@ def cb_pagination(c):
     if not ensure_allowed_cb(c):
         return
     chat_id = c.message.chat.id
-    last_ui_message_id[chat_id] = c.message.message_id
     st = search_state.get(chat_id)
     if not st:
         set_ui_context(chat_id, UI_CONTEXT_MAIN)
@@ -16513,7 +16345,6 @@ def cb_structured(c):
     parts = c.data.split("|")
     action = parts[1]
     chat_id = c.message.chat.id
-    last_ui_message_id[chat_id] = c.message.message_id
     st = search_state.setdefault(
         chat_id,
         {
@@ -16526,7 +16357,6 @@ def cb_structured(c):
 
     if action == "cancel":
         reset_search_state(chat_id)
-        last_ui_message_id[chat_id] = c.message.message_id
         return_to_previous_menu(chat_id)
         return
 
@@ -16603,7 +16433,6 @@ def cb_structured(c):
                 perform_structured_search(
                     chat_id,
                     offset=0,
-                    edit_msg=(c.message.chat.id, c.message.message_id),
                 )
             else:
                 render_room_step(chat_id, c.message)
@@ -16626,7 +16455,6 @@ def cb_structured(c):
             perform_structured_search(
                 chat_id,
                 offset=0,
-                edit_msg=(c.message.chat.id, c.message.message_id),
             )
         else:
             render_floor_step(chat_id, c.message)
@@ -16640,7 +16468,6 @@ def cb_structured(c):
         perform_structured_search(
             chat_id,
             offset=0,
-            edit_msg=(c.message.chat.id, c.message.message_id),
         )
     elif action == "fm":
         structured_push_history(chat_id)
@@ -17064,20 +16891,14 @@ def agents_panel(c):
         return
 
     mk = build_agents_panel_markup()
-
-    bot.edit_message_text(
-        "🏢 Vasitəçi elanları axtarış sistemi:",
-        chat_id=chat_id,
-        message_id=c.message.message_id,
-        reply_markup=mk,
-    )
+    render_ui(chat_id, "🏢 Vasitəçi elanları axtarış sistemi:", mk)
 
 
 def send_agents_panel_message(chat_id: int):
     if not is_admin(chat_id):
         return
     mk = build_agents_panel_markup()
-    bot.send_message(chat_id, "🏢 Vasitəçi elanları axtarış sistemi:", reply_markup=mk)
+    render_ui(chat_id, "🏢 Vasitəçi elanları axtarış sistemi:", mk)
 
 
 # =======================
@@ -17103,13 +16924,7 @@ def cb_agent_filter(c):
         types.InlineKeyboardButton("🏠 Əmlak növü", callback_data="agent_filter|type")
     )
     mk.add(types.InlineKeyboardButton("💰 Qiymət", callback_data="agent_filter|price"))
-
-    bot.edit_message_text(
-        "🔍 Vasitəçi elanları üçün filtr seç:",
-        chat_id=chat_id,
-        message_id=c.message.message_id,
-        reply_markup=mk,
-    )
+    render_ui(chat_id, "🔍 Vasitəçi elanları üçün filtr seç:", mk)
 
 
 # =============================
@@ -17306,15 +17121,10 @@ def show_admin_activity_stats_menu(
     )
     mk.row(types.InlineKeyboardButton(TEXTS_AZ["admin_back_button"], callback_data="adm_activity_back"))
     text = TEXTS_AZ["admin_panel_activity_stats"]
-    try:
-        if message:
-            bot.edit_message_text(
-                text, chat_id=chat_id, message_id=message.message_id, reply_markup=mk
-            )
-        else:
-            bot.send_message(chat_id, text, reply_markup=mk)
-    except Exception:
-        bot.send_message(chat_id, text, reply_markup=mk)
+    if message:
+        render_ui(chat_id, text, mk)
+    else:
+        render_ui(chat_id, text, mk)
 
 
 def show_admin_stats_menu(chat_id: int, message: Optional[types.Message] = None):
@@ -17347,15 +17157,10 @@ def show_admin_stats_menu(chat_id: int, message: Optional[types.Message] = None)
         )
     )
     text = TEXTS_AZ["admin_panel_stats"]
-    try:
-        if message:
-            bot.edit_message_text(
-                text, chat_id=chat_id, message_id=message.message_id, reply_markup=mk
-            )
-        else:
-            bot.send_message(chat_id, text, reply_markup=mk)
-    except Exception:
-        bot.send_message(chat_id, text, reply_markup=mk)
+    if message:
+        render_ui(chat_id, text, mk)
+    else:
+        render_ui(chat_id, text, mk)
 
 
 def show_inactive_users_summary(
@@ -17376,15 +17181,10 @@ def show_inactive_users_summary(
         ),
         types.InlineKeyboardButton(TEXTS_AZ["admin_back_button"], callback_data="adm_activity_stats"),
     )
-    try:
-        if message:
-            bot.edit_message_text(
-                text, chat_id=chat_id, message_id=message.message_id, reply_markup=mk
-            )
-        else:
-            bot.send_message(chat_id, text, reply_markup=mk)
-    except Exception:
-        bot.send_message(chat_id, text, reply_markup=mk)
+    if message:
+        render_ui(chat_id, text, mk)
+    else:
+        render_ui(chat_id, text, mk)
 
 
 def _support_status_badge(thread: dict) -> str:
@@ -17892,7 +17692,7 @@ def cb_support_user_inbox(c):
         return_to_main_menu(chat_id)
         return
     if action == "open":
-        show_user_support_inbox(chat_id, fallback_message_id=c.message.message_id if c.message else None)
+        show_user_support_inbox(chat_id)
         safe_answer_callback_query(c.id)
         return
     if action == "reply":
@@ -17923,8 +17723,6 @@ def cb_admin_lastlink_refresh(c):
         safe_answer_callback_query(c.id)
         return_to_main_menu(chat_id)
         return
-    if c.message:
-        last_ui_message_id[chat_id] = c.message.message_id
     history = load_dropbox_url_history()
     if not history:
         mk = types.InlineKeyboardMarkup()
@@ -17962,8 +17760,6 @@ def cb_admin_run_lastlink(c):
         safe_answer_callback_query(c.id)
         return_to_main_menu(chat_id)
         return
-    if c.message:
-        last_ui_message_id[chat_id] = c.message.message_id
     history = load_dropbox_url_history()
     if not history:
         safe_answer_callback_query(
@@ -17996,7 +17792,7 @@ def cb_admin_stats_menu(c):
         return
     if action == "overall":
         admin_stats_period[chat_id] = "day"
-        show_admin_stats(chat_id, message_id=c.message.message_id)
+        show_admin_stats(chat_id)
         return
     if action == "activity":
         show_admin_activity_stats_menu(chat_id, message=c.message)
@@ -18108,7 +17904,7 @@ def cb_bonus_probability_controls(c):
             "✏️ Yeni ehtimalları yazın (format: 0=40,1=35,2=20,3=5):",
         )
     elif action == "refresh":
-        show_bonus_stats(c.message.chat.id, message_id=c.message.message_id)
+        show_bonus_stats(c.message.chat.id)
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -18521,16 +18317,9 @@ def show_admin_customer_request_types(
     if not buttons:
         text = "Bu bölmədə aktiv müştəri istəyi yoxdur."
         if message:
-            try:
-                bot.edit_message_text(
-                    text,
-                    chat_id=message.chat.id,
-                    message_id=message.message_id,
-                )
-            except Exception:
-                bot.send_message(chat_id, text)
+            render_ui(message.chat.id, text, None)
         else:
-            bot.send_message(chat_id, text)
+            render_ui(chat_id, text, None)
         return
 
     if len(buttons) == 2:
@@ -18540,17 +18329,9 @@ def show_admin_customer_request_types(
 
     text = "📌 Müştəri istəkləri"
     if message:
-        try:
-            bot.edit_message_text(
-                text,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-            return
-        except Exception:
-            pass
-    bot.send_message(chat_id, text, reply_markup=mk)
+        render_ui(message.chat.id, text, mk)
+        return
+    render_ui(chat_id, text, mk)
 
 
 def fetch_admin_request_rayons(req_type: str) -> List[Tuple[str, int]]:
@@ -18601,32 +18382,16 @@ def show_admin_request_rayons(
     if not rayons:
         text = "Bu seçim üzrə aktiv müştəri istəyi yoxdur."
         if message:
-            try:
-                bot.edit_message_text(
-                    text,
-                    chat_id=message.chat.id,
-                    message_id=message.message_id,
-                    reply_markup=mk,
-                )
-                return
-            except Exception:
-                pass
-        bot.send_message(chat_id, text, reply_markup=mk)
+            render_ui(message.chat.id, text, mk)
+            return
+        render_ui(chat_id, text, mk)
         return
 
     text = f"📍 {format_admin_request_type(req_type)} üzrə rayonlar:"
     if message:
-        try:
-            bot.edit_message_text(
-                text,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-            return
-        except Exception:
-            pass
-    bot.send_message(chat_id, text, reply_markup=mk)
+        render_ui(message.chat.id, text, mk)
+        return
+    render_ui(chat_id, text, mk)
 
 
 def format_admin_request_list_item(req: dict) -> str:
@@ -18746,17 +18511,9 @@ def show_admin_requests_by_rayon(
         mk = build_admin_request_list_nav(req_type, rayon, 1, 1)
         text = f"📭 {rayon} üzrə aktiv sorğu yoxdur."
         if message:
-            try:
-                bot.edit_message_text(
-                    text,
-                    chat_id=message.chat.id,
-                    message_id=message.message_id,
-                    reply_markup=mk,
-                )
-                return
-            except Exception:
-                pass
-        bot.send_message(chat_id, text, reply_markup=mk)
+            render_ui(message.chat.id, text, mk)
+            return
+        render_ui(chat_id, text, mk)
         return
 
     for req in rows:
@@ -18770,17 +18527,9 @@ def show_admin_requests_by_rayon(
         f"Cəmi: {total}"
     )
     if message:
-        try:
-            bot.edit_message_text(
-                footer,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-            return
-        except Exception:
-            pass
-    bot.send_message(chat_id, footer, reply_markup=mk)
+        render_ui(message.chat.id, footer, mk)
+        return
+    render_ui(chat_id, footer, mk)
 
 
 def show_customer_requests_overview(
@@ -19281,20 +19030,11 @@ def show_user_archived_requests(chat_id: int, page: int = 1, message=None):
                 "⬅️ Müştəri istəkləri", callback_data="agent_requests"
             )
         )
-        try:
-            if message:
-                bot.edit_message_text(
-                    "📦 Arxivlənmiş sorğu yoxdur.",
-                    chat_id=message.chat.id,
-                    message_id=message.message_id,
-                    reply_markup=mk_empty,
-                )
-            else:
-                bot.send_message(
-                    chat_id, "📦 Arxivlənmiş sorğu yoxdur.", reply_markup=mk_empty
-                )
-        except Exception:
-            pass
+        text = "📦 Arxivlənmiş sorğu yoxdur."
+        if message:
+            render_ui(message.chat.id, text, mk_empty)
+        else:
+            render_ui(chat_id, text, mk_empty)
         return
 
     header = f"📦 Arxivlənmiş istəklər — Səhifə {current_page}/{total_pages}"
@@ -19322,18 +19062,10 @@ def show_user_archived_requests(chat_id: int, page: int = 1, message=None):
         )
     )
 
-    try:
-        if message:
-            bot.edit_message_text(
-                header,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-        else:
-            bot.send_message(chat_id, header, reply_markup=mk)
-    except Exception:
-        pass
+    if message:
+        render_ui(message.chat.id, header, mk)
+    else:
+        render_ui(chat_id, header, mk)
 
     for row in rows:
         mk_card = types.InlineKeyboardMarkup()
@@ -19409,17 +19141,9 @@ def show_customer_request_rules(chat_id: int, message: Optional[types.Message] =
     )
     text = "🔔 Bildiriş qaydaları"
     if message:
-        try:
-            bot.edit_message_text(
-                text,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-            return
-        except Exception:
-            pass
-    bot.send_message(chat_id, text, reply_markup=mk)
+        render_ui(message.chat.id, text, mk)
+        return
+    render_ui(chat_id, text, mk)
 
 
 def build_customer_request_rule_type_keyboard() -> types.ReplyKeyboardMarkup:
@@ -19466,17 +19190,9 @@ def send_customer_request_rule_rayon_prompt(chat_id: int, message=None):
     mk = build_customer_request_rule_rayon_markup(selected)
     text = "📍 Rayon seçin (bir neçəsini seçə bilərsiniz):"
     if message:
-        try:
-            bot.edit_message_text(
-                text,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-            return
-        except Exception:
-            pass
-    bot.send_message(chat_id, text, reply_markup=mk)
+        render_ui(message.chat.id, text, mk)
+        return
+    render_ui(chat_id, text, mk)
 
 
 def build_optional_input_keyboard() -> types.ReplyKeyboardMarkup:
@@ -19602,20 +19318,11 @@ def show_customer_request_alerts_inbox(
         mk_empty.add(
             types.InlineKeyboardButton("⬅️ Bildirişlər", callback_data="notif_menu")
         )
-        try:
-            if message:
-                bot.edit_message_text(
-                    "🔔 Yeni bildiriş yoxdur.",
-                    chat_id=message.chat.id,
-                    message_id=message.message_id,
-                    reply_markup=mk_empty,
-                )
-            else:
-                bot.send_message(
-                    chat_id, "🔔 Yeni bildiriş yoxdur.", reply_markup=mk_empty
-                )
-        except Exception:
-            pass
+        text = "🔔 Yeni bildiriş yoxdur."
+        if message:
+            render_ui(message.chat.id, text, mk_empty)
+        else:
+            render_ui(chat_id, text, mk_empty)
         return
 
     period_labels = {"today": "Bu gün", "week": "Bu həftə", "month": "Bu ay"}
@@ -19659,18 +19366,11 @@ def show_customer_request_alerts_inbox(
         for i in range(0, len(view_buttons), 3):
             mk.row(*view_buttons[i : i + 3])
     mk.add(types.InlineKeyboardButton("⬅️ Bildirişlər", callback_data="notif_menu"))
-    try:
-        if message:
-            bot.edit_message_text(
-                header.strip(),
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-        else:
-            bot.send_message(chat_id, header.strip(), reply_markup=mk)
-    except Exception:
-        pass
+    text = header.strip()
+    if message:
+        render_ui(message.chat.id, text, mk)
+    else:
+        render_ui(chat_id, text, mk)
 
 
 def send_financial_reports_menu(
@@ -20761,25 +20461,20 @@ def send_demo_users_report(chat_id: int, page: int = 1, message=None):
     set_admin_state(chat_id, "admin_users_demo")
     text, mk, _ = build_demo_users_view(page=page)
     if message:
-        try:
-            bot.edit_message_text(
-                text,
-                chat_id=chat_id,
-                message_id=message.message_id,
-                reply_markup=mk,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-            return
-        except Exception:
-            pass
-
-    bot.send_message(
+        render_ui(
+            chat_id,
+            text,
+            mk,
+            parse_mode="HTML",
+            disable_preview=True,
+        )
+        return
+    render_ui(
         chat_id,
         text,
-        reply_markup=mk,
+        mk,
         parse_mode="HTML",
-        disable_web_page_preview=True,
+        disable_preview=True,
     )
 
 
@@ -21351,7 +21046,6 @@ def cb_admin_promo(c):
             text = TEXTS_AZ["admin_promo_created"].format(days=days, code=code)
         else:
             text = TEXTS_AZ["admin_promo_create_failed"]
-        ui_message_state[c.message.chat.id] = c.message.message_id
         send_or_edit_ui_message(c.message.chat.id, text, mk)
     elif action == "list":
         page = 1
@@ -21503,18 +21197,9 @@ def admin_show_user_panel(
     mk = _build_admin_user_markup(target_id, record, unlimited, blocked_flag)
 
     if message:
-        try:
-            bot.edit_message_text(
-                info_txt,
-                chat_id=admin_chat_id,
-                message_id=message.message_id,
-                reply_markup=mk,
-                parse_mode="HTML",
-            )
-            return
-        except Exception:
-            pass
-    bot.send_message(admin_chat_id, info_txt, reply_markup=mk, parse_mode="HTML")
+        render_ui(admin_chat_id, info_txt, mk, parse_mode="HTML")
+        return
+    render_ui(admin_chat_id, info_txt, mk, parse_mode="HTML")
 
 
 def show_payment_history_list(
@@ -22887,15 +22572,9 @@ def show_all_users(
         )
         try:
             if message and not force_new:
-                bot.edit_message_text(
-                    text,
-                    chat_id,
-                    message.message_id,
-                    reply_markup=mk,
-                    parse_mode="HTML",
-                )
+                render_ui(chat_id, text, mk, parse_mode="HTML")
             else:
-                bot.send_message(chat_id, text, reply_markup=mk, parse_mode="HTML")
+                render_ui(chat_id, text, mk, prefer_edit=False, parse_mode="HTML")
         except Exception:
             logger.error("Admin send failed", exc_info=True)
             safe_admin_step(chat_id, text, reply_markup=mk, parse_mode="HTML")
@@ -23758,11 +23437,7 @@ def cb_approve_new_user(c):
     conn.close()
 
     try:
-        bot.edit_message_text(
-            f"✅ İstifadəçi təsdiqləndi\nID: {uid}",
-            chat_id=c.message.chat.id,
-            message_id=c.message.message_id,
-        )
+        render_ui(c.message.chat.id, f"✅ İstifadəçi təsdiqləndi\nID: {uid}", None)
     except Exception:
         logger.exception("Failed to edit approve message for user_id=%s", uid)
 
@@ -23787,11 +23462,7 @@ def cb_block_new_user(c):
     block_user(uid)
 
     try:
-        bot.edit_message_text(
-            f"⛔ İstifadəçi bloklandı\nID: {uid}",
-            chat_id=c.message.chat.id,
-            message_id=c.message.message_id,
-        )
+        render_ui(c.message.chat.id, f"⛔ İstifadəçi bloklandı\nID: {uid}", None)
     except Exception:
         logger.exception("Failed to edit block message for user_id=%s", uid)
 
@@ -24294,18 +23965,10 @@ def show_agent_requests_by_rayon(
         )
     )
 
-    try:
-        if message:
-            bot.edit_message_text(
-                header,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-        else:
-            bot.send_message(chat_id, header, reply_markup=mk)
-    except Exception:
-        pass
+    if message:
+        render_ui(message.chat.id, header, mk)
+    else:
+        render_ui(chat_id, header, mk)
 
     if not rows:
         try:
@@ -24647,20 +24310,11 @@ def show_agent_my_customers(
                 "🎯 Müştəri istəkləri", callback_data="agent_requests"
             )
         )
-        try:
-            if message:
-                bot.edit_message_text(
-                    "👥 Hələ müştəri seçməmisiniz.",
-                    chat_id=message.chat.id,
-                    message_id=message.message_id,
-                    reply_markup=mk_empty,
-                )
-            else:
-                bot.send_message(
-                    chat_id, "👥 Hələ müştəri seçməmisiniz.", reply_markup=mk_empty
-                )
-        except Exception:
-            pass
+        text = "👥 Hələ müştəri seçməmisiniz."
+        if message:
+            render_ui(message.chat.id, text, mk_empty)
+        else:
+            render_ui(chat_id, text, mk_empty)
         return
 
     total_pages = max(1, math.ceil(total / PAGE_SIZE_REQ))
@@ -24704,18 +24358,10 @@ def show_agent_my_customers(
     mk.row(*nav_buttons)
     mk.add(types.InlineKeyboardButton("🎯 Rayon seç", callback_data="agent_requests"))
 
-    try:
-        if message:
-            bot.edit_message_text(
-                header,
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-        else:
-            bot.send_message(chat_id, header, reply_markup=mk)
-    except Exception:
-        pass
+    if message:
+        render_ui(message.chat.id, header, mk)
+    else:
+        render_ui(chat_id, header, mk)
 
     for row in rows:
         try:
@@ -25246,19 +24892,7 @@ def show_admin_stats(
         except Exception:
             continue
 
-    if message_id:
-        try:
-            bot.edit_message_text(
-                text,
-                chat_id,
-                message_id,
-                reply_markup=keyboard,
-                parse_mode="HTML",
-            )
-        except Exception:
-            bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode="HTML")
-    else:
-        bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode="HTML")
+    render_ui(chat_id, text, keyboard, parse_mode="HTML")
 
 
 @bot.callback_query_handler(
@@ -25283,7 +24917,7 @@ def handle_stats_period_callback(c):
         pass
 
     if c.message:
-        show_admin_stats(chat_id, period=period, message_id=c.message.message_id)
+        show_admin_stats(chat_id, period=period)
 
 
 @bot.callback_query_handler(
@@ -25308,7 +24942,7 @@ def handle_bonus_stats_period_callback(c):
         pass
 
     if c.message:
-        show_bonus_stats(chat_id, period=period, message_id=c.message.message_id)
+        show_bonus_stats(chat_id, period=period)
 
 
 def show_referral_stats(chat_id: int, message: Optional[types.Message] = None):
@@ -25439,10 +25073,6 @@ def show_bonus_stats(
         lines.append("• Heç bir istifadə yoxdur.")
 
     mk = bonus_stats_period_keyboard(period)
-    if message:
-        message_id = message.message_id
-    if message_id:
-        ui_message_state[chat_id] = message_id
     send_or_edit_ui_message(
         chat_id,
         "\n".join(lines),
