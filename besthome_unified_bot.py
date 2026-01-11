@@ -1803,6 +1803,65 @@ def normalize_dropbox_urls(url: str) -> List[str]:
     return list(dict.fromkeys(candidates))
 
 
+def is_google_drive_url(url: str) -> bool:
+    parts = urlsplit(url)
+    netloc = parts.netloc.lower()
+    return "drive.google.com" in netloc or "docs.google.com" in netloc
+
+
+def download_from_gdrive(url: str, out_path: str) -> Dict[str, Optional[str]]:
+    session = requests.Session()
+    r = session.get(url, stream=True)
+    try:
+        content_type = r.headers.get("Content-Type", "")
+
+        # If HTML returned, Google Drive is asking for confirmation
+        if "text/html" in content_type:
+            confirm = None
+
+            # Try to find token in page
+            m = re.search(r"confirm=([0-9A-Za-z_]+)", r.text)
+            if m:
+                confirm = m.group(1)
+            else:
+                # Try cookies
+                for k, v in session.cookies.items():
+                    if k.startswith("download_warning"):
+                        confirm = v
+                        break
+
+            if not confirm:
+                raise RuntimeError("Google Drive confirmation token not found")
+
+            sep = "&" if "?" in url else "?"
+            url = url + f"{sep}confirm={confirm}"
+            r.close()
+            r = session.get(url, stream=True)
+            content_type = r.headers.get("Content-Type", "")
+            if "text/html" in content_type:
+                raise RuntimeError("Unexpected response type: text/html")
+
+        with open(out_path, "wb") as f:
+            for chunk in r.iter_content(1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+
+        headers = r.headers or {}
+        return {
+            "normalized_url": url,
+            "effective_url": r.url,
+            "status": str(r.status_code),
+            "content_type": headers.get("Content-Type"),
+            "etag": headers.get("ETag"),
+            "last_modified": headers.get("Last-Modified"),
+        }
+    finally:
+        try:
+            r.close()
+        except Exception:
+            pass
+
+
 def _log_download_response(
     normalized_url: str,
     response: requests.Response,
@@ -1900,51 +1959,62 @@ def download_zip_stream(url: str) -> str:
 
 def download_main_db_file(url: str) -> Tuple[str, bool, Dict[str, Optional[str]]]:
     last_error = None
-    for candidate in normalize_dropbox_urls(url):
+    candidates = [url] if is_google_drive_url(url) else normalize_dropbox_urls(url)
+    for candidate in candidates:
         os.makedirs(DB_UPDATE_TMP_DIR, exist_ok=True)
         temp_path = DB_UPDATE_ZIP_PATH
         for path in (DB_UPDATE_ZIP_PATH, DB_UPDATE_DB_PATH):
             if os.path.exists(path):
                 os.remove(path)
         try:
-            with requests.get(
-                candidate,
-                stream=True,
-                timeout=(10, 120),
-                allow_redirects=True,
-            ) as r:
-                download_info = _log_download_response(candidate, r)
-                if r.status_code != 200:
-                    raise RuntimeError(f"HTTP status {r.status_code}")
-                is_zip_response = _response_looks_like_zip(r)
-                is_db_response = _response_looks_like_db(r)
-                if not is_zip_response and not is_db_response:
-                    raise RuntimeError(
-                        f"Unexpected response type: {download_info.get('content_type')}"
-                    )
-                content_length = r.headers.get("Content-Length")
-                if content_length:
-                    try:
-                        size = int(content_length)
-                        if size > DB_UPDATE_MAX_ZIP_BYTES:
-                            raise RuntimeError("Fayl çox böyükdür")
-                        if size < DB_UPDATE_MIN_ZIP_BYTES:
-                            raise RuntimeError("Fayl ölçüsü çox kiçikdir")
-                    except ValueError:
-                        pass
-                total = 0
-                for chunk in r.iter_content(chunk_size=1024 * 1024):
-                    if not chunk:
-                        continue
-                    total += len(chunk)
-                    if total > DB_UPDATE_MAX_ZIP_BYTES:
-                        raise RuntimeError("Fayl çox böyükdür")
-                    with open(temp_path, "ab") as f:
-                        f.write(chunk)
+            if is_google_drive_url(candidate):
+                download_info = download_from_gdrive(candidate, temp_path)
+                total = os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
                 if total <= 0:
                     raise RuntimeError("Fayl ölçüsü sıfırdır")
+                if total > DB_UPDATE_MAX_ZIP_BYTES:
+                    raise RuntimeError("Fayl çox böyükdür")
                 if total < DB_UPDATE_MIN_ZIP_BYTES:
                     raise RuntimeError("Fayl ölçüsü çox kiçikdir")
+            else:
+                with requests.get(
+                    candidate,
+                    stream=True,
+                    timeout=(10, 120),
+                    allow_redirects=True,
+                ) as r:
+                    download_info = _log_download_response(candidate, r)
+                    if r.status_code != 200:
+                        raise RuntimeError(f"HTTP status {r.status_code}")
+                    is_zip_response = _response_looks_like_zip(r)
+                    is_db_response = _response_looks_like_db(r)
+                    if not is_zip_response and not is_db_response:
+                        raise RuntimeError(
+                            f"Unexpected response type: {download_info.get('content_type')}"
+                        )
+                    content_length = r.headers.get("Content-Length")
+                    if content_length:
+                        try:
+                            size = int(content_length)
+                            if size > DB_UPDATE_MAX_ZIP_BYTES:
+                                raise RuntimeError("Fayl çox böyükdür")
+                            if size < DB_UPDATE_MIN_ZIP_BYTES:
+                                raise RuntimeError("Fayl ölçüsü çox kiçikdir")
+                        except ValueError:
+                            pass
+                    total = 0
+                    for chunk in r.iter_content(chunk_size=1024 * 1024):
+                        if not chunk:
+                            continue
+                        total += len(chunk)
+                        if total > DB_UPDATE_MAX_ZIP_BYTES:
+                            raise RuntimeError("Fayl çox böyükdür")
+                        with open(temp_path, "ab") as f:
+                            f.write(chunk)
+                    if total <= 0:
+                        raise RuntimeError("Fayl ölçüsü sıfırdır")
+                    if total < DB_UPDATE_MIN_ZIP_BYTES:
+                        raise RuntimeError("Fayl ölçüsü çox kiçikdir")
             is_zip = zipfile.is_zipfile(temp_path)
             if not is_zip:
                 os.replace(temp_path, DB_UPDATE_DB_PATH)
