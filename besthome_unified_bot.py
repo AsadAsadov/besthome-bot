@@ -898,6 +898,15 @@ def callback_guard(handler):
             getattr(getattr(call, "from_user", None), "id", None),
             getattr(call, "data", None),
         )
+        if call and getattr(call, "from_user", None):
+            chat_id = call.from_user.id
+            if (
+                not is_admin(chat_id)
+                and is_user_support_active(chat_id)
+                and not is_support_callback(call)
+            ):
+                set_support_session_active(chat_id, False)
+                clear_support_ui(chat_id)
         try:
             return handler(call)
         except Exception as exc:
@@ -9464,13 +9473,13 @@ def toggle_support_inbox(chat_id: int, user: types.User) -> None:
         clear_support_ui(chat_id)
         render_support_status(
             chat_id,
-            "🟢 Online dəstək aktivdir.\nMesajlarınız inbox-da saxlanılır.",
+            "🟢 Online dəstək aktivdir",
         )
         return
     close_support_chat_for_user(chat_id)
     render_support_status(
         chat_id,
-        "🔴 Dəstək bağlandı.\nİstədiyiniz vaxt yenidən əlaqə saxlaya bilərsiniz.",
+        "🔴 Dəstək bağlandı",
     )
 
 
@@ -9505,9 +9514,18 @@ def is_main_menu_button_text(chat_id: int, text: Optional[str]) -> bool:
     return False
 
 
-def handle_support_background_navigation(chat_id: int) -> None:
+def is_menu_action(message: types.Message) -> bool:
+    return bool(message.text and is_main_menu_button_text(message.chat.id, message.text))
+
+
+def is_support_callback(call: types.CallbackQuery) -> bool:
+    data = getattr(call, "data", None) or ""
+    return data.startswith("supportuser:") or data.startswith("supportinbox:")
+
+
+def exit_support_mode_for_navigation(chat_id: int) -> None:
+    set_support_session_active(chat_id, False)
     clear_support_ui(chat_id)
-    render_support_status(chat_id, "🟡 Dəstək arxa planda aktivdir.")
 
 
 def delete_last_ui_message_for_support(chat_id: int) -> None:
@@ -17593,7 +17611,7 @@ def cb_support_user_inbox(c):
         safe_answer_callback_query(c.id)
         return
     if action == "back":
-        delete_last_support_ui(chat_id)
+        exit_support_mode_for_navigation(chat_id)
         return_to_main_menu(chat_id)
         safe_answer_callback_query(c.id)
         return
@@ -25454,22 +25472,17 @@ def admin_search_handler(message):
 
 
 @bot.message_handler(
-    content_types=["text", "voice", "document", "photo", "audio", "video"],
+    content_types=["text"],
     func=lambda m: not is_admin(m.chat.id) and is_user_support_active(m.chat.id),
 )
 def support_user_message_router(message):
-    if message.content_type == "text" and message.text and message.text.startswith("/"):
+    if message.text and message.text.startswith("/"):
         return
-    if message.content_type == "text" and message.text in (
-        "⛔ Çatı sonlandır",
-        "🔚 Çatı sonlandır",
-    ):
+    if message.text in ("⛔ Çatı sonlandır", "🔚 Çatı sonlandır"):
         return
-    if message.content_type == "text" and is_main_menu_button_text(
-        message.chat.id, message.text
-    ):
+    if is_menu_action(message):
         if message.text != "💬 Adminlə əlaqə":
-            handle_support_background_navigation(message.chat.id)
+            exit_support_mode_for_navigation(message.chat.id)
         return
     if has_active_text_flow(message.chat.id):
         return
@@ -25508,7 +25521,6 @@ def support_user_message_router(message):
     notify_admins_support_incoming(message.chat.id)
     update_admin_support_ui_on_incoming(message.chat.id)
     send_support_sent_toast(message.chat.id)
-    update_inbox_ui(message.chat.id)
 
 
 @bot.message_handler(
@@ -25544,8 +25556,6 @@ def support_admin_message_router(message):
     )
     increment_user_support_inbox_unread(reply_user_id)
     send_support_reply_notification(reply_user_id)
-    if is_user_support_active(reply_user_id):
-        update_inbox_ui(reply_user_id)
     _set_support_admin_state(message.chat.id, reply_to_user_id=None)
     show_support_thread_view(message.chat.id, reply_user_id, set_active=False)
 
