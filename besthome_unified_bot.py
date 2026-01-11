@@ -571,6 +571,7 @@ DB_UPDATE_UNZIP_TIMEOUT_SECONDS = 120
 DB_UPDATE_VALIDATE_TIMEOUT_SECONDS = 60
 DB_UPDATE_REPLACE_TIMEOUT_SECONDS = 60
 DB_UPDATE_STATE_PATH = os.path.join(DATA_DIR, "db_update_state.json")
+LAST_DB_LINK_PATH = os.path.join(DATA_DIR, "last_db_link.txt")
 DB_UPDATE_TMP_DIR = "/tmp/besthome_update"
 DB_UPDATE_BACKUP_DIR = "/tmp/besthome_backups"
 DB_UPDATE_ZIP_PATH = "/tmp/besthome_update.zip"
@@ -643,8 +644,6 @@ TEXTS_AZ = {
     "admin_panel_reset_limits": "♻️ Limitləri sıfırla",
     "admin_panel_send_update": "🚀 Yeniləmə göndər",
     "admin_panel_topviews": "🔥 Ən çox baxılan elanlar",
-    "admin_panel_db_update": "📦 Bazanı yenilə (Dropbox)",
-    "admin_panel_lastlink_refresh": "🔗 Son link",
     "admin_panel_direct_message": "📨 İstifadəçiyə mesaj göndər",
     "admin_panel_customer_requests_access": "📌 Müştəri istəkləri icazəsi",
     "admin_panel_archived_requests": "🗄 Arxivlənmiş müştəri istəkləri",
@@ -814,8 +813,6 @@ ADMIN_PANEL_BUTTONS = [
     TEXTS_AZ["admin_panel_promos"],
     TEXTS_AZ["admin_panel_send_update"],
     TEXTS_AZ["admin_panel_topviews"],
-    TEXTS_AZ["admin_panel_db_update"],
-    TEXTS_AZ["admin_panel_lastlink_refresh"],
     TEXTS_AZ["admin_panel_direct_message"],
 ]
 ADMIN_PANEL_BACK_MAIN = TEXTS_AZ["admin_panel_back_main"]
@@ -1363,6 +1360,26 @@ def _save_db_update_state_file(state: Dict[str, Any]) -> None:
             json.dump(state, f)
     except Exception:
         logger.exception("Failed to write db update state file")
+
+
+def save_last_db_link(link: str) -> None:
+    try:
+        with open(LAST_DB_LINK_PATH, "w", encoding="utf-8") as f:
+            f.write((link or "").strip())
+    except Exception:
+        logger.exception("Failed to save last db link")
+
+
+def load_last_db_link() -> Optional[str]:
+    if not os.path.exists(LAST_DB_LINK_PATH):
+        return None
+    try:
+        with open(LAST_DB_LINK_PATH, "r", encoding="utf-8") as f:
+            link = f.read().strip()
+    except Exception:
+        logger.exception("Failed to load last db link")
+        return None
+    return link or None
 
 
 def _parse_db_update_ts(raw: Any) -> Optional[datetime]:
@@ -2750,7 +2767,11 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
                 etag,
                 last_modified,
             )
-            safe_admin_step(admin_id, _update_success_message())
+            safe_admin_step(
+                admin_id,
+                _update_success_message(),
+                reply_markup=_build_admin_update_refresh_markup(),
+            )
             return
 
         pre_update_count = None
@@ -2886,7 +2907,11 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             except Exception as e:
                 logger.warning("keyword alert listing scan error: %s", e)
 
-            safe_admin_step(admin_id, _update_success_message())
+            safe_admin_step(
+                admin_id,
+                _update_success_message(),
+                reply_markup=_build_admin_update_refresh_markup(),
+            )
             logger.info(
                 "DB update completed chat_id=%s new=%s",
                 admin_id,
@@ -2897,6 +2922,7 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             safe_admin_step(
                 admin_id,
                 _update_success_message(),
+                reply_markup=_build_admin_update_refresh_markup(),
             )
     except DiskFullError:
         logger.info("❌ Update aborted: disk full")
@@ -17851,12 +17877,6 @@ def _handle_admin_panel_action(
         send_paginated_results(chat_id, "topviews", params={"days": 7}, page=1)
     elif action_text == TEXTS_AZ["admin_panel_hidden_listings"]:
         show_hidden_listings_admin(chat_id, message=message)
-    elif action_text == TEXTS_AZ["admin_panel_db_update"]:
-        send_or_edit_ui_message(
-            chat_id,
-            "ℹ️ /auto_update_db <dropbox_link> əmri ilə yeniləmə başladın.",
-            build_admin_panel_keyboard(chat_id, page=admin_panel_page_state.get(chat_id, 1)),
-        )
     elif action_text == TEXTS_AZ["admin_panel_direct_message"]:
         start_direct_user_message_flow(chat_id, message=message)
     elif action_text == TEXTS_AZ["admin_panel_support_chats"]:
@@ -17888,6 +17908,7 @@ def handle_auto_update_db_link(
     if record_auto_link:
         save_last_dropbox_url(cleaned_url)
         append_dropbox_url_history(cleaned_url)
+        save_last_db_link(cleaned_url)
     trigger_auto_update_db(admin_id, cleaned_url)
     return True
 
@@ -17900,14 +17921,12 @@ def _update_success_message() -> str:
     )
 
 
-def _build_update_db_link_markup(link: str) -> Optional[types.InlineKeyboardMarkup]:
-    if not link or not is_google_drive_url(link):
-        return None
+def _build_admin_update_refresh_markup() -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup(row_width=1)
     mk.add(
         types.InlineKeyboardButton(
             text="🔄 Elanları yenilə",
-            callback_data=f"update_db_from_link|{link}",
+            callback_data="admin_update_from_last_link",
         )
     )
     return mk
@@ -17954,28 +17973,16 @@ def auto_update_db_cmd(m):
     )
 
 
-@bot.callback_query_handler(
-    func=lambda c: c.data and c.data.startswith("update_db_from_link|")
-)
+@bot.callback_query_handler(func=lambda c: c.data == "admin_update_from_last_link")
 @callback_guard
-def cb_update_db_from_link(c):
+def cb_admin_update_from_last_link(c):
     if not is_admin(c.from_user.id):
-        safe_answer_callback_query(c.id)
         return_to_main_menu(c.message.chat.id)
         return
-    link = (c.data.split("|", 1)[1] if c.data else "").strip()
+    link = load_last_db_link()
     if not link:
-        safe_answer_callback_query(c.id, "❌ Link tapılmadı.")
+        safe_admin_step(c.message.chat.id, "❌ Link tapılmadı.")
         return
-    if not (
-        "dropbox.com" in link
-        or "drive.google.com" in link
-        or "googleusercontent.com" in link
-        or "drive.usercontent.google.com" in link
-    ):
-        safe_answer_callback_query(c.id, "❌ Update üçün link tapılmadı.")
-        return
-    safe_answer_callback_query(c.id)
     handle_auto_update_db_link(
         c.message.chat.id,
         link,
@@ -18002,9 +18009,6 @@ def cb_admin_panel(c):
     if c.data.startswith("ui_admin_action_"):
         action_key = c.data.split("_", 3)[-1]
         action_text = ADMIN_PANEL_ACTION_LOOKUP.get(action_key)
-        if action_text == TEXTS_AZ["admin_panel_lastlink_refresh"]:
-            cb_admin_lastlink_refresh(c)
-            return
         if action_text:
             _handle_admin_panel_action(chat_id, action_text, message=c.message)
 
@@ -18090,76 +18094,6 @@ def cb_support_user_inbox(c):
         return
     safe_answer_callback_query(c.id)
 
-
-@bot.callback_query_handler(func=lambda c: c.data == "a_lastlink_refresh")
-@callback_guard
-def cb_admin_lastlink_refresh(c):
-    chat_id = c.message.chat.id
-    if not is_admin(c.from_user.id):
-        safe_answer_callback_query(c.id)
-        return_to_main_menu(chat_id)
-        return
-    history = load_dropbox_url_history()
-    if not history:
-        mk = types.InlineKeyboardMarkup()
-        mk.add(
-            types.InlineKeyboardButton(
-                ADMIN_PANEL_BACK_MAIN, callback_data="ui_admin_menu"
-            )
-        )
-        update_ui_message(
-            chat_id,
-            chat_id,
-            "❌ Hələ sistem tərəfindən göndərilmiş link yoxdur.",
-            mk,
-        )
-        return
-
-    display_history = history[:5]
-    text_lines = ["📜 Son avtomatik linklər", "────────────────────"]
-    for item in display_history:
-        text_lines.append(f"🕒 {format_auto_link_datetime(item['datetime'])}")
-        text_lines.append(f"🔗 {item['url']}")
-        text_lines.append("")
-    text = "\n".join(text_lines).strip()
-    mk = types.InlineKeyboardMarkup()
-    for item in display_history:
-        link = item.get("url", "")
-        drive_mk = _build_update_db_link_markup(link)
-        if drive_mk:
-            mk.add(*drive_mk.keyboard[0])
-    mk.add(types.InlineKeyboardButton("🔄 Yenilə", callback_data="a_run_lastlink_latest"))
-    mk.add(types.InlineKeyboardButton(ADMIN_PANEL_BACK_MAIN, callback_data="ui_admin_menu"))
-    update_ui_message(chat_id, chat_id, text, mk)
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("a_run_lastlink_"))
-@callback_guard
-def cb_admin_run_lastlink(c):
-    chat_id = c.message.chat.id
-    if not is_admin(c.from_user.id):
-        safe_answer_callback_query(c.id)
-        return_to_main_menu(chat_id)
-        return
-    history = load_dropbox_url_history()
-    if not history:
-        safe_answer_callback_query(
-            c.id, "❌ Hələ sistem tərəfindən göndərilmiş link yoxdur."
-        )
-        return
-    selected_link = history[0]["url"]
-    mk = build_admin_panel_keyboard(chat_id, page=admin_panel_page_state.get(chat_id, 1))
-    drive_mk = _build_update_db_link_markup(selected_link)
-    if drive_mk:
-        mk.add(*drive_mk.keyboard[0])
-    update_ui_message(
-        chat_id,
-        chat_id,
-        "🔄 Yenilənmə başladıldı\n🔗 İstifadə olunan link:\n"
-        f"{selected_link}",
-        mk,
-    )
-    trigger_auto_update_db(chat_id, selected_link)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("admin_stats_menu:"))
