@@ -905,7 +905,6 @@ def callback_guard(handler):
                 and is_user_support_active(chat_id)
                 and not is_support_callback(call)
             ):
-                set_support_session_active(chat_id, False)
                 clear_support_ui(chat_id)
         try:
             return handler(call)
@@ -7120,6 +7119,12 @@ def send_with_reply_keyboard(
 
 
 def delete_user_command_message(message: types.Message) -> None:
+    if (
+        not is_admin(message.chat.id)
+        and is_user_support_active(message.chat.id)
+        and is_menu_action(message)
+    ):
+        clear_support_ui(message.chat.id)
     try:
         bot.delete_message(message.chat.id, message.message_id)
     except Exception:
@@ -7308,6 +7313,8 @@ def build_main_menu(
 
     if not is_admin_user:
         buttons.append("💬 Adminlə əlaqə")
+        if is_user_support_active(chat_id):
+            buttons.append("⛔ Çatı sonlandır")
         buttons.append("🤝 Dostunu dəvət et")
 
     if is_feature_enabled("about", chat_id):
@@ -9424,7 +9431,12 @@ def open_support_chat_from_menu(message):
     if is_admin(message.chat.id):
         return
     delete_user_command_message(message)
-    toggle_support_inbox(message.chat.id, message.from_user)
+    start_support_chat_for_user(message.chat.id, message.from_user)
+    clear_support_ui(message.chat.id)
+    render_support_status(
+        message.chat.id,
+        "🟢 Online dəstək aktivdir",
+    )
 
 
 @bot.message_handler(func=lambda m: m.text in ("⛔ Çatı sonlandır", "🔚 Çatı sonlandır"))
@@ -9463,23 +9475,17 @@ def close_support_session(chat_id: int) -> None:
     close_support_chat_for_user(chat_id)
     render_support_status(
         chat_id,
-        "🔴 Dəstək bağlandı.\nİstədiyiniz vaxt yenidən əlaqə saxlaya bilərsiniz.",
+        "🔴 Dəstək bağlandı",
     )
 
 
 def toggle_support_inbox(chat_id: int, user: types.User) -> None:
     if not is_user_support_active(chat_id):
         start_support_chat_for_user(chat_id, user)
-        clear_support_ui(chat_id)
-        render_support_status(
-            chat_id,
-            "🟢 Online dəstək aktivdir",
-        )
-        return
-    close_support_chat_for_user(chat_id)
+    clear_support_ui(chat_id)
     render_support_status(
         chat_id,
-        "🔴 Dəstək bağlandı",
+        "🟢 Online dəstək aktivdir",
     )
 
 
@@ -9514,8 +9520,12 @@ def is_main_menu_button_text(chat_id: int, text: Optional[str]) -> bool:
     return False
 
 
-def is_menu_action(message: types.Message) -> bool:
-    return bool(message.text and is_main_menu_button_text(message.chat.id, message.text))
+def is_menu_action(message: Union[types.Message, types.CallbackQuery]) -> bool:
+    if isinstance(message, types.CallbackQuery):
+        return True
+    return bool(
+        message.text and is_main_menu_button_text(message.chat.id, message.text)
+    )
 
 
 def is_support_callback(call: types.CallbackQuery) -> bool:
@@ -9524,7 +9534,6 @@ def is_support_callback(call: types.CallbackQuery) -> bool:
 
 
 def exit_support_mode_for_navigation(chat_id: int) -> None:
-    set_support_session_active(chat_id, False)
     clear_support_ui(chat_id)
 
 
@@ -25473,16 +25482,16 @@ def admin_search_handler(message):
 
 @bot.message_handler(
     content_types=["text"],
-    func=lambda m: not is_admin(m.chat.id) and is_user_support_active(m.chat.id),
+    func=lambda m: (
+        not is_admin(m.chat.id)
+        and is_user_support_active(m.chat.id)
+        and bool(m.text)
+        and not m.text.startswith("/")
+        and not is_menu_action(m)
+    ),
 )
 def support_user_message_router(message):
-    if message.text and message.text.startswith("/"):
-        return
     if message.text in ("⛔ Çatı sonlandır", "🔚 Çatı sonlandır"):
-        return
-    if is_menu_action(message):
-        if message.text != "💬 Adminlə əlaqə":
-            exit_support_mode_for_navigation(message.chat.id)
         return
     if has_active_text_flow(message.chat.id):
         return
