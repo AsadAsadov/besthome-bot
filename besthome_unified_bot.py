@@ -9,7 +9,6 @@
 CURRENT_VERSION = "v10"
 
 import os
-import io
 import time
 import errno
 import zipfile
@@ -25,7 +24,6 @@ import logging
 import json
 import hashlib
 import glob
-import pickle
 import uuid
 from datetime import datetime, date, timedelta, timezone
 from collections import Counter, defaultdict
@@ -35,10 +33,6 @@ from urllib.parse import quote, unquote, urlsplit, urlunsplit, parse_qs, urlenco
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 import requests
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
 from flask import (
     Flask,
     jsonify,
@@ -1781,7 +1775,6 @@ ZIP_ALLOWED_MIME_TYPES = {
     "application/x-zip-compressed",
     "application/octet-stream",
 }
-DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
 
 def normalize_dropbox_urls(url: str) -> List[str]:
@@ -1816,71 +1809,25 @@ def is_google_drive_url(url: str) -> bool:
         "drive.google.com" in netloc
         or "docs.google.com" in netloc
         or "googleusercontent.com" in netloc
+        or "usercontent.google.com" in netloc
     )
 
 
 def extract_drive_file_id(url: str) -> str:
     match = re.search(r"[?&]id=([A-Za-z0-9_-]+)", url)
-    if not match:
-        raise RuntimeError("Google Drive linkində file id tapılmadı")
-    return match.group(1)
+    if match:
+        return match.group(1)
+    match = re.search(r"/d/([A-Za-z0-9_-]+)", url)
+    if match:
+        return match.group(1)
+    raise RuntimeError("Google Drive linkində file id tapılmadı")
 
 
-def _load_drive_credentials() -> Credentials:
-    token_candidates = [
-        os.path.join(BASE_DIR, "token.json"),
-        os.path.join(BASE_DIR, "token.pickle"),
-        "token.json",
-        "token.pickle",
-    ]
-    token_path = next((path for path in token_candidates if os.path.exists(path)), None)
-    if not token_path:
-        raise RuntimeError("Google Drive OAuth token faylı tapılmadı (token.json/token.pickle)")
-
-    if token_path.endswith(".json"):
-        creds = Credentials.from_authorized_user_file(token_path, DRIVE_SCOPES)
-    else:
-        with open(token_path, "rb") as token_file:
-            creds = pickle.load(token_file)
-
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-            if token_path.endswith(".json"):
-                with open(token_path, "w", encoding="utf-8") as token_file:
-                    token_file.write(creds.to_json())
-            else:
-                with open(token_path, "wb") as token_file:
-                    pickle.dump(creds, token_file)
-        else:
-            raise RuntimeError("Google Drive OAuth token etibarsızdır və yenilənə bilmir")
-
-    return creds
-
-
-def download_from_gdrive_api(file_id: str, out_path: str) -> Dict[str, Optional[str]]:
-    creds = _load_drive_credentials()
-    service = build("drive", "v3", credentials=creds, cache_discovery=False)
-    request = service.files().get_media(fileId=file_id)
-    with io.FileIO(out_path, "wb") as fh:
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            _status, done = downloader.next_chunk()
-
-    metadata = (
-        service.files()
-        .get(fileId=file_id, fields="id,name,etag,modifiedTime,mimeType,size")
-        .execute()
+def build_gdrive_direct_download_url(file_id: str) -> str:
+    return (
+        "https://drive.usercontent.google.com/download"
+        f"?id={file_id}&export=download&confirm=t"
     )
-    return {
-        "normalized_url": f"gdrive://{file_id}",
-        "effective_url": f"gdrive://{file_id}",
-        "status": "200",
-        "content_type": metadata.get("mimeType"),
-        "etag": metadata.get("etag"),
-        "last_modified": metadata.get("modifiedTime"),
-    }
 
 
 def _log_download_response(
@@ -1995,54 +1942,47 @@ def download_main_db_file(url: str) -> Tuple[str, bool, Dict[str, Optional[str]]
             if os.path.exists(path):
                 os.remove(path)
         try:
+            download_url = candidate
             if is_google_drive_url(candidate):
                 file_id = extract_drive_file_id(candidate)
-                download_info = download_from_gdrive_api(file_id, temp_path)
-                total = os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
+                download_url = build_gdrive_direct_download_url(file_id)
+            with requests.get(
+                download_url,
+                stream=True,
+                timeout=(10, 120),
+                allow_redirects=True,
+            ) as r:
+                download_info = _log_download_response(download_url, r)
+                if r.status_code != 200:
+                    raise RuntimeError(f"HTTP status {r.status_code}")
+                is_zip_response = _response_looks_like_zip(r)
+                if not is_zip_response:
+                    raise RuntimeError(
+                        f"Unexpected response type: {download_info.get('content_type')}"
+                    )
+                content_length = r.headers.get("Content-Length")
+                if content_length:
+                    try:
+                        size = int(content_length)
+                        if size > DB_UPDATE_MAX_ZIP_BYTES:
+                            raise RuntimeError("Fayl çox böyükdür")
+                        if size < DB_UPDATE_MIN_ZIP_BYTES:
+                            raise RuntimeError("Fayl ölçüsü çox kiçikdir")
+                    except ValueError:
+                        pass
+                total = 0
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > DB_UPDATE_MAX_ZIP_BYTES:
+                        raise RuntimeError("Fayl çox böyükdür")
+                    with open(temp_path, "ab") as f:
+                        f.write(chunk)
                 if total <= 0:
                     raise RuntimeError("Fayl ölçüsü sıfırdır")
-                if total > DB_UPDATE_MAX_ZIP_BYTES:
-                    raise RuntimeError("Fayl çox böyükdür")
                 if total < DB_UPDATE_MIN_ZIP_BYTES:
                     raise RuntimeError("Fayl ölçüsü çox kiçikdir")
-            else:
-                with requests.get(
-                    candidate,
-                    stream=True,
-                    timeout=(10, 120),
-                    allow_redirects=True,
-                ) as r:
-                    download_info = _log_download_response(candidate, r)
-                    if r.status_code != 200:
-                        raise RuntimeError(f"HTTP status {r.status_code}")
-                    is_zip_response = _response_looks_like_zip(r)
-                    if not is_zip_response:
-                        raise RuntimeError(
-                            f"Unexpected response type: {download_info.get('content_type')}"
-                        )
-                    content_length = r.headers.get("Content-Length")
-                    if content_length:
-                        try:
-                            size = int(content_length)
-                            if size > DB_UPDATE_MAX_ZIP_BYTES:
-                                raise RuntimeError("Fayl çox böyükdür")
-                            if size < DB_UPDATE_MIN_ZIP_BYTES:
-                                raise RuntimeError("Fayl ölçüsü çox kiçikdir")
-                        except ValueError:
-                            pass
-                    total = 0
-                    for chunk in r.iter_content(chunk_size=1024 * 1024):
-                        if not chunk:
-                            continue
-                        total += len(chunk)
-                        if total > DB_UPDATE_MAX_ZIP_BYTES:
-                            raise RuntimeError("Fayl çox böyükdür")
-                        with open(temp_path, "ab") as f:
-                            f.write(chunk)
-                    if total <= 0:
-                        raise RuntimeError("Fayl ölçüsü sıfırdır")
-                    if total < DB_UPDATE_MIN_ZIP_BYTES:
-                        raise RuntimeError("Fayl ölçüsü çox kiçikdir")
             _ensure_zip_magic(temp_path)
             return temp_path, True, download_info
         except Exception as exc:
@@ -17556,7 +17496,12 @@ def handle_auto_update_db_link(
 def extract_dropbox_url_from_text(text: str) -> Optional[str]:
     if not text:
         return None
-    allowed_domains = ("dropbox.com", "drive.google.com", "googleusercontent.com")
+    allowed_domains = (
+        "dropbox.com",
+        "drive.google.com",
+        "googleusercontent.com",
+        "drive.usercontent.google.com",
+    )
     for token in text.split():
         candidate = token.strip().strip("()[]<>.,")
         if not any(domain in candidate.lower() for domain in allowed_domains):
@@ -17578,6 +17523,7 @@ def auto_update_db_cmd(m):
         "dropbox.com" in link
         or "drive.google.com" in link
         or "googleusercontent.com" in link
+        or "drive.usercontent.google.com" in link
     ):
         bot.send_message(m.chat.id, "❌ Update üçün link tapılmadı.")
         return
