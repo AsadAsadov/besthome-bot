@@ -17461,15 +17461,13 @@ def handle_auto_update_db_link(
 def extract_dropbox_url_from_text(text: str) -> Optional[str]:
     if not text:
         return None
+    allowed_domains = ("dropbox.com", "drive.google.com", "googleusercontent.com")
     for token in text.split():
-        if "dropbox" not in token.lower():
-            continue
         candidate = token.strip().strip("()[]<>.,")
+        if not any(domain in candidate.lower() for domain in allowed_domains):
+            continue
         parts = urlsplit(candidate)
-        if (
-            parts.scheme.lower() in {"http", "https"}
-            and "dropbox" in parts.netloc.lower()
-        ):
+        if parts.scheme.lower() in {"http", "https"}:
             return candidate
     return None
 
@@ -17480,11 +17478,13 @@ def auto_update_db_cmd(m):
         return
     text = (m.text or "").strip()
     dropbox_url = extract_dropbox_url_from_text(text)
-    if not text.startswith("/auto_update_db ") or not dropbox_url:
-        bot.send_message(
-            m.chat.id,
-            "❌ Update üçün link tapılmadı.\nİstifadə: /auto_update_db <dropbox_link>"
-        )
+    link = dropbox_url or ""
+    if not (
+        "dropbox.com" in link
+        or "drive.google.com" in link
+        or "googleusercontent.com" in link
+    ):
+        bot.send_message(m.chat.id, "❌ Update üçün link tapılmadı.")
         return
     handle_auto_update_db_link(
         m.chat.id,
