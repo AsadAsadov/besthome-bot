@@ -5649,10 +5649,16 @@ def _should_notify_admin_for_user(user_id: int) -> bool:
 def notify_admins_support_incoming(user_id: int) -> None:
     if not _should_notify_admin_for_user(user_id):
         return
-    text = f"🔔 Yeni support mesajı — {user_id}"
+    text = f"🔔 Yeni support mesajı var — user_id: {user_id}"
+    mk = types.InlineKeyboardMarkup()
+    mk.add(
+        types.InlineKeyboardButton(
+            "Inbox-a bax", callback_data=f"supportinbox:open:{user_id}"
+        )
+    )
     for admin_id in ADMIN_IDS:
         try:
-            bot.send_message(int(admin_id), text)
+            bot.send_message(int(admin_id), text, reply_markup=mk)
         except Exception:
             logger.exception("Failed to notify admin about support message")
 
@@ -9470,7 +9476,7 @@ def open_support_chat_from_menu(message):
     toggle_support_inbox(message.chat.id, message.from_user)
 
 
-def close_support_chat_for_user(chat_id: int) -> None:
+def close_support_chat_for_user(chat_id: int, *, keep_ui: bool = False) -> None:
     now_ts = now_utc().isoformat()
     thread = get_support_thread_by_user(chat_id)
     if thread:
@@ -9483,8 +9489,9 @@ def close_support_chat_for_user(chat_id: int) -> None:
             last_message_from=thread.get("last_message_from"),
         )
     set_support_session_active(chat_id, False)
-    set_support_session_last_ui_message_id(chat_id, None)
-    delete_last_support_ui(chat_id)
+    if not keep_ui:
+        set_support_session_last_ui_message_id(chat_id, None)
+        delete_last_support_ui(chat_id)
 
 
 def open_support_inbox(chat_id: int, user: types.User) -> None:
@@ -9493,7 +9500,7 @@ def open_support_inbox(chat_id: int, user: types.User) -> None:
 
 
 def close_support_session(chat_id: int) -> None:
-    close_support_chat_for_user(chat_id)
+    close_support_chat_for_user(chat_id, keep_ui=True)
     render_support_status(
         chat_id,
         "🔴 Dəstək bağlandı.",
@@ -9503,17 +9510,21 @@ def close_support_session(chat_id: int) -> None:
 def toggle_support_inbox(chat_id: int, user: types.User) -> None:
     if not is_user_support_active(chat_id):
         start_support_chat_for_user(chat_id, user)
-        clear_support_ui(chat_id)
-    else:
-        clear_support_ui(chat_id)
+        render_support_status(
+            chat_id,
+            "🟢 Dəstək aktivdir. Mesajlarınız yönləndirilir.\n"
+            "İstənilən vaxt menyudan istifadə edə bilərsiniz.",
+        )
+        return
+    close_support_chat_for_user(chat_id, keep_ui=True)
     render_support_status(
         chat_id,
-        "🟢 Online dəstək aktivdir.\nMesajlarınız dəstəyə yönləndirilir.",
+        "🔴 Dəstək bağlandı.",
     )
 
 
 def end_support_session_from_admin(chat_id: int) -> None:
-    close_support_chat_for_user(chat_id)
+    close_support_chat_for_user(chat_id, keep_ui=True)
     render_support_status(
         chat_id,
         "🔴 Dəstək bağlandı.",
@@ -9639,6 +9650,31 @@ def render_support_ui(
     disable_preview: Optional[bool] = None,
     fallback_message_id: Optional[int] = None,
 ) -> Optional[int]:
+    message_id = None
+    if is_admin(chat_id):
+        message_id = support_admin_state.get(chat_id, {}).get("message_id")
+    else:
+        state = get_support_session_state(chat_id)
+        message_id = state.get("last_ui_message_id")
+    if message_id:
+        try:
+            bot.edit_message_text(
+                text,
+                chat_id,
+                int(message_id),
+                reply_markup=keyboard,
+                parse_mode=parse_mode,
+                disable_web_page_preview=disable_preview,
+            )
+            if is_admin(chat_id):
+                _set_support_admin_state(chat_id, message_id=message_id)
+            else:
+                set_support_session_last_ui_message_id(chat_id, message_id)
+            return int(message_id)
+        except Exception as exc:
+            if "message is not modified" in str(exc).lower():
+                return int(message_id)
+            logger.debug("Support UI edit failed chat_id=%s message_id=%s", chat_id, message_id)
     delete_last_support_ui(chat_id, fallback_message_id=fallback_message_id)
     try:
         msg = bot.send_message(
