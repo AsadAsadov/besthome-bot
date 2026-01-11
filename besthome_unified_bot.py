@@ -116,15 +116,41 @@ class _BotProxy:
             raise RuntimeError("Bot is not initialized. Call main() first.")
         attr = getattr(self._bot, name)
 
-        if (
-            name.startswith("send_")
-            or name.startswith("edit_message")
-            or name
-            in (
-                "answer_callback_query",
-                "delete_message",
-            )
-        ):
+        if name == "edit_message_text":
+
+            def wrapped(*args, **kwargs):
+                try:
+                    return _edit_last_message_text(self, attr, *args, **kwargs)
+                except Exception as e:
+                    logger.warning(f"Telegram edit error ignored: {e}")
+
+            return wrapped
+
+        if name == "edit_message_reply_markup":
+
+            def wrapped(*args, **kwargs):
+                try:
+                    return _edit_last_message_reply_markup(self, attr, *args, **kwargs)
+                except Exception as e:
+                    logger.warning(f"Telegram edit error ignored: {e}")
+
+            return wrapped
+
+        if name.startswith("send_"):
+
+            def wrapped(*args, **kwargs):
+                try:
+                    result = attr(*args, **kwargs)
+                except Exception as e:
+                    logger.warning(f"Telegram send error ignored: {e}")
+                    return None
+                chat_id = _extract_send_chat_id(args, kwargs)
+                _track_sent_message(chat_id, result)
+                return result
+
+            return wrapped
+
+        if name in ("answer_callback_query", "delete_message"):
 
             def wrapped(*args, **kwargs):
                 try:
@@ -244,6 +270,116 @@ today_results_cache: Dict[int, Dict[str, Any]] = {}
 payment_plan_selection: Dict[int, Dict[str, Any]] = {}
 
 logger = logging.getLogger("besthome_bot")
+
+
+def _record_last_bot_message_id(
+    chat_id: Optional[int], message_id: Optional[int]
+) -> None:
+    if not chat_id or not message_id:
+        return
+    user_last_message_id[chat_id] = message_id
+    last_ui_message_id[chat_id] = message_id
+
+
+def _extract_send_chat_id(args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> Optional[int]:
+    if "chat_id" in kwargs:
+        return kwargs.get("chat_id")
+    if args:
+        return args[0]
+    return None
+
+
+def _extract_message_id_from_result(result: Any) -> Optional[int]:
+    if isinstance(result, list):
+        for item in reversed(result):
+            message_id = getattr(item, "message_id", None)
+            if message_id:
+                return message_id
+        return None
+    return getattr(result, "message_id", None)
+
+
+def _track_sent_message(chat_id: Optional[int], result: Any) -> None:
+    message_id = _extract_message_id_from_result(result)
+    if message_id:
+        _record_last_bot_message_id(chat_id, message_id)
+
+
+def _extract_edit_text_payload(
+    args: Tuple[Any, ...], kwargs: Dict[str, Any]
+) -> Tuple[Optional[str], Optional[int], Dict[str, Any]]:
+    text = kwargs.get("text")
+    if text is None and len(args) >= 1:
+        text = args[0]
+    chat_id = kwargs.get("chat_id")
+    if chat_id is None and len(args) >= 2:
+        chat_id = args[1]
+    payload = dict(kwargs)
+    payload.pop("text", None)
+    payload.pop("chat_id", None)
+    payload.pop("message_id", None)
+    return text, chat_id, payload
+
+
+def _extract_edit_reply_markup_payload(
+    args: Tuple[Any, ...], kwargs: Dict[str, Any]
+) -> Tuple[Optional[int], Optional[types.InlineKeyboardMarkup], Dict[str, Any]]:
+    chat_id = kwargs.get("chat_id")
+    if chat_id is None and len(args) >= 1:
+        chat_id = args[0]
+    reply_markup = kwargs.get("reply_markup")
+    if reply_markup is None and len(args) >= 3:
+        reply_markup = args[2]
+    payload = dict(kwargs)
+    payload.pop("chat_id", None)
+    payload.pop("message_id", None)
+    payload.pop("reply_markup", None)
+    return chat_id, reply_markup, payload
+
+
+def _edit_last_message_text(proxy: _BotProxy, edit_func, *args, **kwargs):
+    text, chat_id, payload = _extract_edit_text_payload(args, kwargs)
+    if chat_id is None or text is None:
+        return edit_func(*args, **kwargs)
+    message_id = user_last_message_id.get(chat_id)
+    if message_id:
+        result = edit_func(
+            text,
+            chat_id,
+            message_id,
+            **payload,
+        )
+        _record_last_bot_message_id(chat_id, message_id)
+        return result
+    send_kwargs = {
+        key: payload.get(key)
+        for key in (
+            "reply_markup",
+            "parse_mode",
+            "disable_web_page_preview",
+            "entities",
+        )
+        if payload.get(key) is not None
+    }
+    return proxy.send_message(chat_id, text, **send_kwargs)
+
+
+def _edit_last_message_reply_markup(proxy: _BotProxy, edit_func, *args, **kwargs):
+    chat_id, reply_markup, payload = _extract_edit_reply_markup_payload(args, kwargs)
+    if chat_id is None:
+        return edit_func(*args, **kwargs)
+    message_id = user_last_message_id.get(chat_id)
+    if message_id:
+        result = edit_func(
+            chat_id=chat_id,
+            message_id=message_id,
+            reply_markup=reply_markup,
+            **payload,
+        )
+        _record_last_bot_message_id(chat_id, message_id)
+        return result
+    fallback_text = payload.pop("fallback_text", "\u2063")
+    return proxy.send_message(chat_id, fallback_text, reply_markup=reply_markup)
 
 
 @bot.message_handler(commands=["start"])
@@ -410,6 +546,7 @@ ui_context_state: Dict[int, str] = defaultdict(lambda: UI_CONTEXT_MAIN)
 ui_message_state: Dict[int, int] = {}
 last_ui_message_id: Dict[int, int] = ui_message_state
 last_user_message_id: Dict[int, int] = {}
+user_last_message_id: Dict[int, int] = {}
 support_sessions: Dict[int, Dict[str, Any]] = {}
 STATE_MAIN_MENU = "STATE_MAIN_MENU"
 STATE_SEARCH_MENU = "STATE_SEARCH_MENU"
@@ -7187,7 +7324,9 @@ def recover_main_menu(
     if message:
         try:
             bot.edit_message_reply_markup(
-                chat_id, message.message_id, reply_markup=None
+                chat_id=chat_id,
+                reply_markup=None,
+                fallback_text=text or "Əsas menyu",
             )
         except Exception:
             logger.debug("Menu recovery edit failed chat_id=%s", chat_id)
@@ -7259,7 +7398,7 @@ def update_ui_message(
     parse_mode: Optional[str] = None,
     disable_preview: Optional[bool] = None,
 ) -> Optional[int]:
-    message_id = last_ui_message_id.get(user_id)
+    message_id = user_last_message_id.get(user_id)
     last_user = last_user_message_id.get(user_id)
     in_admin_chat = False
     if message_id and last_user and message_id < last_user:
@@ -7273,6 +7412,7 @@ def update_ui_message(
             )
         message_id = None
         last_ui_message_id[user_id] = None
+        user_last_message_id[user_id] = None
         set_support_session_last_ui_message_id(user_id, None)
     if in_admin_chat and message_id:
         try:
@@ -7285,6 +7425,7 @@ def update_ui_message(
             )
         message_id = None
         last_ui_message_id[user_id] = None
+        user_last_message_id[user_id] = None
         set_support_session_last_ui_message_id(user_id, None)
     if message_id and not in_admin_chat:
         try:
@@ -7297,10 +7438,12 @@ def update_ui_message(
                 disable_web_page_preview=disable_preview,
             )
             set_support_session_last_ui_message_id(user_id, message_id)
+            user_last_message_id[user_id] = message_id
             return message_id
         except Exception as exc:
             if "message is not modified" in str(exc).lower():
                 last_ui_message_id[user_id] = message_id
+                user_last_message_id[user_id] = message_id
                 set_support_session_last_ui_message_id(user_id, message_id)
                 return message_id
             logger.debug("update_ui_message edit failed chat_id=%s", chat_id)
@@ -7313,6 +7456,7 @@ def update_ui_message(
             disable_web_page_preview=disable_preview,
         )
         last_ui_message_id[user_id] = msg.message_id
+        user_last_message_id[user_id] = msg.message_id
         set_support_session_last_ui_message_id(user_id, msg.message_id)
         return msg.message_id
     except Exception:
@@ -22975,7 +23119,9 @@ def _send_bulk_action_menu(
     if message:
         try:
             bot.edit_message_reply_markup(
-                chat_id=chat_id, message_id=message.message_id, reply_markup=mk
+                chat_id=chat_id,
+                reply_markup=mk,
+                fallback_text="Seçilən istifadəçilər üçün müddət seçin:",
             )
             return
         except Exception:
@@ -23222,7 +23368,10 @@ def cb_chance_toggle(c):
         )
         try:
             bot.edit_message_reply_markup(
-                chat_id=chat_id, message_id=c.message.message_id, reply_markup=mk
+                chat_id=chat_id,
+                reply_markup=mk,
+                fallback_text=(c.message.text if c.message else None)
+                or "İstifadəçi paneli yeniləndi.",
             )
         except Exception:
             pass
