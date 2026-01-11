@@ -545,6 +545,7 @@ last_ui_message_id: Dict[int, int] = ui_message_state
 last_user_message_id: Dict[int, int] = {}
 user_last_message_id: Dict[int, int] = {}
 user_last_message: Dict[int, Dict[str, Any]] = {}
+last_update_link_message_id: Dict[int, int] = {}
 support_sessions: Dict[int, Dict[str, Any]] = {}
 STATE_MAIN_MENU = "STATE_MAIN_MENU"
 STATE_SEARCH_MENU = "STATE_SEARCH_MENU"
@@ -2770,7 +2771,6 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             safe_admin_step(
                 admin_id,
                 _update_success_message(),
-                reply_markup=_build_admin_update_refresh_markup(),
             )
             return
 
@@ -2910,7 +2910,6 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             safe_admin_step(
                 admin_id,
                 _update_success_message(),
-                reply_markup=_build_admin_update_refresh_markup(),
             )
             logger.info(
                 "DB update completed chat_id=%s new=%s",
@@ -2922,7 +2921,6 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             safe_admin_step(
                 admin_id,
                 _update_success_message(),
-                reply_markup=_build_admin_update_refresh_markup(),
             )
     except DiskFullError:
         logger.info("❌ Update aborted: disk full")
@@ -17966,6 +17964,12 @@ def auto_update_db_cmd(m):
     ):
         bot.send_message(m.chat.id, "❌ Update üçün link tapılmadı.")
         return
+    link_message = bot.send_message(
+        m.chat.id,
+        f"/auto_update_db {link}",
+        reply_markup=_build_admin_update_refresh_markup(),
+    )
+    last_update_link_message_id[m.chat.id] = link_message.message_id
     handle_auto_update_db_link(
         m.chat.id,
         dropbox_url,
