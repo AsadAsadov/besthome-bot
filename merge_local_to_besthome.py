@@ -33,7 +33,8 @@ def ensure_listings_table(conn):
             contact_name TEXT,
             summary TEXT,
             address TEXT,
-            source_link TEXT
+            source_link TEXT,
+            is_hidden INTEGER DEFAULT 0
         )
     """
     )

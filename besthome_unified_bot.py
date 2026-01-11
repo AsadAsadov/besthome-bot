@@ -629,6 +629,7 @@ TEXTS_AZ = {
     "admin_panel_nav_prev": "◀️ Əvvəlki səhifə",
     "admin_panel_back_main": "🔙 Geri",
     "admin_panel_pending_listings": "✅ Təsdiqlənməyən elanlar",
+    "admin_panel_hidden_listings": "🕶 Gizlədilən elanlar",
     "admin_panel_stats": "📊 Statistikalar",
     "admin_panel_customer_requests": "📌 Müştəri istəkləri",
     "admin_panel_financial_reports": "💰 Maliyyə hesabatları",
@@ -802,6 +803,7 @@ FINANCIAL_REPORTS_MENU = [
 ADMIN_PAYMENTS_BUTTON = "💳 Ödənişlər"
 ADMIN_PANEL_BUTTONS = [
     TEXTS_AZ["admin_panel_stats"],
+    TEXTS_AZ["admin_panel_hidden_listings"],
     FINANCIAL_REPORTS_BUTTON,
     ADMIN_PAYMENTS_BUTTON,
     TEXTS_AZ["admin_panel_support_chats"],
@@ -3745,6 +3747,14 @@ def init_main_db_indices():
             "listings",
             ("inserted_at", "date_read", "date_added", "Elanin_tarixi", "added_at"),
         )
+        try:
+            listings_cols = _table_columns(conn, "listings")
+            if "is_hidden" not in listings_cols:
+                cur.execute(
+                    "ALTER TABLE listings ADD COLUMN is_hidden INTEGER DEFAULT 0"
+                )
+        except sqlite3.OperationalError:
+            pass
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_main_operation ON listings(operation)"
         )
@@ -6509,11 +6519,15 @@ def count_local_active_listings(
         conn.close()
 
 
-def count_today_listings(filters: dict, op_override: Optional[str] = None) -> int:
+def count_today_listings(
+    filters: dict, op_override: Optional[str] = None, *, include_hidden: bool = False
+) -> int:
     filters = dict(filters or {})
     if op_override is not None:
         filters["op"] = op_override
-    _, total = query_today_results(filters, offset=0, limit=None)
+    _, total = query_today_results(
+        filters, offset=0, limit=None, include_hidden=include_hidden
+    )
     return total
 
 
@@ -6612,10 +6626,43 @@ def build_listing_action_keyboard(
     return mk
 
 
+def build_listing_visibility_button(
+    listing: dict,
+    *,
+    admin_mode: Optional[str],
+    chat_id: int,
+) -> Optional[types.InlineKeyboardButton]:
+    if not is_admin(chat_id):
+        return None
+    if listing.get("__source") != "main":
+        return None
+    listing_id = listing.get("id")
+    if listing_id is None:
+        return None
+    if listing.get("is_hidden") is None:
+        return None
+    is_hidden = bool(int(listing.get("is_hidden") or 0))
+    if is_hidden:
+        label = (
+            "👁‍🗨 Hamıya göstər"
+            if admin_mode == "admin_hidden"
+            else "👁‍🗨 Yenidən göstər"
+        )
+        action = "show"
+    else:
+        label = "🚫 Elanı gizlət"
+        action = "hide"
+    return types.InlineKeyboardButton(
+        label, callback_data=f"listing_vis:{action}:{listing_id}"
+    )
+
+
 def build_listing_navigation_keyboard(
     is_favorite: bool,
     listing_link: Optional[str] = None,
     whatsapp_url: Optional[str] = None,
+    *,
+    visibility_button: Optional[types.InlineKeyboardButton] = None,
 ) -> types.InlineKeyboardMarkup:
     fav_label = "❤️ Favori" if is_favorite else "🤍 Favori"
     mk = build_listing_action_keyboard(
@@ -6625,10 +6672,8 @@ def build_listing_navigation_keyboard(
         types.InlineKeyboardButton("⬅️ Əvvəlki", callback_data="nav:prev"),
         types.InlineKeyboardButton("➡️ Növbəti", callback_data="nav:next"),
     )
-    mk.row(
-        types.InlineKeyboardButton("⏭ +5", callback_data="nav:+5"),
-        types.InlineKeyboardButton("⏮ -5", callback_data="nav:-5"),
-    )
+    if visibility_button:
+        mk.row(visibility_button)
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="nav:back"))
     return mk
 
@@ -6770,7 +6815,12 @@ def fetch_listing_for_notification(listing_id: int):
     if os.path.exists(MAIN_DB):
         conn_main = get_main_conn()
         cur_main = conn_main.cursor()
-        cur_main.execute("SELECT * FROM listings WHERE id=?", (lid,))
+        visibility_sql = build_listing_visibility_sql(
+            cur_main, "listings", include_hidden=False
+        )
+        cur_main.execute(
+            f"SELECT * FROM listings WHERE id=?{visibility_sql}", (lid,)
+        )
         row_main = cur_main.fetchone()
         if row_main:
             d_main = dict(row_main)
@@ -7018,11 +7068,22 @@ def record_agent_activity(chat_id: Optional[int], metric: Optional[str] = None):
             conn.close()
 
 
-def fetch_listing_by_source(source: str, listing_id: int):
+def fetch_listing_by_source(
+    source: str,
+    listing_id: int,
+    *,
+    include_hidden: bool = True,
+):
     if source == "main" and os.path.exists(MAIN_DB):
         conn = get_main_conn()
         cur = conn.cursor()
-        cur.execute("SELECT * FROM listings WHERE id=?", (listing_id,))
+        visibility_sql = build_listing_visibility_sql(
+            cur, "listings", include_hidden=include_hidden
+        )
+        cur.execute(
+            f"SELECT * FROM listings WHERE id=?{visibility_sql}",
+            (listing_id,),
+        )
         row = cur.fetchone()
         close_main_conn(conn)
         if row:
@@ -7052,12 +7113,30 @@ def fetch_listing_by_source(source: str, listing_id: int):
     return None
 
 
-def fetch_listing_by_any(listing_id: int):
+def fetch_listing_by_any(listing_id: int, *, include_hidden: bool = True):
     for src in ("main", "local", "agents"):
-        ev = fetch_listing_by_source(src, listing_id)
+        ev = fetch_listing_by_source(src, listing_id, include_hidden=include_hidden)
         if ev:
             return ev
     return None
+
+
+def set_listing_hidden_state(listing_id: int, is_hidden: int) -> bool:
+    if not os.path.exists(MAIN_DB):
+        return False
+    conn = get_main_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE listings SET is_hidden=? WHERE id=?",
+            (int(is_hidden), int(listing_id)),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    except sqlite3.OperationalError:
+        return False
+    finally:
+        close_main_conn(conn)
 
 
 def add_favorite_entry(chat_id: int, source: str, listing_id: int) -> bool:
@@ -7206,7 +7285,13 @@ def record_listing_view(
     record_listing_stat(listing_id, "view", chat_id)
 
 
-def query_top_viewed_listings(days: int = 7, offset: int = 0, limit: int = None):
+def query_top_viewed_listings(
+    days: int = 7,
+    offset: int = 0,
+    limit: int = None,
+    *,
+    include_hidden: bool = False,
+):
     conn = get_local_conn()
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM listing_stats WHERE popularity_score > 0")
@@ -7226,7 +7311,7 @@ def query_top_viewed_listings(days: int = 7, offset: int = 0, limit: int = None)
 
     enriched = []
     for r in rows:
-        ev = fetch_listing_by_any(r["listing_id"])
+        ev = fetch_listing_by_any(r["listing_id"], include_hidden=include_hidden)
         if not ev:
             continue
         ev["__views"] = r["views"]
@@ -7263,7 +7348,7 @@ def upsert_favorite_price(source: str, listing_id: int, price_val: Optional[int]
 
 
 def record_favorite_price(source: str, listing_id: int):
-    ev = fetch_listing_by_source(source, listing_id)
+    ev = fetch_listing_by_source(source, listing_id, include_hidden=False)
     if not ev:
         return
     price_val = get_listing_price(ev)
@@ -7895,6 +7980,13 @@ def send_listing_card(
     mk = build_listing_action_keyboard(
         favorite_label, favorite_callback, link, wa_url
     )
+    listing_payload = dict(ev) if isinstance(ev, dict) else {}
+    listing_payload["__source"] = source
+    visibility_button = build_listing_visibility_button(
+        listing_payload, admin_mode=None, chat_id=chat_id
+    )
+    if visibility_button:
+        mk.row(visibility_button)
 
     if extra_buttons:
         for btn in extra_buttons:
@@ -10946,7 +11038,11 @@ def cb_whatsapp_click(c):
         lid = int(sid)
     except Exception:
         lid = None
-    ev = fetch_listing_by_source(src, lid) if lid else None
+    ev = (
+        fetch_listing_by_source(src, lid, include_hidden=is_admin(c.message.chat.id))
+        if lid
+        else None
+    )
     if not ev:
         bot.answer_callback_query(c.id, "❌ Elan tapılmadı.")
         return
@@ -12470,7 +12566,9 @@ def load_notification_listings(chat_id: int, notif_type: str, period: str) -> Li
                 target_id_int = int(target_id)
             except Exception:
                 continue
-            listing = fetch_listing_by_source(source, target_id_int)
+            listing = fetch_listing_by_source(
+                source, target_id_int, include_hidden=False
+            )
             if listing:
                 listing["__source"] = source
                 listings.append(listing)
@@ -13898,6 +13996,25 @@ def build_filters_sql(
     return sql, params
 
 
+def build_listing_visibility_sql(
+    cur: sqlite3.Cursor,
+    table: str,
+    alias: str = "",
+    *,
+    include_hidden: bool = False,
+) -> str:
+    if include_hidden:
+        return ""
+    cols = get_table_columns(cur, table)
+    hidden_col = cols.get("is_hidden")
+    if not hidden_col:
+        return ""
+    prefix = alias
+    if prefix and not prefix.endswith("."):
+        prefix = f"{prefix}."
+    return f" AND {prefix}{hidden_col} = 0"
+
+
 BAKU_RAYONS = [
     "Binəqədi",
     "Qaradağ",
@@ -14247,6 +14364,13 @@ def compute_stats(
                 )
                 where_params.append(f"-{window_days} days")
 
+    if stat_context == STAT_CONTEXT_USER and source_table == "listings":
+        visibility_sql = build_listing_visibility_sql(
+            cur, "listings", alias="l", include_hidden=False
+        )
+        if visibility_sql:
+            where_clauses.append(visibility_sql.replace(" AND ", "", 1))
+
     cols = get_table_columns(cur, source_table)
     order_col = None
     for candidate in ("id", "listing_id"):
@@ -14386,6 +14510,12 @@ def compute_user_statistics(period: str) -> dict:
                 if date_sql:
                     where_clauses.append(date_sql.replace(" AND ", "", 1))
                     where_params.extend(date_params)
+
+        visibility_sql = build_listing_visibility_sql(
+            cur, "listings", alias="l", include_hidden=False
+        )
+        if visibility_sql:
+            where_clauses.append(visibility_sql.replace(" AND ", "", 1))
 
         where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
         query = f"SELECT {', '.join(select_parts)} FROM listings l{where_sql}"
@@ -14539,10 +14669,15 @@ def compute_market_pulse() -> List[Dict[str, Any]]:
 
                     op_filter = f" AND COALESCE(l.\"{op_col}\", '') != ''" if op_col else ""
                     type_filter = f" AND COALESCE(l.\"{type_col}\", '') != ''" if type_col else ""
+                    visibility_sql = ""
+                    if table == "listings":
+                        visibility_sql = build_listing_visibility_sql(
+                            cur, table, alias="l", include_hidden=False
+                        )
 
                     rayon_base_where = (
                         f"WHERE l.\"{rayon_col}\" IS NOT NULL AND l.\"{rayon_col}\" != ''"
-                        f"{thirty_clause}{op_filter}{type_filter}"
+                        f"{visibility_sql}{thirty_clause}{op_filter}{type_filter}"
                     )
                     cur.execute(
                         f"SELECT DISTINCT l.\"{rayon_col}\" AS rayon FROM {table} l {rayon_base_where} ORDER BY rayon",
@@ -14558,7 +14693,7 @@ def compute_market_pulse() -> List[Dict[str, Any]]:
                         base_params = [rayon]
 
                         cur.execute(
-                            f"SELECT COUNT(*) AS cnt FROM {table} l WHERE l.\"{rayon_col}\"=?{seven_clause}{op_filter}{type_filter}",
+                            f"SELECT COUNT(*) AS cnt FROM {table} l WHERE l.\"{rayon_col}\"=?{visibility_sql}{seven_clause}{op_filter}{type_filter}",
                             base_params + seven_params,
                         )
                         row = cur.fetchone() or {}
@@ -14569,7 +14704,7 @@ def compute_market_pulse() -> List[Dict[str, Any]]:
                         if price_col:
                             cur.execute(
                                 f"SELECT AVG(CAST(l.\"{price_col}\" AS REAL)) AS avg_price "
-                                f"FROM {table} l WHERE l.\"{rayon_col}\"=?{seven_clause}{op_filter}{type_filter}",
+                                f"FROM {table} l WHERE l.\"{rayon_col}\"=?{visibility_sql}{seven_clause}{op_filter}{type_filter}",
                                 base_params + seven_params,
                             )
                             price_row = cur.fetchone() or {}
@@ -14577,7 +14712,7 @@ def compute_market_pulse() -> List[Dict[str, Any]]:
 
                             cur.execute(
                                 f"SELECT AVG(CAST(l.\"{price_col}\" AS REAL)) AS avg_price "
-                                f"FROM {table} l WHERE l.\"{rayon_col}\"=?{thirty_clause}{op_filter}{type_filter}",
+                                f"FROM {table} l WHERE l.\"{rayon_col}\"=?{visibility_sql}{thirty_clause}{op_filter}{type_filter}",
                                 base_params + thirty_params,
                             )
                             price_row = cur.fetchone() or {}
@@ -14587,7 +14722,7 @@ def compute_market_pulse() -> List[Dict[str, Any]]:
                         if dom_col:
                             cur.execute(
                                 f"SELECT AVG(CAST(l.\"{dom_col}\" AS REAL)) AS avg_dom "
-                                f"FROM {table} l WHERE l.\"{rayon_col}\"=?{thirty_clause}{op_filter}{type_filter}",
+                                f"FROM {table} l WHERE l.\"{rayon_col}\"=?{visibility_sql}{thirty_clause}{op_filter}{type_filter}",
                                 base_params + thirty_params,
                             )
                             dom_row = cur.fetchone() or {}
@@ -14595,7 +14730,7 @@ def compute_market_pulse() -> List[Dict[str, Any]]:
                         elif dom_expr:
                             cur.execute(
                                 f"SELECT AVG({dom_expr}) AS avg_dom FROM {table} l "
-                                f"WHERE l.\"{rayon_col}\"=?{thirty_clause}{op_filter}{type_filter}",
+                                f"WHERE l.\"{rayon_col}\"=?{visibility_sql}{thirty_clause}{op_filter}{type_filter}",
                                 base_params + thirty_params,
                             )
                             dom_row = cur.fetchone() or {}
@@ -14778,7 +14913,12 @@ def load_recent_listings(since_dt: datetime):
         date_col = detect_table_date_column(cur, "listings")
         order_parts = build_listing_order_parts(cur, "listings", date_col)
         order_clause = f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
-        cur.execute(f"SELECT * FROM listings{order_clause} LIMIT 800")
+        visibility_sql = build_listing_visibility_sql(
+            cur, "listings", include_hidden=False
+        )
+        cur.execute(
+            f"SELECT * FROM listings WHERE 1=1{visibility_sql}{order_clause} LIMIT 800"
+        )
         for r in cur.fetchall():
             d = dict(r)
             d["__source"] = "main"
@@ -14911,7 +15051,7 @@ def check_favorite_price_drops():
         chat_id = row["chat_id"]
         last_price = row["last_price"]
 
-        ev = fetch_listing_by_source(src, lid)
+        ev = fetch_listing_by_source(src, lid, include_hidden=False)
         if not ev:
             continue
 
@@ -14956,7 +15096,13 @@ def favorite_price_worker():
         time.sleep(3600)
 
 
-def query_structured_results(filters: dict, offset: int = 0, limit: int = None):
+def query_structured_results(
+    filters: dict,
+    offset: int = 0,
+    limit: int = None,
+    *,
+    include_hidden: bool = False,
+):
     op_code = filters.get("op", "all")
     prop_code = filters.get("prop", "all")
     date_days = filters.get("date_days")
@@ -14979,7 +15125,13 @@ def query_structured_results(filters: dict, offset: int = 0, limit: int = None):
         date_sql, date_params = build_date_range_clause(date_expr, date_days)
         order_parts = build_listing_order_parts(cur, "listings", date_col)
         order_clause = f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
-        cur.execute(base + flt + date_sql + order_clause, params + date_params)
+        visibility_sql = build_listing_visibility_sql(
+            cur, "listings", include_hidden=include_hidden
+        )
+        cur.execute(
+            base + flt + visibility_sql + date_sql + order_clause,
+            params + date_params,
+        )
         for r in cur.fetchall():
             d = dict(r)
             d["__source"] = "main"
@@ -15023,7 +15175,13 @@ def query_structured_results(filters: dict, offset: int = 0, limit: int = None):
     return filtered, total
 
 
-def query_today_results(filters: dict, offset: int = 0, limit: int = None):
+def query_today_results(
+    filters: dict,
+    offset: int = 0,
+    limit: int = None,
+    *,
+    include_hidden: bool = False,
+):
     op_code = filters.get("op", "all")
     prop_code = filters.get("prop", "all")
     results = []
@@ -15051,7 +15209,10 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
             order_clause = (
                 " ORDER BY " + ", ".join(order_parts) if order_parts else ""
             )
-            where_sql = flt + date_sql + rayon_sql
+            visibility_sql = build_listing_visibility_sql(
+                cur, "listings", include_hidden=include_hidden
+            )
+            where_sql = flt + visibility_sql + date_sql + rayon_sql
             logger.debug(
                 "today query main where=%s params=%s",
                 where_sql,
@@ -15121,7 +15282,7 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
 
 
 def count_today_filtered(filters: dict) -> int:
-    _, total = query_today_results(filters, offset=0, limit=None)
+    _, total = query_today_results(filters, offset=0, limit=None, include_hidden=False)
     return total
 
 
@@ -15229,6 +15390,8 @@ def query_keyword_results(
     date_days: Optional[int] = None,
     offset: int = 0,
     limit: int = None,
+    *,
+    include_hidden: bool = False,
 ):
     search_text = " ".join([w for w in words if w])
     tokens = normalize_text(search_text).split()
@@ -15310,6 +15473,10 @@ def query_keyword_results(
         if operation_value:
             base_where += " AND operation = ?"
             params.append(operation_value)
+        if table == "listings":
+            base_where += build_listing_visibility_sql(
+                cur, table, include_hidden=include_hidden
+            )
         if phrase_query or token_query:
             try:
                 order_suffix = ""
@@ -15468,7 +15635,13 @@ def parse_smart_query(text: str) -> dict:
     return res
 
 
-def query_smart_results(criteria: dict, offset: int = 0, limit: int = None):
+def query_smart_results(
+    criteria: dict,
+    offset: int = 0,
+    limit: int = None,
+    *,
+    include_hidden: bool = False,
+):
     keywords = [w.lower() for w in criteria.get("keywords", []) if w]
     op_norm = normalize_operation_value(criteria.get("operation"))
     op_main = detect_db_operation_value(op_norm, "main") if op_norm else None
@@ -15534,6 +15707,9 @@ def query_smart_results(criteria: dict, offset: int = 0, limit: int = None):
         conn = get_main_conn()
         cur = conn.cursor()
         where_clause, base_params = build_filters(op_main)
+        where_clause += build_listing_visibility_sql(
+            cur, "listings", include_hidden=include_hidden
+        )
         date_col = detect_table_date_column(cur, "listings")
         order_suffix = ""
         order_parts = build_listing_order_parts(
@@ -15668,7 +15844,13 @@ def query_smart_results(criteria: dict, offset: int = 0, limit: int = None):
     return filtered, total
 
 
-def query_phone_results(raw: str, offset: int = 0, limit: int = None):
+def query_phone_results(
+    raw: str,
+    offset: int = 0,
+    limit: int = None,
+    *,
+    include_hidden: bool = False,
+):
     like = f"%{raw}%"
     results = []
 
@@ -15678,13 +15860,19 @@ def query_phone_results(raw: str, offset: int = 0, limit: int = None):
         date_col = detect_table_date_column(cur, "listings")
         order_parts = build_listing_order_parts(cur, "listings", date_col)
         order_clause = f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
+        visibility_sql = build_listing_visibility_sql(
+            cur, "listings", include_hidden=include_hidden
+        )
         cur.execute(
             """
             SELECT * FROM listings
             WHERE REPLACE(REPLACE(REPLACE(phone,' ',''),'-',''),'+','') LIKE ?
-            {order_clause}
+            {visibility_clause}{order_clause}
             LIMIT 2000
-        """.format(order_clause=order_clause),
+        """.format(
+                visibility_clause=visibility_sql,
+                order_clause=order_clause,
+            ),
             (like,),
         )
         for r in cur.fetchall():
@@ -15717,6 +15905,35 @@ def query_phone_results(raw: str, offset: int = 0, limit: int = None):
     return results, total
 
 
+def query_hidden_listings(offset: int = 0, limit: int = None):
+    if not os.path.exists(MAIN_DB):
+        return [], 0
+    conn = get_main_conn()
+    cur = conn.cursor()
+    cols = get_table_columns(cur, "listings")
+    if "is_hidden" not in cols:
+        close_main_conn(conn)
+        return [], 0
+    cur.execute("SELECT COUNT(*) FROM listings WHERE is_hidden = 1")
+    total = cur.fetchone()[0] or 0
+    date_col = detect_table_date_column(cur, "listings")
+    order_parts = build_listing_order_parts(cur, "listings", date_col)
+    order_clause = f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
+    sql = f"SELECT * FROM listings WHERE is_hidden = 1{order_clause}"
+    params: List[Any] = []
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+    cur.execute(sql, params)
+    items = []
+    for r in cur.fetchall():
+        d = dict(r)
+        d["__source"] = "main"
+        items.append(d)
+    close_main_conn(conn)
+    return items, total
+
+
 def query_favorites_page(chat_id: int, offset: int = 0, limit: int = None):
     conn = get_local_conn()
     cur = conn.cursor()
@@ -15735,8 +15952,11 @@ def query_favorites_page(chat_id: int, offset: int = 0, limit: int = None):
     conn.close()
 
     items = []
+    include_hidden = is_admin(chat_id)
     for r in rows:
-        ev = fetch_listing_by_source(r["source"], r["listing_id"])
+        ev = fetch_listing_by_source(
+            r["source"], r["listing_id"], include_hidden=include_hidden
+        )
         if ev:
             items.append({"data": ev, "source": r["source"]})
     return items, total
@@ -15744,9 +15964,12 @@ def query_favorites_page(chat_id: int, offset: int = 0, limit: int = None):
 
 def fetch_page_results(chat_id: int, mode: str, params: dict, page: int):
     offset = (page - 1) * PAGE_SIZE
+    include_hidden = is_admin(chat_id)
     if mode == "filter":
         filters = params.get("filters") or params
-        return query_structured_results(filters, offset=offset, limit=PAGE_SIZE)
+        return query_structured_results(
+            filters, offset=offset, limit=PAGE_SIZE, include_hidden=include_hidden
+        )
     if mode == "keyword":
         return query_keyword_results(
             params.get("operation"),
@@ -15754,25 +15977,40 @@ def fetch_page_results(chat_id: int, mode: str, params: dict, page: int):
             params.get("date_days"),
             offset=offset,
             limit=PAGE_SIZE,
+            include_hidden=include_hidden,
         )
     if mode == "smart":
         return query_smart_results(
-            params.get("criteria", {}), offset=offset, limit=PAGE_SIZE
+            params.get("criteria", {}),
+            offset=offset,
+            limit=PAGE_SIZE,
+            include_hidden=include_hidden,
         )
     if mode == "phone":
         return query_phone_results(
-            params.get("digits", ""), offset=offset, limit=PAGE_SIZE
+            params.get("digits", ""),
+            offset=offset,
+            limit=PAGE_SIZE,
+            include_hidden=include_hidden,
         )
     if mode == "favorites":
         return query_favorites_page(chat_id, offset=offset, limit=PAGE_SIZE)
     if mode == "topviews":
         return query_top_viewed_listings(
-            days=params.get("days", 7), offset=offset, limit=PAGE_SIZE
+            days=params.get("days", 7),
+            offset=offset,
+            limit=PAGE_SIZE,
+            include_hidden=include_hidden,
         )
     if mode == "today":
         return query_today_results(
-            params.get("filters", {}), offset=offset, limit=PAGE_SIZE
+            params.get("filters", {}),
+            offset=offset,
+            limit=PAGE_SIZE,
+            include_hidden=include_hidden,
         )
+    if mode == "admin_hidden":
+        return query_hidden_listings(offset=offset, limit=PAGE_SIZE)
     if mode == "keyword_notif":
         items = keyword_notification_state.get(chat_id, {}).get("items", [])
         seen_ids: Set[str] = set()
@@ -15793,9 +16031,12 @@ def fetch_page_results(chat_id: int, mode: str, params: dict, page: int):
 
 
 def fetch_all_results(chat_id: int, mode: str, params: dict):
+    include_hidden = is_admin(chat_id)
     if mode == "filter":
         filters = params.get("filters") or params
-        return query_structured_results(filters, offset=0, limit=None)
+        return query_structured_results(
+            filters, offset=0, limit=None, include_hidden=include_hidden
+        )
     if mode == "keyword":
         return query_keyword_results(
             params.get("operation"),
@@ -15803,15 +16044,25 @@ def fetch_all_results(chat_id: int, mode: str, params: dict):
             params.get("date_days"),
             offset=0,
             limit=None,
+            include_hidden=include_hidden,
         )
     if mode == "smart":
-        return query_smart_results(params.get("criteria", {}), offset=0, limit=None)
+        return query_smart_results(
+            params.get("criteria", {}), offset=0, limit=None, include_hidden=include_hidden
+        )
     if mode == "phone":
-        return query_phone_results(params.get("digits", ""), offset=0, limit=None)
+        return query_phone_results(
+            params.get("digits", ""), offset=0, limit=None, include_hidden=include_hidden
+        )
     if mode == "favorites":
         return query_favorites_page(chat_id, offset=0, limit=None)
     if mode == "topviews":
-        return query_top_viewed_listings(days=params.get("days", 7), offset=0, limit=None)
+        return query_top_viewed_listings(
+            days=params.get("days", 7),
+            offset=0,
+            limit=None,
+            include_hidden=include_hidden,
+        )
     if mode == "today":
         filters = params.get("filters", {})
         filters_copy = dict(filters)
@@ -15819,9 +16070,13 @@ def fetch_all_results(chat_id: int, mode: str, params: dict):
         if cached.get("filters") == filters_copy:
             items = cached.get("items") or []
             return items, len(items)
-        items, total = query_today_results(filters_copy, offset=0, limit=None)
+        items, total = query_today_results(
+            filters_copy, offset=0, limit=None, include_hidden=include_hidden
+        )
         today_results_cache[chat_id] = {"filters": filters_copy, "items": items}
         return items, total
+    if mode == "admin_hidden":
+        return query_hidden_listings(offset=0, limit=None)
     if mode == "keyword_notif":
         items = keyword_notification_state.get(chat_id, {}).get("items", [])
         seen_ids: Set[str] = set()
@@ -15873,10 +16128,15 @@ def render_listing_for_user(
     cache_key = make_listing_ref(ref["source"], ref["id"])
     listing = session.get("cache", {}).get(cache_key)
     if not listing:
-        listing = fetch_listing_by_source(ref["source"], ref["id"])
+        listing = fetch_listing_by_source(
+            ref["source"], ref["id"], include_hidden=is_admin(chat_id)
+        )
         if listing:
             listing["__source"] = ref["source"]
             session.setdefault("cache", {})[cache_key] = listing
+
+    if listing and not is_admin(chat_id) and int(listing.get("is_hidden") or 0) == 1:
+        listing = None
 
     if not listing:
         if len(refs) > 1:
@@ -15894,8 +16154,11 @@ def render_listing_for_user(
     wa_message = build_whatsapp_message(listing)
     wa_phone = listing.get("phone") or listing.get("Elaqe_nomresi")
     wa_url = make_whatsapp_url(wa_phone, wa_message)
+    visibility_button = build_listing_visibility_button(
+        listing, admin_mode=session.get("mode"), chat_id=chat_id
+    )
     markup = build_listing_navigation_keyboard(
-        is_fav, listing_link, wa_url
+        is_fav, listing_link, wa_url, visibility_button=visibility_button
     )
     try:
         markup_signature = json.dumps(markup.to_dic(), sort_keys=True)
@@ -16017,8 +16280,15 @@ def send_paginated_results(
         "favorites",
         "topviews",
         "keyword_notif",
+        "admin_hidden",
     }:
         set_ui_context(chat_id, UI_CONTEXT_SEARCH)
+    if mode == "admin_hidden" and not is_admin(chat_id):
+        reset_user_state(chat_id)
+        if loading_ref:
+            replace_loading_message(loading_ref, "🏠 Əsas menyu")
+        return_to_main_menu(chat_id)
+        return
     if mode == "topviews" and not is_admin(chat_id):
         reset_user_state(chat_id)
         if loading_ref:
@@ -16116,7 +16386,7 @@ def cb_listing_nav(c):
         return
 
     action = c.data.split(":", 1)[1]
-    deltas = {"next": 1, "prev": -1, "+5": 5, "-5": -5}
+    deltas = {"next": 1, "prev": -1}
     if action == "back":
         session["timestamp"] = time.time()
         reset_user_state(chat_id)
@@ -16138,6 +16408,57 @@ def cb_listing_nav(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("listing_vis:"))
+@callback_guard
+def cb_listing_visibility(c):
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id
+    if not is_admin(chat_id):
+        return
+    parts = c.data.split(":")
+    if len(parts) != 3:
+        return
+    action = parts[1]
+    if action not in {"hide", "show"}:
+        return
+    try:
+        listing_id = int(parts[2])
+    except Exception:
+        return
+    is_hidden = 1 if action == "hide" else 0
+    updated = set_listing_hidden_state(listing_id, is_hidden)
+    session = get_active_listing_session(chat_id)
+    if session:
+        cache = session.get("cache", {})
+        for key, listing in list(cache.items()):
+            if listing.get("id") == listing_id:
+                listing["is_hidden"] = is_hidden
+                cache[key] = listing
+        if action == "show" and session.get("mode") == "admin_hidden":
+            refs = session.get("result_ids") or []
+            session["result_ids"] = [
+                ref
+                for ref in refs
+                if not (ref.get("source") == "main" and ref.get("id") == listing_id)
+            ]
+            session["current_index"] = min(
+                session.get("current_index", 0),
+                max(len(session["result_ids"]) - 1, 0),
+            )
+            if not session.get("result_ids"):
+                listing_sessions.pop(chat_id, None)
+                update_ui_message(chat_id, chat_id, "Siyahı boşdur.", None)
+                safe_answer_callback_query(
+                    c.id, "✅ Yeniləndi." if updated else "⚠️ Yenilənmə alınmadı."
+                )
+                return
+        render_listing_for_user(chat_id, session.get("session_id"))
+    safe_answer_callback_query(
+        c.id, "✅ Yeniləndi." if updated else "⚠️ Yenilənmə alınmadı."
+    )
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "fav:toggle")
@@ -17163,6 +17484,23 @@ def show_admin_stats_menu(chat_id: int, message: Optional[types.Message] = None)
         render_ui(chat_id, text, mk)
 
 
+def show_hidden_listings_admin(
+    chat_id: int, message: Optional[types.Message] = None
+):
+    if not is_admin(chat_id):
+        return
+    reset_search_state(chat_id)
+    loading_ref = (message.chat.id, message.message_id) if message else None
+    send_paginated_results(
+        chat_id,
+        mode="admin_hidden",
+        params={},
+        page=1,
+        loading_ref=loading_ref,
+        show_summary=False,
+    )
+
+
 def show_inactive_users_summary(
     chat_id: int, days: int = 10, message: Optional[types.Message] = None
 ):
@@ -17525,6 +17863,8 @@ def _handle_admin_panel_action(
     elif action_text == TEXTS_AZ["admin_panel_topviews"]:
         reset_search_state(chat_id)
         send_paginated_results(chat_id, "topviews", params={"days": 7}, page=1)
+    elif action_text == TEXTS_AZ["admin_panel_hidden_listings"]:
+        show_hidden_listings_admin(chat_id, message=message)
     elif action_text == TEXTS_AZ["admin_panel_db_update"]:
         send_or_edit_ui_message(
             chat_id,
@@ -25682,6 +26022,8 @@ def compute_besthome_overview_stats():
 
     for row in rows:
         row["__source"] = "main"
+        if int(_row_value_safe(row, "is_hidden") or 0) == 1:
+            continue
         approved_raw = _row_value_safe(row, "approved")
         if approved_raw is None:
             approved_raw = _row_value_safe(row, "is_approved")
@@ -25946,6 +26288,7 @@ def create_flask_app():
             }
 
             results = []
+            include_hidden = bool(user_id and is_admin(user_id))
 
             if os.path.exists(MAIN_DB):
                 conn = get_main_conn()
@@ -25966,8 +26309,11 @@ def create_flask_app():
                 order_clause = (
                     f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
                 )
+                visibility_sql = build_listing_visibility_sql(
+                    cur, "listings", include_hidden=include_hidden
+                )
                 cur.execute(
-                    base + flt + date_sql + order_clause,
+                    base + flt + visibility_sql + date_sql + order_clause,
                     params + date_params,
                 )
                 for r in cur.fetchall():
@@ -26070,12 +26416,16 @@ def create_flask_app():
         args = request.args.to_dict() or {}
 
         def _handler():
+            user_id = get_user_id_from_request()
             listing_id = parse_int_value(args.get("id"))
             if listing_id is None:
                 return api_error_response("id tələb olunur", 400)
+            include_hidden = bool(user_id and is_admin(user_id))
             sources = ["main", "local"]
             for src in sources:
-                ev = fetch_listing_by_source(src, listing_id)
+                ev = fetch_listing_by_source(
+                    src, listing_id, include_hidden=include_hidden
+                )
                 if ev:
                     normalized = _normalize_listing_response(ev)
                     logger.info(
@@ -26195,13 +26545,18 @@ def create_flask_app():
             conn.close()
 
             results = []
+            include_hidden = bool(user_id and is_admin(user_id))
             for r in rows:
                 src = r["source"] or "main"
                 if src == "besthome":
                     src = "main"
-                listing = fetch_listing_by_source(src, r["listing_id"])
+                listing = fetch_listing_by_source(
+                    src, r["listing_id"], include_hidden=include_hidden
+                )
                 if not listing and src != "main":
-                    listing = fetch_listing_by_source("main", r["listing_id"])
+                    listing = fetch_listing_by_source(
+                        "main", r["listing_id"], include_hidden=include_hidden
+                    )
 
                 base_payload = {
                     "listing_id": r["listing_id"],
