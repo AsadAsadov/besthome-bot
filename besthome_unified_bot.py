@@ -5614,6 +5614,25 @@ def notify_admins_support_incoming(user_id: int) -> None:
             logger.exception("Failed to notify admin about support message")
 
 
+def update_admin_support_ui_on_incoming(user_id: int) -> None:
+    for admin_id in ADMIN_IDS:
+        try:
+            admin_chat_id = int(admin_id)
+        except (TypeError, ValueError):
+            continue
+        state = support_admin_state.get(admin_chat_id, {})
+        if not state or not state.get("message_id"):
+            continue
+        if state.get("reply_to_user_id"):
+            continue
+        active_thread_user_id = state.get("active_thread_user_id")
+        if active_thread_user_id == user_id:
+            show_support_thread_view(admin_chat_id, user_id, set_active=False)
+            continue
+        if active_thread_user_id is None:
+            show_support_inbox(admin_chat_id)
+
+
 def send_support_message_to_user_from_admin(
     admin_message: types.Message, session: dict
 ) -> None:
@@ -9396,7 +9415,7 @@ def open_support_chat_from_menu(message):
     if is_admin(message.chat.id):
         return
     delete_user_command_message(message)
-    open_support_inbox(message.chat.id, message.from_user)
+    toggle_support_inbox(message.chat.id, message.from_user)
 
 
 @bot.message_handler(func=lambda m: m.text in ("⛔ Çatı sonlandır", "🔚 Çatı sonlandır"))
@@ -9433,21 +9452,62 @@ def open_support_inbox(chat_id: int, user: types.User) -> None:
 
 def close_support_session(chat_id: int) -> None:
     close_support_chat_for_user(chat_id)
-    return_to_main_menu(chat_id)
+    render_support_status(
+        chat_id,
+        "🔴 Dəstək bağlandı.\nİstədiyiniz vaxt yenidən əlaqə saxlaya bilərsiniz.",
+    )
 
 
 def toggle_support_inbox(chat_id: int, user: types.User) -> None:
     if not is_user_support_active(chat_id):
-        open_support_inbox(chat_id, user)
+        start_support_chat_for_user(chat_id, user)
+        clear_support_ui(chat_id)
+        render_support_status(
+            chat_id,
+            "🟢 Online dəstək aktivdir.\nMesajlarınız inbox-da saxlanılır.",
+        )
         return
-    show_user_support_inbox(chat_id)
+    close_support_chat_for_user(chat_id)
+    render_support_status(
+        chat_id,
+        "🔴 Dəstək bağlandı.\nİstədiyiniz vaxt yenidən əlaqə saxlaya bilərsiniz.",
+    )
 
 
 def end_support_session_from_admin(chat_id: int) -> None:
-    set_support_session_active(chat_id, False)
-    set_support_session_last_ui_message_id(chat_id, None)
-    delete_last_support_ui(chat_id)
-    return_to_main_menu(chat_id)
+    close_support_chat_for_user(chat_id)
+    render_support_status(
+        chat_id,
+        "🔴 Dəstək bağlandı.\nİstədiyiniz vaxt yenidən əlaqə saxlaya bilərsiniz.",
+    )
+
+
+def is_main_menu_button_text(chat_id: int, text: Optional[str]) -> bool:
+    if not text:
+        return False
+    kb = build_main_menu(
+        chat_id,
+        is_admin(chat_id),
+        has_customer_requests_access(chat_id),
+        should_show_bonus_button(chat_id),
+    )
+    for row in kb.keyboard:
+        for button in row:
+            label = None
+            if isinstance(button, dict):
+                label = button.get("text")
+            else:
+                label = getattr(button, "text", None)
+            if label is None:
+                label = str(button)
+            if label == text:
+                return True
+    return False
+
+
+def handle_support_background_navigation(chat_id: int) -> None:
+    clear_support_ui(chat_id)
+    render_support_status(chat_id, "🟡 Dəstək arxa planda aktivdir.")
 
 
 def delete_last_ui_message_for_support(chat_id: int) -> None:
@@ -9560,6 +9620,18 @@ def render_support_ui(
     else:
         set_support_session_last_ui_message_id(chat_id, msg.message_id)
     return msg.message_id
+
+
+def clear_support_ui(chat_id: int, fallback_message_id: Optional[int] = None) -> None:
+    delete_last_support_ui(chat_id, fallback_message_id=fallback_message_id)
+
+
+def render_support_status(chat_id: int, text: str) -> None:
+    render_support_ui(chat_id, text, None)
+
+
+def update_inbox_ui(chat_id: int) -> None:
+    show_user_support_inbox(chat_id)
 
 
 def format_user_support_inbox_text(messages: List[dict]) -> str:
@@ -25388,6 +25460,17 @@ def admin_search_handler(message):
 def support_user_message_router(message):
     if message.content_type == "text" and message.text and message.text.startswith("/"):
         return
+    if message.content_type == "text" and message.text in (
+        "⛔ Çatı sonlandır",
+        "🔚 Çatı sonlandır",
+    ):
+        return
+    if message.content_type == "text" and is_main_menu_button_text(
+        message.chat.id, message.text
+    ):
+        if message.text != "💬 Adminlə əlaqə":
+            handle_support_background_navigation(message.chat.id)
+        return
     if has_active_text_flow(message.chat.id):
         return
     try:
@@ -25423,7 +25506,9 @@ def support_user_message_router(message):
     text = message.text or message.caption or f"[{message.content_type}]"
     add_support_message(thread["id"], "user", text)
     notify_admins_support_incoming(message.chat.id)
+    update_admin_support_ui_on_incoming(message.chat.id)
     send_support_sent_toast(message.chat.id)
+    update_inbox_ui(message.chat.id)
 
 
 @bot.message_handler(
@@ -25459,6 +25544,8 @@ def support_admin_message_router(message):
     )
     increment_user_support_inbox_unread(reply_user_id)
     send_support_reply_notification(reply_user_id)
+    if is_user_support_active(reply_user_id):
+        update_inbox_ui(reply_user_id)
     _set_support_admin_state(message.chat.id, reply_to_user_id=None)
     show_support_thread_view(message.chat.id, reply_user_id, set_active=False)
 
