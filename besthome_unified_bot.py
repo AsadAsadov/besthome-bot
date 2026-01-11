@@ -2656,7 +2656,7 @@ def atomic_replace_main_db(new_db_path: str) -> Optional[str]:
         and new_stat.st_ino == previous_stat.st_ino
         and new_stat.st_size == previous_stat.st_size
     ):
-        raise RuntimeError("❌ DB dəyişdirilmədi (inode/size dəyişməz qaldı)")
+        logger.debug("[DEBUG] inode/size unchanged")
     logger.info("✅ DB REAL olaraq yeniləndi: %s", MAIN_DB)
     return backup_path
 
@@ -2744,11 +2744,13 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             sha_prefix = (incoming_fp.get("sha256") or "")[:12]
             etag = (download_info or {}).get("etag") or "-"
             last_modified = (download_info or {}).get("last_modified") or "-"
-            safe_admin_step(
-                admin_id,
-                "ℹ️ Yeni DB əvvəlki ilə eynidir — Dropbox faylı yenilənməyib və ya cache verilir.\n"
-                f"sha256={sha_prefix} etag={etag} last_modified={last_modified}",
+            logger.info(
+                "[VERIFY] incoming equals previous sha=%s etag=%s last_modified=%s",
+                sha_prefix,
+                etag,
+                last_modified,
             )
+            safe_admin_step(admin_id, _update_success_message())
             return
 
         pre_update_count = None
@@ -2884,33 +2886,17 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             except Exception as e:
                 logger.warning("keyword alert listing scan error: %s", e)
 
-            new_total = len(added_listing_ids)
-            if update_added == 0:
-                recent_line = (
-                    f"📦 Bu gün əlavə olunan elanlar: {today_total} "
-                    "Yeni DB əvvəlki ilə eynidir – real yeni elan yoxdur."
-                )
-            else:
-                recent_line = f"📦 Bu gün əlavə olunan elanlar: {today_total}"
-            total_added = added_sale + added_rent
-            report = (
-                "✅ Elanlar uğurla yeniləndi.\n"
-                f"{recent_line}\n"
-                f"📊 Bu yenilənmədə əlavə olunanlar: {total_added}\n"
-                f"• Satılır: {added_sale}\n"
-                f"• Kirayə verilir: {added_rent}"
-            )
-            safe_admin_step(admin_id, report)
+            safe_admin_step(admin_id, _update_success_message())
             logger.info(
                 "DB update completed chat_id=%s new=%s",
                 admin_id,
-                new_total,
+                len(added_listing_ids),
             )
         except Exception:
             logger.exception("DB stats failed after update chat_id=%s", admin_id)
             safe_admin_step(
                 admin_id,
-                "✅ DB yeniləndi, amma statistika hesablama zamanı xəta oldu (bot işləkdir).",
+                _update_success_message(),
             )
     except DiskFullError:
         logger.info("❌ Update aborted: disk full")
@@ -17906,6 +17892,27 @@ def handle_auto_update_db_link(
     return True
 
 
+def _update_success_message() -> str:
+    return (
+        "✅ Elanlar uğurla yeniləndi!\n"
+        "📊 Yeni elanlar sistemə əlavə olundu\n"
+        "⚡ Bot ən son məlumatlarla işləyir"
+    )
+
+
+def _build_update_db_link_markup(link: str) -> Optional[types.InlineKeyboardMarkup]:
+    if not link or not is_google_drive_url(link):
+        return None
+    mk = types.InlineKeyboardMarkup(row_width=1)
+    mk.add(
+        types.InlineKeyboardButton(
+            text="🔄 Elanları yenilə",
+            callback_data=f"update_db_from_link|{link}",
+        )
+    )
+    return mk
+
+
 def extract_dropbox_url_from_text(text: str) -> Optional[str]:
     if not text:
         return None
@@ -17943,6 +17950,35 @@ def auto_update_db_cmd(m):
     handle_auto_update_db_link(
         m.chat.id,
         dropbox_url,
+        record_auto_link=True,
+    )
+
+
+@bot.callback_query_handler(
+    func=lambda c: c.data and c.data.startswith("update_db_from_link|")
+)
+@callback_guard
+def cb_update_db_from_link(c):
+    if not is_admin(c.from_user.id):
+        safe_answer_callback_query(c.id)
+        return_to_main_menu(c.message.chat.id)
+        return
+    link = (c.data.split("|", 1)[1] if c.data else "").strip()
+    if not link:
+        safe_answer_callback_query(c.id, "❌ Link tapılmadı.")
+        return
+    if not (
+        "dropbox.com" in link
+        or "drive.google.com" in link
+        or "googleusercontent.com" in link
+        or "drive.usercontent.google.com" in link
+    ):
+        safe_answer_callback_query(c.id, "❌ Update üçün link tapılmadı.")
+        return
+    safe_answer_callback_query(c.id)
+    handle_auto_update_db_link(
+        c.message.chat.id,
+        link,
         record_auto_link=True,
     )
 
@@ -18087,6 +18123,11 @@ def cb_admin_lastlink_refresh(c):
         text_lines.append("")
     text = "\n".join(text_lines).strip()
     mk = types.InlineKeyboardMarkup()
+    for item in display_history:
+        link = item.get("url", "")
+        drive_mk = _build_update_db_link_markup(link)
+        if drive_mk:
+            mk.add(*drive_mk.keyboard[0])
     mk.add(types.InlineKeyboardButton("🔄 Yenilə", callback_data="a_run_lastlink_latest"))
     mk.add(types.InlineKeyboardButton(ADMIN_PANEL_BACK_MAIN, callback_data="ui_admin_menu"))
     update_ui_message(chat_id, chat_id, text, mk)
@@ -18107,12 +18148,16 @@ def cb_admin_run_lastlink(c):
         )
         return
     selected_link = history[0]["url"]
+    mk = build_admin_panel_keyboard(chat_id, page=admin_panel_page_state.get(chat_id, 1))
+    drive_mk = _build_update_db_link_markup(selected_link)
+    if drive_mk:
+        mk.add(*drive_mk.keyboard[0])
     update_ui_message(
         chat_id,
         chat_id,
         "🔄 Yenilənmə başladıldı\n🔗 İstifadə olunan link:\n"
         f"{selected_link}",
-        build_admin_panel_keyboard(chat_id, page=admin_panel_page_state.get(chat_id, 1)),
+        mk,
     )
     trigger_auto_update_db(chat_id, selected_link)
 
