@@ -513,7 +513,7 @@ TEXTS_AZ = {
     "admin_panel_direct_message": "📨 İstifadəçiyə mesaj göndər",
     "admin_panel_customer_requests_access": "📌 Müştəri istəkləri icazəsi",
     "admin_panel_archived_requests": "🗄 Arxivlənmiş müştəri istəkləri",
-    "admin_panel_support_chats": "📥 Support Inbox",
+    "admin_panel_support_chats": "📥 Live Support Inbox",
     "financial_reports_back": "🔙 Geri",
     "financial_reports_history": "📜 Ödəniş tarixçəsi",
     "financial_reports_referral": "🤝 Referral statistikası",
@@ -5604,7 +5604,14 @@ def _should_notify_admin_for_user(user_id: int) -> bool:
 
 
 def notify_admins_support_incoming(user_id: int) -> None:
-    return
+    if not _should_notify_admin_for_user(user_id):
+        return
+    text = f"🔔 Yeni support mesajı — {user_id}"
+    for admin_id in ADMIN_IDS:
+        try:
+            bot.send_message(int(admin_id), text)
+        except Exception:
+            logger.exception("Failed to notify admin about support message")
 
 
 def send_support_message_to_user_from_admin(
@@ -7273,7 +7280,6 @@ def build_main_menu(
 
     if not is_admin_user:
         buttons.append("💬 Adminlə əlaqə")
-        buttons.append("🔔 Bildirişlər / Inbox")
         buttons.append("🤝 Dostunu dəvət et")
 
     if is_feature_enabled("about", chat_id):
@@ -9390,7 +9396,7 @@ def open_support_chat_from_menu(message):
     if is_admin(message.chat.id):
         return
     delete_user_command_message(message)
-    toggle_support_inbox(message.chat.id, message.from_user)
+    open_support_inbox(message.chat.id, message.from_user)
 
 
 @bot.message_handler(func=lambda m: m.text in ("⛔ Çatı sonlandır", "🔚 Çatı sonlandır"))
@@ -9401,16 +9407,6 @@ def close_support_chat_from_menu(message):
         return
     delete_user_command_message(message)
     close_support_session(message.chat.id)
-
-
-@bot.message_handler(func=lambda m: m.text == "🔔 Bildirişlər / Inbox")
-def open_support_inbox_from_menu(message):
-    if message.text and message.text.startswith("/"):
-        return
-    if is_admin(message.chat.id):
-        return
-    delete_user_command_message(message)
-    show_user_support_inbox(message.chat.id)
 
 
 def close_support_chat_for_user(chat_id: int) -> None:
@@ -9427,6 +9423,7 @@ def close_support_chat_for_user(chat_id: int) -> None:
         )
     set_support_session_active(chat_id, False)
     set_support_session_last_ui_message_id(chat_id, None)
+    delete_last_support_ui(chat_id)
 
 
 def open_support_inbox(chat_id: int, user: types.User) -> None:
@@ -9440,26 +9437,21 @@ def close_support_session(chat_id: int) -> None:
 
 
 def toggle_support_inbox(chat_id: int, user: types.User) -> None:
-    if is_user_support_active(chat_id):
-        close_support_session(chat_id)
+    if not is_user_support_active(chat_id):
+        open_support_inbox(chat_id, user)
         return
-    open_support_inbox(chat_id, user)
+    show_user_support_inbox(chat_id)
+
+
+def end_support_session_from_admin(chat_id: int) -> None:
+    set_support_session_active(chat_id, False)
+    set_support_session_last_ui_message_id(chat_id, None)
+    delete_last_support_ui(chat_id)
+    return_to_main_menu(chat_id)
 
 
 def delete_last_ui_message_for_support(chat_id: int) -> None:
-    state = get_support_session_state(chat_id)
-    message_id = last_ui_message_id.get(chat_id) or state.get("last_ui_message_id")
-    if message_id:
-        try:
-            bot.delete_message(chat_id, message_id)
-        except Exception:
-            logger.debug(
-                "Failed to delete UI message for support chat_id=%s message_id=%s",
-                chat_id,
-                message_id,
-            )
-    last_ui_message_id[chat_id] = None
-    set_support_session_last_ui_message_id(chat_id, None)
+    delete_last_support_ui(chat_id)
 
 
 def start_support_chat_for_user(chat_id: int, user: types.User):
@@ -9495,7 +9487,79 @@ def send_support_sent_toast(chat_id: int) -> None:
 
 
 def send_support_reply_notification(chat_id: int) -> None:
-    return
+    mk = types.InlineKeyboardMarkup()
+    mk.add(types.InlineKeyboardButton("Mesajlara bax", callback_data="supportuser:open"))
+    try:
+        bot.send_message(
+            chat_id,
+            "📩 Support-dan yeni cavab var",
+            reply_markup=mk,
+            disable_notification=True,
+        )
+    except Exception:
+        logger.exception("Failed to send support reply notification chat_id=%s", chat_id)
+
+
+def format_support_timestamp(dt_raw: Optional[str]) -> str:
+    if not dt_raw:
+        return "-"
+    try:
+        parsed = datetime.fromisoformat(str(dt_raw).replace(" ", "T"))
+        return (parsed + timedelta(hours=4)).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return str(dt_raw)
+
+
+def delete_last_support_ui(chat_id: int, fallback_message_id: Optional[int] = None) -> None:
+    message_id = None
+    if is_admin(chat_id):
+        message_id = support_admin_state.get(chat_id, {}).get("message_id")
+    else:
+        state = get_support_session_state(chat_id)
+        message_id = state.get("last_ui_message_id")
+    if not message_id and fallback_message_id:
+        message_id = fallback_message_id
+    if message_id:
+        try:
+            bot.delete_message(chat_id, int(message_id))
+        except Exception:
+            logger.debug(
+                "Failed to delete support UI chat_id=%s message_id=%s",
+                chat_id,
+                message_id,
+            )
+    if is_admin(chat_id):
+        _set_support_admin_state(chat_id, message_id=None)
+    else:
+        set_support_session_last_ui_message_id(chat_id, None)
+
+
+def render_support_ui(
+    chat_id: int,
+    text: str,
+    keyboard: Optional[types.InlineKeyboardMarkup],
+    *,
+    parse_mode: Optional[str] = None,
+    disable_preview: Optional[bool] = None,
+    fallback_message_id: Optional[int] = None,
+) -> Optional[int]:
+    delete_last_support_ui(chat_id, fallback_message_id=fallback_message_id)
+    try:
+        msg = bot.send_message(
+            chat_id,
+            text,
+            reply_markup=keyboard,
+            parse_mode=parse_mode,
+            disable_web_page_preview=disable_preview,
+        )
+    except Exception:
+        logger.exception("Failed to send support UI chat_id=%s", chat_id)
+        return None
+    if is_admin(chat_id):
+        _set_support_admin_state(chat_id, message_id=msg.message_id)
+    else:
+        set_support_session_last_ui_message_id(chat_id, msg.message_id)
+    return msg.message_id
 
 
 def format_user_support_inbox_text(messages: List[dict]) -> str:
@@ -9505,8 +9569,8 @@ def format_user_support_inbox_text(messages: List[dict]) -> str:
     lines = []
     for msg in messages:
         sender = msg.get("sender")
-        prefix = "🛠 Dəstək" if sender == "admin" else "👤 Siz"
-        timestamp = format_display_time(msg.get("created_at"))
+        prefix = "🛠 Support" if sender == "admin" else "👤 User"
+        timestamp = format_support_timestamp(msg.get("created_at"))
         text = _truncate_support_text(msg.get("text"), limit=240)
         lines.append(f"[{timestamp}]\n{prefix}:\n{text}")
     return f"{header}\n\n" + "\n".join(lines)
@@ -9514,26 +9578,26 @@ def format_user_support_inbox_text(messages: List[dict]) -> str:
 
 def build_user_support_inbox_markup(is_active: bool) -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup()
-    mk.add(types.InlineKeyboardButton("✍️ Cavab yaz", callback_data="supportuser:reply"))
     if is_active:
         mk.add(
             types.InlineKeyboardButton(
                 "⛔ Çatı sonlandır", callback_data="supportuser:end"
             )
         )
+    else:
+        mk.add(types.InlineKeyboardButton("💬 Dəstək aç", callback_data="supportuser:start"))
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="supportuser:back"))
     return mk
 
 
-def show_user_support_inbox(chat_id: int) -> None:
+def show_user_support_inbox(chat_id: int, *, fallback_message_id: Optional[int] = None) -> None:
     thread = get_support_thread_by_user(chat_id)
     messages = list_support_messages(thread["id"], limit=30) if thread else []
-    messages = list(reversed(messages))
     text = format_user_support_inbox_text(messages)
     mk = build_user_support_inbox_markup(is_user_support_active(chat_id))
     set_user_support_inbox_unread(chat_id, 0)
     set_ui_context(chat_id, UI_CONTEXT_MAIN)
-    send_or_edit_ui_message(chat_id, text, mk)
+    render_support_ui(chat_id, text, mk, fallback_message_id=fallback_message_id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data in ("open_pay_menu", "ui_payment_menu"))
@@ -16963,8 +17027,9 @@ def _support_status_label(thread: dict) -> str:
 
 def _format_support_thread_label(thread: dict) -> str:
     badge = _support_status_badge(thread)
-    status_label = _support_status_label(thread)
-    return f"{badge} {thread.get('user_id')} — {status_label}"
+    last_message_at = thread.get("last_message_at")
+    last_display = format_support_timestamp(last_message_at) if last_message_at else "-"
+    return f"{badge} {thread.get('user_id')} — {last_display}"
 
 
 def format_support_inbox_text(threads: List[dict]) -> str:
@@ -16978,7 +17043,7 @@ def format_support_inbox_text(threads: List[dict]) -> str:
         1 for thread in threads if int(thread.get("needs_reply") or 0) == 1
     )
     header = (
-        "📥 Support Inbox\n"
+        "📥 Live Support Inbox\n"
         f"• OPEN: {open_count}\n"
         f"• Oxunmamış: {unread_count}\n"
         f"• Cavab gözləyir: {needs_reply_count}"
@@ -17012,7 +17077,7 @@ def _truncate_support_text(text: Optional[str], limit: int = 140) -> str:
 
 def _format_support_thread_header(thread: dict) -> str:
     last_message_at = thread.get("last_message_at")
-    last_display = format_display_time(last_message_at) if last_message_at else "-"
+    last_display = format_support_timestamp(last_message_at) if last_message_at else "-"
     status = thread.get("status") or SUPPORT_THREAD_STATUS_OPEN
     return (
         f"👤 User: {thread.get('user_id')}\n"
@@ -17027,9 +17092,10 @@ def _format_support_thread_messages(messages: List[dict]) -> str:
     lines = []
     for msg in messages:
         sender = msg.get("sender")
-        label = "👤" if sender == "user" else "🛠 Admin"
+        label = "👤 User" if sender == "user" else "🛠 Support"
+        timestamp = format_support_timestamp(msg.get("created_at"))
         text = _truncate_support_text(msg.get("text"))
-        lines.append(f"{label}: {text}")
+        lines.append(f"[{timestamp}]\n{label}:\n{text}")
     return "\n".join(lines)
 
 
@@ -17045,7 +17111,7 @@ def build_support_thread_view_markup(
             "✍️ Cavab yaz", callback_data=f"supportinbox:reply:{user_id}"
         ),
         types.InlineKeyboardButton(
-            "✅ Bağla", callback_data=f"supportinbox:close:{user_id}"
+            "⛔ Çatı sonlandır", callback_data=f"supportinbox:close:{user_id}"
         ),
     )
     mk.add(types.InlineKeyboardButton("⬅️ Inbox", callback_data="supportinbox:list"))
@@ -17056,45 +17122,16 @@ def show_support_inbox(chat_id: int, message: Optional[types.Message] = None):
     threads = list_support_threads()
     text = format_support_inbox_text(threads)
     mk = build_support_inbox_markup(threads)
-    if message:
-        try:
-            bot.edit_message_text(
-                text, chat_id=chat_id, message_id=message.message_id, reply_markup=mk
-            )
-            _set_support_admin_state(
-                chat_id,
-                active_thread_user_id=None,
-                reply_to_user_id=None,
-                message_id=message.message_id,
-            )
-            return
-        except Exception:
-            logger.exception("Failed to edit support inbox")
-    else:
-        existing_message_id = support_admin_state.get(chat_id, {}).get("message_id")
-        if existing_message_id:
-            try:
-                bot.edit_message_text(
-                    text,
-                    chat_id=chat_id,
-                    message_id=int(existing_message_id),
-                    reply_markup=mk,
-                )
-                _set_support_admin_state(
-                    chat_id,
-                    active_thread_user_id=None,
-                    reply_to_user_id=None,
-                    message_id=int(existing_message_id),
-                )
-                return
-            except Exception:
-                logger.exception("Failed to edit support inbox (cached message)")
-    sent = bot.send_message(chat_id, text, reply_markup=mk)
+    render_support_ui(
+        chat_id,
+        text,
+        mk,
+        fallback_message_id=message.message_id if message else None,
+    )
     _set_support_admin_state(
         chat_id,
         active_thread_user_id=None,
         reply_to_user_id=None,
-        message_id=sent.message_id,
     )
 
 
@@ -17109,45 +17146,17 @@ def show_support_thread_view(
     if not thread:
         mk = types.InlineKeyboardMarkup(row_width=1)
         mk.add(types.InlineKeyboardButton("⬅️ Inbox", callback_data="supportinbox:list"))
-        if message:
-            bot.edit_message_text(
-                "Thread not found",
-                chat_id=chat_id,
-                message_id=message.message_id,
-                reply_markup=mk,
-            )
-            _set_support_admin_state(
-                chat_id,
-                active_thread_user_id=None,
-                reply_to_user_id=None,
-                message_id=message.message_id,
-            )
-        else:
-            existing_message_id = support_admin_state.get(chat_id, {}).get("message_id")
-            if existing_message_id:
-                try:
-                    bot.edit_message_text(
-                        "Thread not found",
-                        chat_id=chat_id,
-                        message_id=int(existing_message_id),
-                        reply_markup=mk,
-                    )
-                    _set_support_admin_state(
-                        chat_id,
-                        active_thread_user_id=None,
-                        reply_to_user_id=None,
-                        message_id=int(existing_message_id),
-                    )
-                    return
-                except Exception:
-                    logger.exception("Failed to edit thread not found message")
-            sent = bot.send_message(chat_id, "Thread not found", reply_markup=mk)
-            _set_support_admin_state(
-                chat_id,
-                active_thread_user_id=None,
-                reply_to_user_id=None,
-                message_id=sent.message_id,
-            )
+        render_support_ui(
+            chat_id,
+            "Thread not found",
+            mk,
+            fallback_message_id=message.message_id if message else None,
+        )
+        _set_support_admin_state(
+            chat_id,
+            active_thread_user_id=None,
+            reply_to_user_id=None,
+        )
         return
 
     if set_active:
@@ -17161,45 +17170,16 @@ def show_support_thread_view(
     body = _format_support_thread_messages(messages)
     text = f"{header}\n\n{body}"
     mk = build_support_thread_view_markup(user_id, thread.get("status"))
-    if message:
-        try:
-            bot.edit_message_text(
-                text, chat_id=chat_id, message_id=message.message_id, reply_markup=mk
-            )
-            _set_support_admin_state(
-                chat_id,
-                active_thread_user_id=user_id,
-                reply_to_user_id=None,
-                message_id=message.message_id,
-            )
-            return
-        except Exception:
-            logger.exception("Failed to edit support thread view")
-    else:
-        existing_message_id = support_admin_state.get(chat_id, {}).get("message_id")
-        if existing_message_id:
-            try:
-                bot.edit_message_text(
-                    text,
-                    chat_id=chat_id,
-                    message_id=int(existing_message_id),
-                    reply_markup=mk,
-                )
-                _set_support_admin_state(
-                    chat_id,
-                    active_thread_user_id=user_id,
-                    reply_to_user_id=None,
-                    message_id=int(existing_message_id),
-                )
-                return
-            except Exception:
-                logger.exception("Failed to edit support thread view (cached message)")
-    sent = bot.send_message(chat_id, text, reply_markup=mk)
+    render_support_ui(
+        chat_id,
+        text,
+        mk,
+        fallback_message_id=message.message_id if message else None,
+    )
     _set_support_admin_state(
         chat_id,
         active_thread_user_id=user_id,
         reply_to_user_id=None,
-        message_id=sent.message_id,
     )
 
 
@@ -17213,41 +17193,16 @@ def show_support_reply_prompt(
         )
     )
     text = "✍️ Cavab yazın (mesajınızı göndərin)."
-    if message:
-        bot.edit_message_text(
-            text, chat_id=chat_id, message_id=message.message_id, reply_markup=mk
-        )
-        _set_support_admin_state(
-            chat_id,
-            active_thread_user_id=user_id,
-            reply_to_user_id=user_id,
-            message_id=message.message_id,
-        )
-        return
-    existing_message_id = support_admin_state.get(chat_id, {}).get("message_id")
-    if existing_message_id:
-        try:
-            bot.edit_message_text(
-                text,
-                chat_id=chat_id,
-                message_id=int(existing_message_id),
-                reply_markup=mk,
-            )
-            _set_support_admin_state(
-                chat_id,
-                active_thread_user_id=user_id,
-                reply_to_user_id=user_id,
-                message_id=int(existing_message_id),
-            )
-            return
-        except Exception:
-            logger.exception("Failed to edit support reply prompt")
-    sent = bot.send_message(chat_id, text, reply_markup=mk)
+    render_support_ui(
+        chat_id,
+        text,
+        mk,
+        fallback_message_id=message.message_id if message else None,
+    )
     _set_support_admin_state(
         chat_id,
         active_thread_user_id=user_id,
         reply_to_user_id=user_id,
-        message_id=sent.message_id,
     )
 
 
@@ -17533,8 +17488,8 @@ def cb_support_inbox_admin(c):
             )
             increment_user_support_inbox_unread(user_id)
             send_support_reply_notification(user_id)
-            set_support_session_active(user_id, False)
-        show_support_thread_view(chat_id, user_id, message=c.message, set_active=False)
+            end_support_session_from_admin(user_id)
+        show_support_inbox(chat_id, message=c.message)
         safe_answer_callback_query(c.id)
         return
     safe_answer_callback_query(c.id)
@@ -17550,10 +17505,14 @@ def cb_support_user_inbox(c):
         return_to_main_menu(chat_id)
         return
     if action == "open":
-        show_user_support_inbox(chat_id)
+        show_user_support_inbox(chat_id, fallback_message_id=c.message.message_id if c.message else None)
         safe_answer_callback_query(c.id)
         return
     if action == "reply":
+        open_support_inbox(chat_id, c.from_user)
+        safe_answer_callback_query(c.id)
+        return
+    if action == "start":
         open_support_inbox(chat_id, c.from_user)
         safe_answer_callback_query(c.id)
         return
@@ -17562,6 +17521,7 @@ def cb_support_user_inbox(c):
         safe_answer_callback_query(c.id)
         return
     if action == "back":
+        delete_last_support_ui(chat_id)
         return_to_main_menu(chat_id)
         safe_answer_callback_query(c.id)
         return
