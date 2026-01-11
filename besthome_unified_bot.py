@@ -3778,13 +3778,13 @@ def extract_listing_datetime(row: dict) -> Optional[datetime]:
     if not row:
         return None
     for key in (
+        "date_read",
+        "date_added",
+        "Elanin_tarixi",
+        "added_at",
         "created_at",
         "published_at",
         "inserted_at",
-        "date_added",
-        "date_read",
-        "Elanin_tarixi",
-        "added_at",
     ):
         v = _row_value_safe(row, key)
         if v:
@@ -5894,7 +5894,7 @@ def get_listings_timestamp_column(cur) -> Optional[str]:
     if LISTINGS_TS_COLUMN:
         return LISTINGS_TS_COLUMN
     cols = get_table_columns(cur, "listings")
-    for key in ("created_at", "published_at", "inserted_at"):
+    for key in ("date_read", "published_at", "inserted_at", "created_at"):
         if key in cols:
             LISTINGS_TS_COLUMN = cols[key]
             return LISTINGS_TS_COLUMN
@@ -5957,7 +5957,14 @@ def detect_user_listings_table(conn) -> Optional[str]:
 
 def detect_table_date_column(cur, table: str) -> Optional[str]:
     cols = get_table_columns(cur, table)
-    for key in ("added_at", "inserted_at", "created_at", "date_added", "date_read"):
+    for key in (
+        "date_read",
+        "date_added",
+        "added_at",
+        "inserted_at",
+        "published_at",
+        "created_at",
+    ):
         if key in cols:
             return cols[key]
     return None
@@ -6197,39 +6204,74 @@ def build_since_clause(column: Optional[str], since: datetime):
     return clause, [start_ts, start_str]
 
 
+def build_listing_date_expr(
+    cur: sqlite3.Cursor,
+    table: str,
+    date_col: Optional[str],
+    alias: Optional[str] = None,
+) -> Optional[str]:
+    if not date_col:
+        return None
+    cols = get_table_columns(cur, table)
+    prefix = f"{alias}." if alias else ""
+    date_expr = f"{prefix}{date_col}"
+    if date_col.lower() == "date_read":
+        created_col = cols.get("created_at")
+        if created_col:
+            created_expr = f"{prefix}{created_col}"
+            return f"COALESCE(date({date_expr}), date({created_expr}))"
+    return f"date({date_expr})"
+
+
+def build_listing_order_parts(
+    cur: sqlite3.Cursor,
+    table: str,
+    date_col: Optional[str],
+    alias: Optional[str] = None,
+    id_col: Optional[str] = "id",
+) -> List[str]:
+    date_expr = build_listing_date_expr(cur, table, date_col, alias=alias)
+    if not date_expr:
+        return []
+    cols = get_table_columns(cur, table)
+    prefix = f"{alias}." if alias else ""
+    parts = [f"{date_expr} DESC"]
+    if date_col and date_col.lower() == "date_read":
+        created_col = cols.get("created_at")
+        if created_col:
+            parts.append(f"{prefix}{created_col} DESC")
+    if id_col:
+        parts.append(f"{prefix}{id_col} DESC")
+    return parts
+
+
 def build_today_clause(
-    column: Optional[str],
+    date_expr: Optional[str],
     window: Optional[Tuple[datetime, datetime]] = None,
 ):
-    if not column:
+    if not date_expr:
         return "", []
     start = (window or (None, None))[0] or get_today_range()[0]
-    return build_since_clause(column, start)
+    return f" AND {date_expr} = date(?)", [start.date().isoformat()]
 
 
 def build_date_range_clause(
-    column: Optional[str], date_days: Optional[Union[int, str]]
+    date_expr: Optional[str], date_days: Optional[Union[int, str]]
 ):
     """Return SQL snippet for date filtering using SQLite's datetime semantics."""
 
-    if not column or date_days in (None, "all"):
+    if not date_expr or date_days in (None, "all"):
         return "", []
 
-    now = datetime.utcnow()
     if date_days == "today":
-        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start.replace(hour=23, minute=59, second=59, microsecond=999999)
-    else:
-        try:
-            days_int = int(date_days)
-        except Exception:
-            return "", []
-        start = now - timedelta(days=days_int)
-        end = now
-
+        return f" AND {date_expr} = date('now')", []
+    try:
+        days_int = int(date_days)
+    except Exception:
+        return "", []
     return (
-        f" AND datetime({column}) BETWEEN datetime(?) AND datetime(?)",
-        [format_sqlite_datetime(start), format_sqlite_datetime(end)],
+        f" AND {date_expr} >= date('now', ?)",
+        [f"-{days_int} day"],
     )
 
 
@@ -6295,7 +6337,8 @@ def count_main_active_listings(
                 logger.error("[STATS] No timestamp column found")
                 return 0
             window = get_today_range()
-            date_sql, date_params = build_today_clause(f"l.{date_col}", window)
+            date_expr = build_listing_date_expr(cur, "listings", date_col, alias="l")
+            date_sql, date_params = build_today_clause(date_expr, window)
         rayon_sql, rayon_params = build_rayon_filter_sql(cur, "listings", rayon, "l.")
         sql = "SELECT COUNT(*) FROM listings l " + flt + date_sql + rayon_sql
         cur.execute(sql, params + date_params + rayon_params)
@@ -6324,7 +6367,10 @@ def count_local_active_listings(
             date_col = detect_added_at_column(cur, "listings_approved")
             if date_col:
                 window = get_today_range()
-                date_sql, date_params = build_today_clause(f"l.{date_col}", window)
+                date_expr = build_listing_date_expr(
+                    cur, "listings_approved", date_col, alias="l"
+                )
+                date_sql, date_params = build_today_clause(date_expr, window)
         rayon_sql, rayon_params = build_rayon_filter_sql(
             cur, "listings_approved", rayon, "l."
         )
@@ -14759,7 +14805,10 @@ def load_recent_listings(since_dt: datetime):
     if os.path.exists(MAIN_DB):
         conn = get_main_conn()
         cur = conn.cursor()
-        cur.execute("SELECT * FROM listings ORDER BY date_read DESC, id DESC LIMIT 800")
+        date_col = detect_table_date_column(cur, "listings")
+        order_parts = build_listing_order_parts(cur, "listings", date_col)
+        order_clause = f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
+        cur.execute(f"SELECT * FROM listings{order_clause} LIMIT 800")
         for r in cur.fetchall():
             d = dict(r)
             d["__source"] = "main"
@@ -14956,11 +15005,11 @@ def query_structured_results(filters: dict, offset: int = 0, limit: int = None):
             op_code, prop_code, None, min_price=min_p, max_price=max_p, mode="main"
         )
         date_col = detect_table_date_column(cur, "listings")
-        date_sql, date_params = build_date_range_clause(date_col, date_days)
-        cur.execute(
-            base + flt + date_sql + " ORDER BY date_read DESC, id DESC",
-            params + date_params,
-        )
+        date_expr = build_listing_date_expr(cur, "listings", date_col)
+        date_sql, date_params = build_date_range_clause(date_expr, date_days)
+        order_parts = build_listing_order_parts(cur, "listings", date_col)
+        order_clause = f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
+        cur.execute(base + flt + date_sql + order_clause, params + date_params)
         for r in cur.fetchall():
             d = dict(r)
             d["__source"] = "main"
@@ -14974,11 +15023,11 @@ def query_structured_results(filters: dict, offset: int = 0, limit: int = None):
         op_code, prop_code, None, min_price=min_p, max_price=max_p, mode="local"
     )
     date_col = detect_table_date_column(cur, "listings_approved")
-    date_sql, date_params = build_date_range_clause(date_col, date_days)
-    cur.execute(
-        base + flt + date_sql + " ORDER BY date_added DESC, id DESC",
-        params + date_params,
-    )
+    date_expr = build_listing_date_expr(cur, "listings_approved", date_col)
+    date_sql, date_params = build_date_range_clause(date_expr, date_days)
+    order_parts = build_listing_order_parts(cur, "listings_approved", date_col)
+    order_clause = f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
+    cur.execute(base + flt + date_sql + order_clause, params + date_params)
     for r in cur.fetchall():
         d = dict(r)
         d["__source"] = "local"
@@ -15023,11 +15072,15 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
             logger.error("[STATS] No timestamp column found")
             close_main_conn(conn)
         else:
-            date_sql, date_params = build_today_clause(date_col, window)
+            date_expr = build_listing_date_expr(cur, "listings", date_col)
+            date_sql, date_params = build_today_clause(date_expr, window)
             rayon_sql, rayon_params = build_rayon_filter_sql(
                 cur, "listings", filters.get("rayon"), ""
             )
-            order_col = date_col or "date_read"
+            order_parts = build_listing_order_parts(cur, "listings", date_col)
+            order_clause = (
+                " ORDER BY " + ", ".join(order_parts) if order_parts else ""
+            )
             where_sql = flt + date_sql + rayon_sql
             logger.debug(
                 "today query main where=%s params=%s",
@@ -15035,7 +15088,7 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
                 params + date_params + rayon_params,
             )
             cur.execute(
-                base + where_sql + f" ORDER BY {order_col} DESC, id DESC",
+                base + where_sql + order_clause,
                 params + date_params + rayon_params,
             )
             for r in cur.fetchall():
@@ -15049,11 +15102,13 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
     base = "SELECT * FROM listings_approved"
     flt, params = build_filters_sql(op_code, prop_code, None, mode="local")
     date_col = detect_added_at_column(cur, "listings_approved")
-    date_sql, date_params = build_today_clause(date_col, window)
+    date_expr = build_listing_date_expr(cur, "listings_approved", date_col)
+    date_sql, date_params = build_today_clause(date_expr, window)
     rayon_sql, rayon_params = build_rayon_filter_sql(
         cur, "listings_approved", filters.get("rayon"), ""
     )
-    order_col = date_col or "date_added"
+    order_parts = build_listing_order_parts(cur, "listings_approved", date_col)
+    order_clause = f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
     where_sql = flt + date_sql + rayon_sql
     logger.debug(
         "today query local where=%s params=%s",
@@ -15061,7 +15116,7 @@ def query_today_results(filters: dict, offset: int = 0, limit: int = None):
         params + date_params + rayon_params,
     )
     cur.execute(
-        base + where_sql + f" ORDER BY {order_col} DESC, id DESC",
+        base + where_sql + order_clause,
         params + date_params + rayon_params,
     )
     for r in cur.fetchall():
@@ -15218,11 +15273,12 @@ def query_keyword_results(
     results = []
     search_started_at = time.perf_counter()
 
-    def apply_date_clause_sql(table: str, date_col: Optional[str]) -> Tuple[str, list]:
-        if not date_days or not date_col:
+    def apply_date_clause_sql(date_expr: Optional[str]) -> Tuple[str, list]:
+        if not date_days or not date_expr:
             return "", []
-        cutoff = datetime.utcnow() - timedelta(days=date_days)
-        return f" AND {date_col} >= ?", [cutoff.isoformat()]
+        if date_days == "today":
+            return f" AND {date_expr} = date('now')", []
+        return f" AND {date_expr} >= date('now', ?)", [f"-{date_days} day"]
 
     def resolve_keyword_columns(cur: sqlite3.Cursor, table: str) -> List[str]:
         cur.execute("PRAGMA table_info(" + table + ")")
@@ -15275,6 +15331,10 @@ def query_keyword_results(
         conn = conn_factory()
         cur = conn.cursor()
         date_col = detect_table_date_column(cur, table)
+        date_expr = build_listing_date_expr(cur, table, date_col, alias="l")
+        order_parts = build_listing_order_parts(
+            cur, table, date_col, alias="l"
+        )
         base_where = "1=1"
         params: List[Any] = []
         if operation_value:
@@ -15282,7 +15342,9 @@ def query_keyword_results(
             params.append(operation_value)
         if phrase_query or token_query:
             try:
-                order_suffix = f", l.{date_col} DESC" if date_col else ""
+                order_suffix = ""
+                if order_parts:
+                    order_suffix = ", " + ", ".join(order_parts)
                 rows = execute_ranked_fts(
                     cur,
                     f"{table} l",
@@ -15307,10 +15369,11 @@ def query_keyword_results(
             if kw_sql:
                 sql += " AND " + kw_sql
                 params_like.extend(kw_params)
-            date_sql, date_params = apply_date_clause_sql(table, date_col)
-            sql += date_sql
-            order_col = date_col or "date_read"
-            sql += f" ORDER BY {order_col} DESC LIMIT 5000"
+            date_expr = build_listing_date_expr(cur, table, date_col)
+            date_sql, date_params = apply_date_clause_sql(date_expr)
+            order_parts = build_listing_order_parts(cur, table, date_col)
+            order_clause = f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
+            sql += date_sql + order_clause + " LIMIT 5000"
             cur.execute(sql, params_like + date_params)
             rows = cur.fetchall()
 
@@ -15501,6 +15564,13 @@ def query_smart_results(criteria: dict, offset: int = 0, limit: int = None):
         conn = get_main_conn()
         cur = conn.cursor()
         where_clause, base_params = build_filters(op_main)
+        date_col = detect_table_date_column(cur, "listings")
+        order_suffix = ""
+        order_parts = build_listing_order_parts(
+            cur, "listings", date_col, alias="l"
+        )
+        if order_parts:
+            order_suffix = ", " + ", ".join(order_parts)
         if keywords and is_fts_ready(conn, "listings_fts"):
             rows = execute_ranked_fts(
                 cur,
@@ -15511,22 +15581,30 @@ def query_smart_results(criteria: dict, offset: int = 0, limit: int = None):
                 fts_phrase,
                 fts_token,
                 or_query,
-                ", l.date_read DESC",
+                order_suffix,
             )
         elif keywords:
             sql_where, kw_params = build_multi_like_sql(
                 keywords,
                 ["summary", "address", "metro", "rayon", "contact_name", "operation"],
             )
+            order_clause = ""
+            order_parts = build_listing_order_parts(cur, "listings", date_col)
+            if order_parts:
+                order_clause = " ORDER BY " + ", ".join(order_parts)
             cur.execute(
                 f"SELECT * FROM listings WHERE {where_clause} AND {sql_where} "
-                "ORDER BY date_read DESC LIMIT 5000",
+                f"{order_clause} LIMIT 5000",
                 base_params + kw_params,
             )
         else:
+            order_clause = ""
+            order_parts = build_listing_order_parts(cur, "listings", date_col)
+            if order_parts:
+                order_clause = " ORDER BY " + ", ".join(order_parts)
             cur.execute(
                 f"SELECT * FROM listings WHERE {where_clause} "
-                "ORDER BY date_read DESC LIMIT 5000",
+                f"{order_clause} LIMIT 5000",
                 base_params,
             )
         if keywords and is_fts_ready(conn, "listings_fts"):
@@ -15543,6 +15621,13 @@ def query_smart_results(criteria: dict, offset: int = 0, limit: int = None):
     conn = get_local_conn()
     cur = conn.cursor()
     where_clause, base_params = build_filters(op_local)
+    date_col = detect_table_date_column(cur, "listings_approved")
+    order_suffix = ""
+    order_parts = build_listing_order_parts(
+        cur, "listings_approved", date_col, alias="l"
+    )
+    if order_parts:
+        order_suffix = ", " + ", ".join(order_parts)
     if keywords and is_fts_ready(conn, "local_listings_fts"):
         rows = execute_ranked_fts(
             cur,
@@ -15553,21 +15638,33 @@ def query_smart_results(criteria: dict, offset: int = 0, limit: int = None):
             fts_phrase,
             fts_token,
             or_query,
-            ", l.date_added DESC",
+            order_suffix,
         )
     elif keywords:
         sql_where, kw_params = build_multi_like_sql(
             keywords, ["summary", "rayon", "metro", "contact_name", "operation"]
         )
+        order_clause = ""
+        order_parts = build_listing_order_parts(
+            cur, "listings_approved", date_col
+        )
+        if order_parts:
+            order_clause = " ORDER BY " + ", ".join(order_parts)
         cur.execute(
             f"SELECT * FROM listings_approved WHERE {where_clause} AND {sql_where} "
-            "ORDER BY date_added DESC LIMIT 5000",
+            f"{order_clause} LIMIT 5000",
             base_params + kw_params,
         )
     else:
+        order_clause = ""
+        order_parts = build_listing_order_parts(
+            cur, "listings_approved", date_col
+        )
+        if order_parts:
+            order_clause = " ORDER BY " + ", ".join(order_parts)
         cur.execute(
             f"SELECT * FROM listings_approved WHERE {where_clause} "
-            "ORDER BY date_added DESC LIMIT 5000",
+            f"{order_clause} LIMIT 5000",
             base_params,
         )
     if keywords and is_fts_ready(conn, "local_listings_fts"):
@@ -15608,13 +15705,16 @@ def query_phone_results(raw: str, offset: int = 0, limit: int = None):
     if os.path.exists(MAIN_DB):
         conn = get_main_conn()
         cur = conn.cursor()
+        date_col = detect_table_date_column(cur, "listings")
+        order_parts = build_listing_order_parts(cur, "listings", date_col)
+        order_clause = f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
         cur.execute(
             """
             SELECT * FROM listings
             WHERE REPLACE(REPLACE(REPLACE(phone,' ',''),'-',''),'+','') LIKE ?
-            ORDER BY date_read DESC, id DESC
+            {order_clause}
             LIMIT 2000
-        """,
+        """.format(order_clause=order_clause),
             (like,),
         )
         for r in cur.fetchall():
@@ -25457,10 +25557,14 @@ def admin_search_handler(message):
             cur = conn.cursor()
             columns = build_keyword_columns(cur, "listings")
             where_clause, params = build_keyword_where(columns)
+            date_col = detect_table_date_column(cur, "listings")
+            order_parts = build_listing_order_parts(cur, "listings", date_col)
+            order_clause = f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
             sql = (
                 "SELECT * FROM listings WHERE "
                 + where_clause
-                + " ORDER BY date_read DESC LIMIT 30"
+                + order_clause
+                + " LIMIT 30"
             )
             cur.execute(sql, params)
             rows = cur.fetchall()
@@ -26082,9 +26186,14 @@ def create_flask_app():
                     mode="main",
                 )
                 date_col = detect_table_date_column(cur, "listings")
-                date_sql, date_params = build_date_range_clause(date_col, date_days)
+                date_expr = build_listing_date_expr(cur, "listings", date_col)
+                date_sql, date_params = build_date_range_clause(date_expr, date_days)
+                order_parts = build_listing_order_parts(cur, "listings", date_col)
+                order_clause = (
+                    f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
+                )
                 cur.execute(
-                    base + flt + date_sql + " ORDER BY date_read DESC, id DESC",
+                    base + flt + date_sql + order_clause,
                     params + date_params,
                 )
                 for r in cur.fetchall():
@@ -26105,11 +26214,13 @@ def create_flask_app():
                 mode="local",
             )
             date_col = detect_table_date_column(cur, "listings_approved")
-            date_sql, date_params = build_date_range_clause(date_col, date_days)
-            cur.execute(
-                base + flt + date_sql + " ORDER BY date_added DESC, id DESC",
-                params + date_params,
+            date_expr = build_listing_date_expr(cur, "listings_approved", date_col)
+            date_sql, date_params = build_date_range_clause(date_expr, date_days)
+            order_parts = build_listing_order_parts(cur, "listings_approved", date_col)
+            order_clause = (
+                f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
             )
+            cur.execute(base + flt + date_sql + order_clause, params + date_params)
             for r in cur.fetchall():
                 d = dict(r)
                 d["__source"] = "local"
