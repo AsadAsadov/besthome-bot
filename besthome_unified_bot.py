@@ -7066,6 +7066,15 @@ def send_logo_if_exists(chat_id: int):
 
 
 MENU_REFRESH_BUTTON = "🔄 Botu yenilə"
+MAIN_MENU_BUTTONS = [
+    "Axtarış sistemi",
+    "Hesabım",
+    "Statistika",
+    "Ödəniş",
+    "Adminlə əlaqə",
+    "Haqqında",
+    "Botu yenilə",
+]
 STATISTICS_CACHE_TTL_SECONDS = 60
 statistics_cache: Dict[str, Dict[str, Any]] = {}
 MARKET_PULSE_CACHE_TTL_SECONDS = 300
@@ -9452,7 +9461,7 @@ def close_support_session(chat_id: int) -> None:
     close_support_chat_for_user(chat_id)
     render_support_status(
         chat_id,
-        "🔴 Dəstək bağlandı",
+        "🔴 Dəstək bağlandı.",
     )
 
 
@@ -9464,7 +9473,7 @@ def toggle_support_inbox(chat_id: int, user: types.User) -> None:
         clear_support_ui(chat_id)
     render_support_status(
         chat_id,
-        "🟢 Online dəstək aktivdir",
+        "🟢 Online dəstək aktivdir.\nMesajlarınız dəstəyə yönləndirilir.",
     )
 
 
@@ -9472,31 +9481,25 @@ def end_support_session_from_admin(chat_id: int) -> None:
     close_support_chat_for_user(chat_id)
     render_support_status(
         chat_id,
-        "🔴 Dəstək bağlandı.\nİstədiyiniz vaxt yenidən əlaqə saxlaya bilərsiniz.",
+        "🔴 Dəstək bağlandı.",
     )
+
+
+def is_main_menu_button_text(text: Optional[str]) -> bool:
+    if not text:
+        return False
+    stripped = text.strip()
+    if stripped in MAIN_MENU_BUTTONS:
+        return True
+    if " " in stripped:
+        return stripped.split(" ", 1)[1] in MAIN_MENU_BUTTONS
+    return False
 
 
 def is_menu_action(message: Union[types.Message, types.CallbackQuery]) -> bool:
     if isinstance(message, types.CallbackQuery) or getattr(message, "callback_query", None):
         return True
-    if not getattr(message, "text", None):
-        return False
-    menu_buttons = [
-        "Axtarış sistemi",
-        "Hesabım",
-        "Statistika",
-        "Şansını sına",
-        "Ödəniş",
-        "Adminlə əlaqə",
-        "Haqqında",
-        "Botu yenilə",
-    ]
-    text = message.text.strip()
-    if text in menu_buttons:
-        return True
-    if " " in text:
-        return text.split(" ", 1)[1] in menu_buttons
-    return False
+    return is_main_menu_button_text(getattr(message, "text", None))
 
 
 def is_support_callback(call: types.CallbackQuery) -> bool:
@@ -25456,7 +25459,7 @@ def admin_search_handler(message):
     func=lambda m: not is_admin(m.chat.id)
     and is_user_support_active(m.chat.id)
     and m.text
-    and not is_menu_action(m),
+    and not is_main_menu_button_text(m.text),
 )
 def support_user_message_router(message):
     if message.text and message.text.startswith("/"):
