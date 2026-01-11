@@ -25,6 +25,7 @@ import logging
 import json
 import hashlib
 import glob
+import pickle
 import uuid
 from datetime import datetime, date, timedelta, timezone
 from collections import Counter, defaultdict
@@ -34,6 +35,10 @@ from urllib.parse import quote, unquote, urlsplit, urlunsplit, parse_qs, urlenco
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 import requests
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
 from flask import (
     Flask,
     jsonify,
@@ -1776,6 +1781,7 @@ ZIP_ALLOWED_MIME_TYPES = {
     "application/x-zip-compressed",
     "application/octet-stream",
 }
+DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
 
 def normalize_dropbox_urls(url: str) -> List[str]:
@@ -1806,60 +1812,75 @@ def normalize_dropbox_urls(url: str) -> List[str]:
 def is_google_drive_url(url: str) -> bool:
     parts = urlsplit(url)
     netloc = parts.netloc.lower()
-    return "drive.google.com" in netloc or "docs.google.com" in netloc
+    return (
+        "drive.google.com" in netloc
+        or "docs.google.com" in netloc
+        or "googleusercontent.com" in netloc
+    )
 
 
-def download_from_gdrive(url: str, out_path: str) -> Dict[str, Optional[str]]:
-    session = requests.Session()
-    r = session.get(url, stream=True)
-    try:
-        content_type = r.headers.get("Content-Type", "")
+def extract_drive_file_id(url: str) -> str:
+    match = re.search(r"[?&]id=([A-Za-z0-9_-]+)", url)
+    if not match:
+        raise RuntimeError("Google Drive linkində file id tapılmadı")
+    return match.group(1)
 
-        # If HTML returned, Google Drive is asking for confirmation
-        if "text/html" in content_type:
-            confirm = None
 
-            # Try to find token in page
-            m = re.search(r"confirm=([0-9A-Za-z_]+)", r.text)
-            if m:
-                confirm = m.group(1)
+def _load_drive_credentials() -> Credentials:
+    token_candidates = [
+        os.path.join(BASE_DIR, "token.json"),
+        os.path.join(BASE_DIR, "token.pickle"),
+        "token.json",
+        "token.pickle",
+    ]
+    token_path = next((path for path in token_candidates if os.path.exists(path)), None)
+    if not token_path:
+        raise RuntimeError("Google Drive OAuth token faylı tapılmadı (token.json/token.pickle)")
+
+    if token_path.endswith(".json"):
+        creds = Credentials.from_authorized_user_file(token_path, DRIVE_SCOPES)
+    else:
+        with open(token_path, "rb") as token_file:
+            creds = pickle.load(token_file)
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            if token_path.endswith(".json"):
+                with open(token_path, "w", encoding="utf-8") as token_file:
+                    token_file.write(creds.to_json())
             else:
-                # Try cookies
-                for k, v in session.cookies.items():
-                    if k.startswith("download_warning"):
-                        confirm = v
-                        break
+                with open(token_path, "wb") as token_file:
+                    pickle.dump(creds, token_file)
+        else:
+            raise RuntimeError("Google Drive OAuth token etibarsızdır və yenilənə bilmir")
 
-            if not confirm:
-                raise RuntimeError("Google Drive confirmation token not found")
+    return creds
 
-            sep = "&" if "?" in url else "?"
-            url = url + f"{sep}confirm={confirm}"
-            r.close()
-            r = session.get(url, stream=True)
-            content_type = r.headers.get("Content-Type", "")
-            if "text/html" in content_type:
-                raise RuntimeError("Unexpected response type: text/html")
 
-        with open(out_path, "wb") as f:
-            for chunk in r.iter_content(1024 * 1024):
-                if chunk:
-                    f.write(chunk)
+def download_from_gdrive_api(file_id: str, out_path: str) -> Dict[str, Optional[str]]:
+    creds = _load_drive_credentials()
+    service = build("drive", "v3", credentials=creds, cache_discovery=False)
+    request = service.files().get_media(fileId=file_id)
+    with io.FileIO(out_path, "wb") as fh:
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            _status, done = downloader.next_chunk()
 
-        headers = r.headers or {}
-        return {
-            "normalized_url": url,
-            "effective_url": r.url,
-            "status": str(r.status_code),
-            "content_type": headers.get("Content-Type"),
-            "etag": headers.get("ETag"),
-            "last_modified": headers.get("Last-Modified"),
-        }
-    finally:
-        try:
-            r.close()
-        except Exception:
-            pass
+    metadata = (
+        service.files()
+        .get(fileId=file_id, fields="id,name,etag,modifiedTime,mimeType,size")
+        .execute()
+    )
+    return {
+        "normalized_url": f"gdrive://{file_id}",
+        "effective_url": f"gdrive://{file_id}",
+        "status": "200",
+        "content_type": metadata.get("mimeType"),
+        "etag": metadata.get("etag"),
+        "last_modified": metadata.get("modifiedTime"),
+    }
 
 
 def _log_download_response(
@@ -1910,6 +1931,13 @@ def _response_looks_like_db(response: requests.Response) -> bool:
         return True
     effective_url = (response.url or "").lower().split("?", 1)[0]
     return effective_url.endswith(".db")
+
+
+def _ensure_zip_magic(path: str) -> None:
+    with open(path, "rb") as file_handle:
+        signature = file_handle.read(4)
+    if signature != b"PK\x03\x04":
+        raise RuntimeError("Yüklənən fayl ZIP deyil")
 
 
 def download_zip_stream(url: str) -> str:
@@ -1968,7 +1996,8 @@ def download_main_db_file(url: str) -> Tuple[str, bool, Dict[str, Optional[str]]
                 os.remove(path)
         try:
             if is_google_drive_url(candidate):
-                download_info = download_from_gdrive(candidate, temp_path)
+                file_id = extract_drive_file_id(candidate)
+                download_info = download_from_gdrive_api(file_id, temp_path)
                 total = os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
                 if total <= 0:
                     raise RuntimeError("Fayl ölçüsü sıfırdır")
@@ -1987,8 +2016,7 @@ def download_main_db_file(url: str) -> Tuple[str, bool, Dict[str, Optional[str]]
                     if r.status_code != 200:
                         raise RuntimeError(f"HTTP status {r.status_code}")
                     is_zip_response = _response_looks_like_zip(r)
-                    is_db_response = _response_looks_like_db(r)
-                    if not is_zip_response and not is_db_response:
+                    if not is_zip_response:
                         raise RuntimeError(
                             f"Unexpected response type: {download_info.get('content_type')}"
                         )
@@ -2015,11 +2043,8 @@ def download_main_db_file(url: str) -> Tuple[str, bool, Dict[str, Optional[str]]
                         raise RuntimeError("Fayl ölçüsü sıfırdır")
                     if total < DB_UPDATE_MIN_ZIP_BYTES:
                         raise RuntimeError("Fayl ölçüsü çox kiçikdir")
-            is_zip = zipfile.is_zipfile(temp_path)
-            if not is_zip:
-                os.replace(temp_path, DB_UPDATE_DB_PATH)
-                temp_path = DB_UPDATE_DB_PATH
-            return temp_path, is_zip, download_info
+            _ensure_zip_magic(temp_path)
+            return temp_path, True, download_info
         except Exception as exc:
             last_error = exc
             if os.path.exists(temp_path):
