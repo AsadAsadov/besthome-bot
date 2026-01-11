@@ -9237,10 +9237,17 @@ def cb_ui_account(c):
 
 
 STATS_FILTER_LABELS = {
-    "24h": "🕒 Son 24 saatda əlavə olunan elanlar",
-    "7d": "📆 7 gün",
-    "30d": "📅 30 gün",
-    "all": "🧾 Ümumi",
+    "24h": "24 saat",
+    "7d": "7 gün",
+    "30d": "30 gün",
+    "all": "Ümumi",
+}
+
+STATS_PERIOD_TITLES = {
+    "24h": "Son 24 saat",
+    "7d": "Son 7 gün",
+    "30d": "Son 30 gün",
+    "all": "Ümumi göstəricilər",
 }
 
 STATS_TS_CANDIDATES = (
@@ -9319,49 +9326,34 @@ def _format_stats_prop_type_label(value: Any) -> str:
     return replacement or label
 
 
-def format_stats_text(
-    base_stats: dict, period_stats: dict, period_key: str, is_admin: bool = False
-) -> str:
-    label = STATS_FILTER_LABELS.get(period_key, "🧾 Ümumi")
+def resolve_stats_period_title(period_key: str) -> str:
+    return STATS_PERIOD_TITLES.get(period_key, STATS_PERIOD_TITLES["all"])
+
+
+def format_stats_text(stats: dict, period_key: str, is_admin: bool = False) -> str:
+    title = resolve_stats_period_title(period_key)
     lines = [
         "📊 <b>BestHome Statistikası</b>",
         "─────────────",
         "",
-        "📦 Ümumi göstəricilər:",
-        f"• Ümumi elanlar: {base_stats.get('total', 0)}",
-        f"• 🔑 Satılır: {base_stats.get('sale_count', 0)}",
-        f"• 🛏 Kirayə: {base_stats.get('rent_count', 0)}",
+        f"{title}:",
+        f"• Ümumi elanlar: {stats.get('total', 0)}",
+        f"• 🔑 Satılır: {stats.get('sale_count', 0)}",
+        f"• 🛏 Kirayə: {stats.get('rent_count', 0)}",
     ]
-    base_prop_types = base_stats.get("prop_type_counts", {}) or {}
-    period_prop_types = period_stats.get("prop_type_counts", {}) or {}
 
-    if base_prop_types:
-        for prop_type, count in base_prop_types.items():
-            label = _format_stats_prop_type_label(prop_type)
-            emoji = PROP_TYPE_EMOJI_MAP.get(label, "🏠")
-            lines.append(f"• {emoji} {label}: {count}")
+    prop_types = stats.get("prop_type_counts", {}) or {}
+    if prop_types:
+        for prop_type, count in prop_types.items():
+            prop_label = _format_stats_prop_type_label(prop_type)
+            emoji = PROP_TYPE_EMOJI_MAP.get(prop_label, "🏠")
+            lines.append(f"• {emoji} {prop_label}: {count}")
 
-    lines.extend(
-        [
-            "",
-            f"{label} göstəriciləri:",
-            f"• 🆕 Yeni elanlar: {period_stats.get('total', 0)}",
-            f"• 🔑 Satılır: {period_stats.get('sale_count', 0)}",
-            f"• 🛏 Kirayə: {period_stats.get('rent_count', 0)}",
-        ]
-    )
-
-    if period_prop_types:
-        for prop_type, count in period_prop_types.items():
-            label = _format_stats_prop_type_label(prop_type)
-            emoji = PROP_TYPE_EMOJI_MAP.get(label, "🏠")
-            lines.append(f"• {emoji} {label}: {count}")
-
-    if period_stats.get("note"):
-        lines.append(f"({period_stats['note']})")
+    if stats.get("note"):
+        lines.append(f"({stats['note']})")
 
     if is_admin:
-        meta = period_stats.get("meta") or base_stats.get("meta") or {}
+        meta = stats.get("meta") or {}
         ts_col = meta.get("ts_col")
         if meta.get("table") == "listings":
             ts_col = LISTINGS_TS_COLUMN or ts_col
@@ -9385,16 +9377,17 @@ def send_user_statistics(chat_id: int, period_key: str, message_id: Optional[int
         selected = period_key if period_key in STATS_FILTER_LABELS else "24h"
         logger.info("STATS start chat_id=%s period=%s", chat_id, selected)
         user_stats_filter[chat_id] = selected
-        base_stats = compute_user_statistics("all")
         period_stats = compute_user_statistics(selected)
         if selected == "24h":
             period_stats = dict(period_stats)
             period_stats["total"] = get_today_added_count()
         admin_flag = is_admin(chat_id)
-        text = format_stats_text(base_stats, period_stats, selected, is_admin=admin_flag)
+        text = format_stats_text(period_stats, selected, is_admin=admin_flag)
         keyboard = build_user_stats_keyboard(selected)
         if message_id:
             ui_message_state[chat_id] = message_id
+            last_ui_message_id[chat_id] = message_id
+            set_support_session_last_ui_message_id(chat_id, message_id)
         send_or_edit_ui_message(
             chat_id,
             text,
