@@ -3425,6 +3425,8 @@ def init_local_db():
             price_max INTEGER,
             rayon TEXT,
             prop_type TEXT,
+            floor_min INTEGER,
+            floor_max INTEGER,
             created_at TEXT,
             last_notified_at TEXT,
             is_active INTEGER DEFAULT 1
@@ -3702,6 +3704,10 @@ def init_local_db():
         cur.execute("ALTER TABLE saved_searches ADD COLUMN created_at TEXT")
     if "is_active" not in saved_cols:
         cur.execute("ALTER TABLE saved_searches ADD COLUMN is_active INTEGER DEFAULT 1")
+    if "floor_min" not in saved_cols:
+        cur.execute("ALTER TABLE saved_searches ADD COLUMN floor_min INTEGER")
+    if "floor_max" not in saved_cols:
+        cur.execute("ALTER TABLE saved_searches ADD COLUMN floor_max INTEGER")
 
     conn.commit()
     conn.close()
@@ -11765,6 +11771,19 @@ def format_saved_search_entry(row: dict) -> str:
     if prop_type:
         parts.append(f"🏠 {prop_type}")
 
+    floor_min = _row_value_safe(row, "floor_min")
+    floor_max = _row_value_safe(row, "floor_max")
+    if floor_min is not None or floor_max is not None:
+        if floor_min is not None and floor_max is not None:
+            if floor_min == floor_max:
+                parts.append(f"🏢 {floor_min}")
+            else:
+                parts.append(f"🏢 {floor_min}-{floor_max}")
+        elif floor_min is not None:
+            parts.append(f"🏢 {floor_min}+")
+        elif floor_max is not None:
+            parts.append(f"🏢 0-{floor_max}")
+
     return " | ".join(parts)
 
 
@@ -12085,7 +12104,7 @@ def send_criteria_list(chat_id: int, message=None):
     mk = types.InlineKeyboardMarkup()
     mk.add(
         types.InlineKeyboardButton(
-            "➕ Yeni bildiriş qaydası", callback_data="notif_rule_new"
+            "➕ Kriteriya əlavə et", callback_data="notif_rule_new"
         )
     )
     if not rows:
@@ -12118,11 +12137,14 @@ def send_criteria_list(chat_id: int, message=None):
         render_ui(chat_id, text, mk)
 
 
-def build_notification_rule_operation_keyboard() -> types.ReplyKeyboardMarkup:
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row("🏠 Satılır", "🏢 Kirayə")
-    kb.row("⬅️ Geri")
-    return kb
+def build_notification_rule_operation_markup() -> types.InlineKeyboardMarkup:
+    mk = types.InlineKeyboardMarkup()
+    mk.row(
+        types.InlineKeyboardButton("Satılır", callback_data="notif_rule_op:sale"),
+        types.InlineKeyboardButton("Kirayə", callback_data="notif_rule_op:rent"),
+    )
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="notif_rule_op:back"))
+    return mk
 
 
 def build_notification_rayon_markup(
@@ -12153,7 +12175,7 @@ def build_notification_rayon_markup(
 def send_notification_rayon_prompt(chat_id: int, message=None):
     selected = notification_rule_state.get(chat_id, {}).get("rayons", [])
     mk = build_notification_rayon_markup(selected)
-    text = "📍 Rayon seçin (bir neçəsini seçə bilərsiniz):"
+    text = "📍 Ərazi seçin (bir neçəsini seçə bilərsiniz):"
     if message:
         render_ui(message.chat.id, text, mk)
         return
@@ -12186,11 +12208,16 @@ def send_notification_property_type_prompt(chat_id: int, message=None):
 def start_notification_rule_flow(chat_id: int):
     # Notification rules have their own flow and do not reuse search filters.
     notification_rule_state[chat_id] = {"step": "operation"}
-    bot.send_message(
-        chat_id,
-        "🔔 Bildiriş qaydası üçün əməliyyat növünü seçin:",
-        reply_markup=build_notification_rule_operation_keyboard(),
-    )
+    send_notification_operation_prompt(chat_id)
+
+
+def send_notification_operation_prompt(chat_id: int, message=None):
+    text = "🔔 Kriteriya üçün əməliyyat növünü seçin:"
+    mk = build_notification_rule_operation_markup()
+    if message:
+        render_ui(message.chat.id, text, mk)
+        return
+    render_ui(chat_id, text, mk)
 
 
 def save_notification_rule(user_id: int, data: dict) -> Optional[int]:
@@ -12200,9 +12227,9 @@ def save_notification_rule(user_id: int, data: dict) -> Optional[int]:
         """
         INSERT INTO saved_searches (
             chat_id, operation, rooms, price_min, price_max, rayon, prop_type,
-            created_at, last_notified_at, is_active
+            floor_min, floor_max, created_at, last_notified_at, is_active
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
         """,
         (
             user_id,
@@ -12212,6 +12239,8 @@ def save_notification_rule(user_id: int, data: dict) -> Optional[int]:
             data.get("price_max"),
             data.get("rayon"),
             data.get("prop_type"),
+            data.get("floor_min"),
+            data.get("floor_max"),
             datetime.utcnow().isoformat(),
             None,
         ),
@@ -13354,10 +13383,41 @@ def cb_notif_rule_new(c):
         pass
 
 
+@bot.callback_query_handler(func=lambda c: c.data.startswith("notif_rule_op:"))
+@callback_guard
+def cb_notification_rule_operation(c):
+    if not ensure_feature_available_cb(c, "notifications"):
+        return
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id
+    action = c.data.split(":", 1)[1]
+    if action == "back":
+        notification_rule_state.pop(chat_id, None)
+        send_criteria_list(chat_id, message=c.message)
+        try:
+            bot.answer_callback_query(c.id)
+        except Exception:
+            pass
+        return
+    if action not in {"sale", "rent"}:
+        return
+    notification_rule_state[chat_id] = {
+        "step": "rayon",
+        "operation": action,
+        "rayons": [],
+    }
+    send_notification_rayon_prompt(chat_id, message=c.message)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
 @bot.message_handler(
     func=lambda m: notification_rule_state.get(m.chat.id, {}).get("step") == "operation"
 )
-def handle_notification_rule_operation(message):
+def handle_notification_rule_operation_message(message):
     if not ensure_feature_available(message.chat.id, "notifications"):
         return
     if not ensure_allowed(message):
@@ -13366,9 +13426,9 @@ def handle_notification_rule_operation(message):
     text = (message.text or "").strip()
     if text == "⬅️ Geri":
         notification_rule_state.pop(chat_id, None)
-        show_notifications_menu(chat_id)
+        send_criteria_list(chat_id)
         return
-    if text not in {"🏠 Satılır", "🏢 Kirayə"}:
+    if text not in {"Satılır", "Kirayə", "🏠 Satılır", "🏢 Kirayə"}:
         bot.send_message(chat_id, "⚠️ Zəhmət olmasa seçim edin.")
         return
     operation = "sale" if "Satılır" in text else "rent"
@@ -13411,50 +13471,16 @@ def cb_notification_rule_rayon(c):
                 c.id, "⚠️ Ən azı bir rayon seçin.", show_alert=True
             )
             return
-        state["step"] = "prop_type"
-        send_notification_property_type_prompt(chat_id, message=c.message)
-    elif action == "back":
-        state["step"] = "operation"
+        state["step"] = "min_price"
+        notification_rule_state[chat_id] = state
         bot.send_message(
             chat_id,
-            "🔔 Bildiriş qaydası üçün əməliyyat növünü seçin:",
-            reply_markup=build_notification_rule_operation_keyboard(),
+            "💰 Minimum qiymət yazın (istəyə görə):",
+            reply_markup=build_optional_input_keyboard(),
         )
-    try:
-        bot.answer_callback_query(c.id)
-    except Exception:
-        pass
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("notif_rule_prop"))
-@callback_guard
-def cb_notification_rule_prop(c):
-    if not ensure_feature_available_cb(c, "notifications"):
-        return
-    if not ensure_allowed_cb(c):
-        return
-    chat_id = c.message.chat.id
-    state = notification_rule_state.get(chat_id)
-    if not state or state.get("step") != "prop_type":
-        return
-    if c.data == "notif_rule_prop_back":
-        state["step"] = "rayon"
-        send_notification_rayon_prompt(chat_id, message=c.message)
-        try:
-            bot.answer_callback_query(c.id)
-        except Exception:
-            pass
-        return
-    prop_code = c.data.split(":", 1)[1]
-    prop_map = {"m": "Mənzil", "b": "Bağ evi", "t": "Torpaq", "all": None}
-    state["prop_type"] = prop_map.get(prop_code)
-    state["step"] = "min_price"
-    notification_rule_state[chat_id] = state
-    bot.send_message(
-        chat_id,
-        "💰 Minimum qiymət yazın (istəyə görə):",
-        reply_markup=build_optional_input_keyboard(),
-    )
+    elif action == "back":
+        state["step"] = "operation"
+        send_notification_operation_prompt(chat_id, message=c.message)
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -13514,19 +13540,13 @@ def handle_notification_rule_max_price(message):
             bot.send_message(chat_id, "⚠️ Maksimum qiyməti rəqəm ilə yazın.")
             return
         state["price_max"] = int(value)
-    prop_type = state.get("prop_type")
-    prop_type_norm = normalize_property_type_ui_value(prop_type)
-    if prop_type_norm in {"Mənzil", "Bağ evi"} or prop_type_norm is None:
-        state["step"] = "rooms"
-        notification_rule_state[chat_id] = state
-        bot.send_message(
-            chat_id,
-            "🛏 Otaq sayı yazın (istəyə görə):",
-            reply_markup=build_optional_input_keyboard(),
-        )
-        return
-    state["rooms"] = None
-    finalize_notification_rule(chat_id)
+    state["step"] = "rooms"
+    notification_rule_state[chat_id] = state
+    bot.send_message(
+        chat_id,
+        "🛏 Otaq sayı yazın (istəyə görə):",
+        reply_markup=build_optional_input_keyboard(),
+    )
 
 
 @bot.message_handler(
@@ -13551,6 +13571,61 @@ def handle_notification_rule_rooms(message):
             bot.send_message(chat_id, "⚠️ Otaq sayını rəqəm ilə yazın.")
             return
         state["rooms"] = int(value)
+    state["step"] = "floor"
+    notification_rule_state[chat_id] = state
+    bot.send_message(
+        chat_id,
+        "🏢 Mərtəbə yazın (istəyə görə, məs: 3 və ya 1-3):",
+        reply_markup=build_optional_input_keyboard(),
+    )
+
+
+@bot.message_handler(
+    func=lambda m: notification_rule_state.get(m.chat.id, {}).get("step") == "floor"
+)
+def handle_notification_rule_floor(message):
+    if not ensure_allowed(message):
+        return
+    chat_id = message.chat.id
+    text = (message.text or "").strip()
+    state = notification_rule_state.get(chat_id, {})
+    if text == "⬅️ Geri":
+        state["step"] = "rooms"
+        notification_rule_state[chat_id] = state
+        bot.send_message(
+            chat_id,
+            "🛏 Otaq sayı yazın (istəyə görə):",
+            reply_markup=build_optional_input_keyboard(),
+        )
+        return
+    if text == "⚪️ Keç":
+        state["floor_min"] = None
+        state["floor_max"] = None
+        notification_rule_state[chat_id] = state
+        finalize_notification_rule(chat_id)
+        return
+
+    txt_clean = re.sub(r"\s+", "", text)
+    single_match = re.fullmatch(r"\d+", txt_clean)
+    range_match = re.fullmatch(r"\d+-\d+", txt_clean)
+
+    if single_match:
+        floor_min = floor_max = int(txt_clean)
+    elif range_match:
+        parts = txt_clean.split("-")
+        try:
+            floor_min = int(parts[0])
+            floor_max = int(parts[1])
+        except Exception:
+            bot.send_message(chat_id, "❌ Yanlış format. Məsələn: 3 və ya 1-3")
+            return
+    else:
+        bot.send_message(chat_id, "❌ Yanlış format. Məsələn: 3 və ya 1-3")
+        return
+
+    state["floor_min"] = floor_min
+    state["floor_max"] = floor_max
+    notification_rule_state[chat_id] = state
     finalize_notification_rule(chat_id)
 
 
@@ -13565,21 +13640,16 @@ def finalize_notification_rule(chat_id: int):
         "price_max": state.get("price_max"),
         "rayon": ", ".join(state.get("rayons") or []),
         "prop_type": state.get("prop_type"),
+        "floor_min": state.get("floor_min"),
+        "floor_max": state.get("floor_max"),
     }
     rule_id = save_notification_rule(chat_id, data)
-    bot.send_message(chat_id, f"✅ Bildiriş qaydası yaradıldı (ID: {rule_id}).")
-    send_criteria_list(chat_id)
-    set_ui_context(chat_id, UI_CONTEXT_MAIN)
-    send_with_reply_keyboard(
-        chat_id,
-        "🏠 Əsas menyu açıqdır.",
-        build_main_menu(
+    if rule_id:
+        bot.send_message(
             chat_id,
-            is_admin(chat_id),
-            has_customer_requests_access(chat_id),
-            should_show_bonus_button(chat_id),
-        ),
-    )
+            "✅ Kriteriya əlavə olundu.\n🔔 Uyğun elan çıxanda sizə bildiriş gələcək.",
+        )
+    send_criteria_list(chat_id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_stopcrit:"))
@@ -14908,6 +14978,12 @@ def matches_saved_search(ev: dict, saved: dict) -> bool:
             if prop_text not in prop_values:
                 return False
         elif prop_filter.lower() not in prop_text:
+            return False
+
+    floor_min = saved.get("floor_min")
+    floor_max = saved.get("floor_max")
+    if floor_min is not None or floor_max is not None:
+        if not matches_floor(ev, (floor_min, floor_max)):
             return False
 
     return True
