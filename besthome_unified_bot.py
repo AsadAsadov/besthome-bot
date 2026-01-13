@@ -25586,6 +25586,17 @@ def stats_period_range(period: str) -> Tuple[date, date, str]:
     return start, end, label
 
 
+def get_time_range(scope: str) -> datetime:
+    now = datetime.now()
+    if scope == "today":
+        return now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if scope == "week":
+        return now - timedelta(days=7)
+    if scope == "month":
+        return now - timedelta(days=30)
+    raise ValueError("Invalid stats scope")
+
+
 def format_ranked_lines(items, name_key: str, count_key: str):
     if not items:
         return []
@@ -25695,7 +25706,12 @@ def show_admin_stats(
 
     selected_period = period or admin_stats_period.get(chat_id, "day")
     admin_stats_period[chat_id] = selected_period
-    start_date, end_date, period_label = stats_period_range(selected_period)
+    _, _, period_label = stats_period_range(selected_period)
+    stats_scope = {"day": "today", "week": "week", "month": "month"}.get(
+        selected_period, "today"
+    )
+    start_dt = get_time_range(stats_scope)
+    start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
 
     def table_exists(cur, name: str) -> bool:
         try:
@@ -25756,7 +25772,6 @@ def show_admin_stats(
     total_users = active_users = pending_users = expired_users = blocked_users = 0
     demo_users = 0
     period_searches = 0
-    today_searches = 0
     top_rayons = []
     top_users = []
     search_stats_available = False
@@ -25775,24 +25790,13 @@ def show_admin_stats(
 
         if table_exists(cur_local, "search_logs"):
             search_stats_available = True
-            start_str = start_date.isoformat()
-            end_str = end_date.isoformat()
-            today_str = date.today().isoformat()
             period_searches = safe_count(
                 cur_local,
                 """
                 SELECT COUNT(*) FROM search_logs
-                WHERE DATE(created_at) BETWEEN ? AND ?
+                WHERE datetime(created_at) >= datetime(?)
                 """,
-                (start_str, end_str),
-            )
-            today_searches = safe_count(
-                cur_local,
-                """
-                SELECT COUNT(*) FROM search_logs
-                WHERE DATE(created_at) = ?
-                """,
-                (today_str,),
+                (start_str,),
             )
             try:
                 cur_local.execute(
@@ -25800,11 +25804,11 @@ def show_admin_stats(
                     SELECT COALESCE(NULLIF(TRIM(rayon), ''), '') AS rn,
                            COUNT(*) AS cnt
                     FROM search_logs
-                    WHERE DATE(created_at) BETWEEN ? AND ?
+                    WHERE datetime(created_at) >= datetime(?)
                     GROUP BY rn
                     ORDER BY cnt DESC
                     """,
-                    (start_str, end_str),
+                    (start_str,),
                 )
                 top_rayons = cur_local.fetchall()
             except Exception:
@@ -25819,16 +25823,17 @@ def show_admin_stats(
                            u.username
                     FROM search_logs sl
                     LEFT JOIN users u ON u.chat_id = sl.chat_id
-                    WHERE DATE(sl.created_at) = ?
+                    WHERE datetime(sl.created_at) >= datetime(?)
                     GROUP BY sl.chat_id
                     ORDER BY cnt DESC
                     LIMIT 10
                     """,
-                    (today_str,),
+                    (start_str,),
                 )
                 top_users = cur_local.fetchall()
             except Exception:
                 top_users = []
+            logger.info("[STATS] scope=%s users=%s", stats_scope, len(top_users))
     finally:
         try:
             conn_local.close()
@@ -25906,8 +25911,8 @@ def show_admin_stats(
         lines.append("• Məlumat yoxdur")
     lines.append("")
 
-    lines.append("🔍 Axtarış edən istifadəçilər — bu gün")
-    lines.append(f"Cəmi axtarış: {today_searches}")
+    lines.append(f"🔍 Axtarış edən istifadəçilər — {period_label}")
+    lines.append(f"Cəmi axtarış: {period_searches}")
     lines.append("")
     active_user_blocks = (
         format_active_user_stats(top_users) if search_stats_available else []
