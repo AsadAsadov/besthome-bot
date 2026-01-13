@@ -7,6 +7,21 @@ from typing import Dict, Optional, Tuple, List, Sequence
 
 logger = logging.getLogger("admin_panel")
 
+APPROVAL_MESSAGE_TEXT = (
+    "✅ Hesabınız təsdiqləndi!\n\n"
+    "Artıq Best Home platformasından tam şəkildə istifadə edə bilərsiniz.\n"
+    "Uğurlu axtarışlar! 🏡✨"
+)
+
+
+def _send_approval_notification(chat_id: int) -> None:
+    try:
+        from besthome_unified_bot import bot
+
+        bot.send_message(chat_id, APPROVAL_MESSAGE_TEXT)
+    except Exception:
+        logger.exception("Failed to send approval notification chat_id=%s", chat_id)
+
 
 class AdminDatabase:
     def __init__(self, data_dir: str):
@@ -299,8 +314,14 @@ def block_user(db: AdminDatabase, chat_id: int, blocked: bool) -> bool:
 def approve_user(db: AdminDatabase, chat_id: int) -> bool:
     conn = db.local_conn()
     try:
+        row = conn.execute(
+            "SELECT approved FROM users WHERE chat_id=?", (chat_id,)
+        ).fetchone()
+        old_approved = int(row.get("approved") or 0) if row else None
         cur = conn.execute("UPDATE users SET approved=1 WHERE chat_id=?", (chat_id,))
         conn.commit()
+        if old_approved == 0 and cur.rowcount > 0:
+            _send_approval_notification(chat_id)
         return cur.rowcount > 0
     finally:
         conn.close()
@@ -530,11 +551,18 @@ def approve_users(db: AdminDatabase, chat_ids: Sequence[int]) -> int:
     placeholders = ",".join(["?"] * len(normalized_ids))
     conn = db.local_conn()
     try:
+        pending_rows = conn.execute(
+            f"SELECT chat_id FROM users WHERE approved=0 AND chat_id IN ({placeholders})",
+            normalized_ids,
+        ).fetchall()
+        pending_ids = [int(row.get("chat_id")) for row in pending_rows]
         cur = conn.execute(
             f"UPDATE users SET approved=1 WHERE chat_id IN ({placeholders})",
             normalized_ids,
         )
         conn.commit()
+        for pending_id in pending_ids:
+            _send_approval_notification(pending_id)
         return cur.rowcount
     finally:
         conn.close()
