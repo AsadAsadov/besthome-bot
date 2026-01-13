@@ -9642,7 +9642,7 @@ def format_stats_text(stats: dict, period_key: str, is_admin: bool = False) -> s
         meta = stats.get("meta") or {}
         scope = meta.get("scope") or period_key
         lines.append("")
-        lines.append(f"(dbg: table=listings ts=date_read scope={scope})")
+        lines.append(f"(dbg: table=listings ts=date_read scope={scope} op_norm=enabled)")
     return "\n".join(lines)
 
 
@@ -14376,23 +14376,28 @@ def compute_stats(
         except Exception:
             pass
 
-    op_expr = f"LOWER(TRIM(COALESCE(l.\"{op_col}\", '')))" if op_col else None
+    op_expr_raw = f"TRIM(COALESCE(l.\"{op_col}\", ''))" if op_col else None
+    op_expr = f"LOWER({op_expr_raw})" if op_expr_raw else None
     type_expr = f"LOWER(TRIM(COALESCE(l.\"{type_col}\", '')))" if type_col else None
 
     select_parts = ["COUNT(*) AS total"]
     params: List[Any] = []
 
-    if op_expr:
-        sale_vals = STATS_OPERATION_BUCKETS["satilir"]
-        rent_vals = STATS_OPERATION_BUCKETS["kiraye"]
-        select_parts.append(
-            f"SUM(CASE WHEN {op_expr} IN ({','.join(['?']*len(sale_vals))}) THEN 1 ELSE 0 END) AS sale_count"
+    if op_expr and op_expr_raw:
+        op_norm_expr = (
+            "CASE "
+            f"WHEN {op_expr} LIKE '%kiray%' THEN 'Kirayə' "
+            f"WHEN {op_expr} LIKE '%rent%' THEN 'Kirayə' "
+            f"WHEN {op_expr} LIKE '%sat%' THEN 'Satılır' "
+            f"ELSE {op_expr_raw} "
+            "END"
         )
-        params += sale_vals
         select_parts.append(
-            f"SUM(CASE WHEN {op_expr} IN ({','.join(['?']*len(rent_vals))}) THEN 1 ELSE 0 END) AS rent_count"
+            f"SUM(CASE WHEN {op_norm_expr} = 'Satılır' THEN 1 ELSE 0 END) AS sale_count"
         )
-        params += rent_vals
+        select_parts.append(
+            f"SUM(CASE WHEN {op_norm_expr} = 'Kirayə' THEN 1 ELSE 0 END) AS rent_count"
+        )
     else:
         select_parts.extend(["0 AS sale_count", "0 AS rent_count"])
 
@@ -14585,22 +14590,29 @@ def compute_user_statistics(period: str) -> dict:
         )
 
         if op_col:
-            op_expr = f"LOWER(TRIM(COALESCE(l.\"{op_col}\", '')))"
+            op_expr_raw = f"TRIM(COALESCE(l.\"{op_col}\", ''))"
+            op_expr = f"LOWER({op_expr_raw})"
+            op_norm_expr = (
+                "CASE "
+                f"WHEN {op_expr} LIKE '%kiray%' THEN 'Kirayə' "
+                f"WHEN {op_expr} LIKE '%rent%' THEN 'Kirayə' "
+                f"WHEN {op_expr} LIKE '%sat%' THEN 'Satılır' "
+                f"ELSE {op_expr_raw} "
+                "END"
+            )
             op_query = (
-                f"SELECT {op_expr} AS operation, COUNT(*) AS cnt {from_clause} "
+                f"SELECT {op_norm_expr} AS operation, COUNT(*) AS cnt {from_clause} "
                 "GROUP BY operation"
             )
             cur.execute(op_query, where_params)
-            sale_vals = set(STATS_OPERATION_BUCKETS["satilir"])
-            rent_vals = set(STATS_OPERATION_BUCKETS["kiraye"])
             sale_count = 0
             rent_count = 0
             for r in cur.fetchall() or []:
                 key = r["operation"] if isinstance(r, dict) else r[0]
                 cnt = r["cnt"] if isinstance(r, dict) else r[1]
-                if key in sale_vals:
+                if key == "Satılır":
                     sale_count += cnt
-                elif key in rent_vals:
+                elif key == "Kirayə":
                     rent_count += cnt
             stats["sale_count"] = sale_count
             stats["rent_count"] = rent_count
@@ -14630,7 +14642,7 @@ def compute_user_statistics(period: str) -> dict:
                 pass
 
     statistics_cache[cache_key] = {"ts": now_ts, "data": stats}
-    logger.debug("USER STATS source=listings prop_type=dynamic operation=exact_string")
+    logger.debug("USER STATS source=listings prop_type=dynamic operation=op_norm")
     op_sum = stats.get("sale_count", 0) + stats.get("rent_count", 0)
     prop_counts = stats.get("prop_type_counts", {}) or {}
     prop_sum = sum(prop_counts.values())
