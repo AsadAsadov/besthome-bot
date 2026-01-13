@@ -990,6 +990,10 @@ def normalize_text(text: str) -> str:
     return text
 
 
+def is_command_text(text: str) -> bool:
+    return bool((text or "").strip().startswith("/"))
+
+
 def set_ui_context(chat_id: int, context: str):
     ui_context_state[chat_id] = context
 
@@ -6612,7 +6616,13 @@ def clear_listings_page_messages(chat_id: int, keep_ids: Optional[Set[int]] = No
             continue
 
 
-def show_listings_page(user_id: int, listings: List[dict], page_index: int):
+def show_listings_page(
+    user_id: int,
+    listings: List[dict],
+    page_index: int,
+    *,
+    summary_text: Optional[str] = None,
+):
     total = len(listings)
     if total == 0:
         update_ui_message(user_id, user_id, "Siyahı boşdur.", None)
@@ -6628,6 +6638,13 @@ def show_listings_page(user_id: int, listings: List[dict], page_index: int):
     clear_listings_page_messages(user_id)
 
     message_ids = []
+    if summary_text:
+        try:
+            summary_msg = bot.send_message(user_id, summary_text)
+        except Exception:
+            summary_msg = None
+        if summary_msg:
+            message_ids.append(summary_msg.message_id)
     for item in page_items:
         norm = normalize_listing_item(item)
         if not norm:
@@ -9193,6 +9210,41 @@ def keyword_matches_listing_fields(keyword_raw: str, ev: dict) -> bool:
     return False
 
 
+def listing_phrase_matches(ev: dict, phrase_raw: str) -> bool:
+    phrase_norm = normalize_text(phrase_raw or "")
+    if not phrase_norm:
+        return False
+    title = str(
+        ev.get("title") or ev.get("prop_type") or ev.get("Emlakin_novu") or ""
+    )
+    description = str(
+        ev.get("description") or ev.get("summary") or ev.get("Umumi_melumat") or ""
+    )
+    address = str(ev.get("address") or ev.get("Unvan") or "")
+    for value in (title, description, address):
+        field_norm = normalize_text(value)
+        if field_norm and phrase_norm in field_norm:
+            return True
+    return False
+
+
+def listing_tokens_match(ev: dict, tokens: List[str]) -> bool:
+    if not tokens:
+        return False
+    listing_text = build_listing_text_blob(ev)
+    if not listing_text:
+        return False
+    return all(token in listing_text for token in tokens)
+
+
+def _matches_phrase(ev: dict, phrase: str) -> bool:
+    return listing_phrase_matches(ev, phrase)
+
+
+def _matches_tokens(ev: dict, tokens: List[str]) -> bool:
+    return listing_tokens_match(ev, tokens)
+
+
 def record_keyword_alert_hit(
     alert_id: int,
     user_id: int,
@@ -11535,7 +11587,7 @@ def prompt_today_rayon(chat_id: int):
         else None
     )
     if filtered_listings is None:
-        filtered_listings, _ = fetch_all_results(
+        filtered_listings, _ = _fetch_all_results_legacy(
             chat_id, mode="today", params={"filters": filters_copy}
         )
         today_results_cache[chat_id] = {
@@ -15865,12 +15917,17 @@ def query_keyword_results(
     limit: int = None,
     *,
     include_hidden: bool = False,
+    phrase: Optional[str] = None,
+    phrase_mode: bool = False,
 ):
     search_text = " ".join([w for w in words if w])
     tokens = normalize_text(search_text).split()
     if not tokens:
-        return [], 0
-    phrase_query, token_query = build_fts_queries(search_text)
+        return [], 0, {"phrase_mode": False, "fallback_used": False}
+    phrase_norm = normalize_text(phrase or "")
+    phrase_enabled = phrase_mode and len(phrase_norm.split()) > 1
+    phrase_query = f"\"{phrase_norm}\"" if phrase_enabled else None
+    _, token_query = build_fts_queries(search_text)
     or_query = " OR ".join([f"{t}*" for t in tokens]) if tokens else None
 
     op_main = detect_db_operation_value(selected_op, "main")
@@ -15927,12 +15984,39 @@ def query_keyword_results(
             params.extend([like] * len(columns))
         return " AND ".join(clauses), params
 
+    def build_normalized_like_phrase_clause(
+        columns: List[str], phrase_value: str
+    ) -> Tuple[str, List[str]]:
+        if not columns or not phrase_value:
+            return "", []
+        replacements = {
+            "ə": "e",
+            "ş": "s",
+            "ı": "i",
+            "ö": "o",
+            "ü": "u",
+            "ç": "c",
+            "ğ": "g",
+        }
+
+        def normalize_column_expr(col: str) -> str:
+            expr = f"LOWER(COALESCE({col}, ''))"
+            for src, dst in replacements.items():
+                expr = f"REPLACE({expr}, '{src}', '{dst}')"
+            return expr
+
+        like = f"%{phrase_value}%"
+        clauses = [f"{normalize_column_expr(col)} LIKE ?" for col in columns]
+        params = [like] * len(columns)
+        return "(" + " OR ".join(clauses) + ")", params
+
     def load_results_from_table(
         conn_factory,
         table: str,
         fts_table: str,
         operation_value: Optional[str],
         source: str,
+        search_mode: Literal["phrase", "tokens"],
     ):
         conn = conn_factory()
         cur = conn.cursor()
@@ -15950,42 +16034,86 @@ def query_keyword_results(
             base_where += build_listing_visibility_sql(
                 cur, table, include_hidden=include_hidden
             )
-        if phrase_query or token_query:
-            try:
-                order_suffix = ""
-                if order_parts:
-                    order_suffix = ", " + ", ".join(order_parts)
-                rows = execute_ranked_fts(
-                    cur,
-                    f"{table} l",
-                    fts_table,
-                    base_where,
-                    params,
-                    phrase_query,
-                    token_query,
-                    or_query,
-                    order_suffix,
+        rows = []
+        if search_mode == "phrase" and phrase_enabled:
+            if phrase_query:
+                try:
+                    order_suffix = ""
+                    if order_parts:
+                        order_suffix = ", " + ", ".join(order_parts)
+                    rows = execute_ranked_fts(
+                        cur,
+                        f"{table} l",
+                        fts_table,
+                        base_where,
+                        params,
+                        phrase_query,
+                        None,
+                        None,
+                        order_suffix,
+                    )
+                except Exception:
+                    rows = []
+            if not rows:
+                columns = resolve_keyword_columns(cur, table)
+                phrase_columns = [
+                    col
+                    for col in columns
+                    if col.lower() in {"title", "description", "summary", "address"}
+                ]
+                kw_sql, kw_params = build_normalized_like_phrase_clause(
+                    phrase_columns, phrase_norm
                 )
-            except Exception:
-                rows = []
-        else:
-            rows = []
-
-        if not rows:
-            columns = resolve_keyword_columns(cur, table)
-            kw_sql, kw_params = build_normalized_like_clause(columns)
-            sql = f"SELECT * FROM {table} WHERE {base_where}"
-            params_like = list(params)
-            if kw_sql:
-                sql += " AND " + kw_sql
-                params_like.extend(kw_params)
-            date_expr = build_listing_date_expr(cur, table, date_col)
-            date_sql, date_params = apply_date_clause_sql(date_expr)
-            order_parts = build_listing_order_parts(cur, table, date_col)
-            order_clause = f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
-            sql += date_sql + order_clause + " LIMIT 5000"
-            cur.execute(sql, params_like + date_params)
-            rows = cur.fetchall()
+                sql = f"SELECT * FROM {table} WHERE {base_where}"
+                params_like = list(params)
+                if kw_sql:
+                    sql += " AND " + kw_sql
+                    params_like.extend(kw_params)
+                date_expr = build_listing_date_expr(cur, table, date_col)
+                date_sql, date_params = apply_date_clause_sql(date_expr)
+                order_parts = build_listing_order_parts(cur, table, date_col)
+                order_clause = (
+                    f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
+                )
+                sql += date_sql + order_clause + " LIMIT 5000"
+                cur.execute(sql, params_like + date_params)
+                rows = cur.fetchall()
+        elif search_mode == "tokens":
+            if phrase_query or token_query:
+                try:
+                    order_suffix = ""
+                    if order_parts:
+                        order_suffix = ", " + ", ".join(order_parts)
+                    rows = execute_ranked_fts(
+                        cur,
+                        f"{table} l",
+                        fts_table,
+                        base_where,
+                        params,
+                        phrase_query,
+                        token_query,
+                        or_query,
+                        order_suffix,
+                    )
+                except Exception:
+                    rows = []
+            if not rows:
+                columns = resolve_keyword_columns(cur, table)
+                kw_sql, kw_params = build_normalized_like_clause(columns)
+                sql = f"SELECT * FROM {table} WHERE {base_where}"
+                params_like = list(params)
+                if kw_sql:
+                    sql += " AND " + kw_sql
+                    params_like.extend(kw_params)
+                date_expr = build_listing_date_expr(cur, table, date_col)
+                date_sql, date_params = apply_date_clause_sql(date_expr)
+                order_parts = build_listing_order_parts(cur, table, date_col)
+                order_clause = (
+                    f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
+                )
+                sql += date_sql + order_clause + " LIMIT 5000"
+                cur.execute(sql, params_like + date_params)
+                rows = cur.fetchall()
 
         for r in rows:
             d = dict(r)
@@ -15996,23 +16124,40 @@ def query_keyword_results(
         else:
             conn.close()
 
-    if os.path.exists(MAIN_DB):
+    def collect_results(search_mode: Literal["phrase", "tokens"]):
+        if os.path.exists(MAIN_DB):
+            load_results_from_table(
+                get_main_conn, "listings", "listings_fts", op_main, "main", search_mode
+            )
+
         load_results_from_table(
-            get_main_conn, "listings", "listings_fts", op_main, "main"
+            get_local_conn,
+            "listings_approved",
+            "local_listings_fts",
+            op_local,
+            "local",
+            search_mode,
         )
 
-    load_results_from_table(
-        get_local_conn, "listings_approved", "local_listings_fts", op_local, "local"
-    )
+    fallback_used = False
+    if phrase_enabled:
+        collect_results("phrase")
+        if not results:
+            fallback_used = True
+            results.clear()
+            collect_results("tokens")
+    else:
+        collect_results("tokens")
 
     filtered: List[dict] = []
     for ev in results:
         if not is_within_date_range(ev, date_days):
             continue
-        listing_text = build_listing_text_blob(ev)
-        if not listing_text:
+        if phrase_enabled and not fallback_used:
+            if listing_phrase_matches(ev, phrase_norm):
+                filtered.append(ev)
             continue
-        if all(token in listing_text for token in tokens):
+        if listing_tokens_match(ev, tokens):
             filtered.append(ev)
 
     filtered.sort(key=safe_date, reverse=True)
@@ -16025,7 +16170,10 @@ def query_keyword_results(
         total,
         time.perf_counter() - search_started_at,
     )
-    return filtered, total
+    return filtered, total, {
+        "phrase_mode": phrase_enabled,
+        "fallback_used": fallback_used,
+    }
 
 
 def parse_smart_query(text: str) -> dict:
@@ -16507,34 +16655,52 @@ def fetch_all_results(chat_id: int, mode: str, params: dict):
     include_hidden = is_admin(chat_id)
     if mode == "filter":
         filters = params.get("filters") or params
-        return query_structured_results(
-            filters, offset=0, limit=None, include_hidden=include_hidden
+        return (
+            *query_structured_results(
+                filters, offset=0, limit=None, include_hidden=include_hidden
+            ),
+            None,
         )
     if mode == "keyword":
-        return query_keyword_results(
+        items, total, meta = query_keyword_results(
             params.get("operation"),
             params.get("words", []),
             params.get("date_days"),
             offset=0,
             limit=None,
             include_hidden=include_hidden,
+            phrase=params.get("phrase"),
+            phrase_mode=bool(params.get("phrase_mode")),
         )
+        return items, total, meta
     if mode == "smart":
-        return query_smart_results(
-            params.get("criteria", {}), offset=0, limit=None, include_hidden=include_hidden
+        return (
+            *query_smart_results(
+                params.get("criteria", {}),
+                offset=0,
+                limit=None,
+                include_hidden=include_hidden,
+            ),
+            None,
         )
     if mode == "phone":
-        return query_phone_results(
-            params.get("digits", ""), offset=0, limit=None, include_hidden=include_hidden
+        return (
+            *query_phone_results(
+                params.get("digits", ""), offset=0, limit=None, include_hidden=include_hidden
+            ),
+            None,
         )
     if mode == "favorites":
-        return query_favorites_page(chat_id, offset=0, limit=None)
+        return (*query_favorites_page(chat_id, offset=0, limit=None), None)
     if mode == "topviews":
-        return query_top_viewed_listings(
-            days=params.get("days", 7),
-            offset=0,
-            limit=None,
-            include_hidden=include_hidden,
+        return (
+            *query_top_viewed_listings(
+                days=params.get("days", 7),
+                offset=0,
+                limit=None,
+                include_hidden=include_hidden,
+            ),
+            None,
         )
     if mode == "today":
         filters = params.get("filters", {})
@@ -16542,14 +16708,14 @@ def fetch_all_results(chat_id: int, mode: str, params: dict):
         cached = today_results_cache.get(chat_id, {})
         if cached.get("filters") == filters_copy:
             items = cached.get("items") or []
-            return items, len(items)
+            return items, len(items), None
         items, total = query_today_results(
             filters_copy, offset=0, limit=None, include_hidden=include_hidden
         )
         today_results_cache[chat_id] = {"filters": filters_copy, "items": items}
-        return items, total
+        return items, total, None
     if mode == "admin_hidden":
-        return query_hidden_listings(offset=0, limit=None)
+        return (*query_hidden_listings(offset=0, limit=None), None)
     if mode == "keyword_notif":
         items = keyword_notification_state.get(chat_id, {}).get("items", [])
         seen_ids: Set[str] = set()
@@ -16565,8 +16731,13 @@ def fetch_all_results(chat_id: int, mode: str, params: dict):
             seen_ids.add(key)
             deduped.append(item)
         total = len(deduped)
-        return deduped, total
-    return [], 0
+        return deduped, total, None
+    return [], 0, None
+
+
+def _fetch_all_results_legacy(chat_id: int, mode: str, params: dict):
+    items, total, _ = fetch_all_results(chat_id, mode, params)
+    return items, total
 
 
 def prepare_listing_session_items(items: List[dict]):
@@ -16768,7 +16939,7 @@ def send_paginated_results(
             replace_loading_message(loading_ref, "🏠 Əsas menyu")
         return_to_main_menu(chat_id)
         return
-    items, total = fetch_all_results(chat_id, mode, params)
+    items, total, meta = fetch_all_results(chat_id, mode, params)
     if mode == "today":
         today_results_cache[chat_id] = {
             "filters": params.get("filters", {}),
@@ -16793,7 +16964,21 @@ def send_paginated_results(
 
         source_label = "keyword_alert" if mode == "keyword_notif" else "search"
         user_listing_state[chat_id] = {"source": source_label}
-        show_listings_page(chat_id, items, page - 1)
+        summary_text = None
+        if mode == "keyword" and meta:
+            phrase_used = meta.get("phrase_mode")
+            fallback_used = meta.get("fallback_used")
+            phrase_raw = params.get("phrase_raw") or params.get("phrase") or ""
+            if phrase_used and not fallback_used:
+                summary_text = (
+                    f"🔎 Dəqiq axtarış: \"{phrase_raw}\"\n"
+                    f"Tapılan elan: {total}"
+                )
+            elif phrase_used and fallback_used:
+                summary_text = (
+                    "⚠️ Dəqiq uyğunluq tapılmadı.\nOxşar nəticələr göstərilir."
+                )
+        show_listings_page(chat_id, items, page - 1, summary_text=summary_text)
         return
 
     total_pages = compute_total_pages(total) if total else 1
@@ -17557,7 +17742,8 @@ def keyword_search_handler(message):
         )
         return
 
-    text = normalize_text(message.text or "")
+    raw_text = (message.text or "").strip()
+    text = normalize_text(raw_text)
     if not text:
         update_ui_message(chat_id, chat_id, "Boş sorğu göndərdiniz.", None)
         return
@@ -17580,6 +17766,8 @@ def keyword_search_handler(message):
     )
 
     words = [w for w in text.split() if w]
+    phrase_mode = len(words) > 1 and not is_command_text(raw_text)
+    phrase_raw = raw_text if phrase_mode else None
 
     inc_limit(chat_id, "keyword", 1)
     st["step"] = "results"
@@ -17590,6 +17778,9 @@ def keyword_search_handler(message):
             "operation": selected_op,
             "words": words,
             "date_days": st.get("date_days"),
+            "phrase": phrase_raw,
+            "phrase_raw": phrase_raw,
+            "phrase_mode": phrase_mode,
         },
         page=1,
         loading_ref=loading_ref,
@@ -26847,32 +27038,49 @@ def create_flask_app():
 
             phrase = None
             tokens: List[str] = []
+            phrase_mode = False
             if '"' in query:
                 match = re.search(r"\"([^\"]+)\"", query)
                 if match:
                     phrase = match.group(1)
+                    phrase_mode = True
             norm_query = normalize_text(query)
             if norm_query:
                 tokens = [tok for tok in norm_query.split() if tok]
+            if not phrase and len(tokens) > 1 and not is_command_text(query):
+                phrase = query
+                phrase_mode = True
 
-            for ev in results:
-                if not is_within_date_range(ev, date_days):
-                    continue
-                if not matches_region_rayon(ev, filters):
-                    continue
-                if rooms and not _matches_rooms_exact(ev, rooms):
-                    continue
-                if not _matches_credit(ev, credit):
-                    continue
-                if phone and not _matches_phone(ev, phone):
-                    continue
-                if phrase:
-                    if not _matches_phrase(ev, phrase):
+            def apply_search_filter(phrase_value: Optional[str], tokens_value: List[str]):
+                matches = []
+                for ev in results:
+                    if not is_within_date_range(ev, date_days):
                         continue
-                elif tokens:
-                    if not _matches_tokens(ev, tokens):
+                    if not matches_region_rayon(ev, filters):
                         continue
-                filtered.append(ev)
+                    if rooms and not _matches_rooms_exact(ev, rooms):
+                        continue
+                    if not _matches_credit(ev, credit):
+                        continue
+                    if phone and not _matches_phone(ev, phone):
+                        continue
+                    if phrase_value:
+                        if not _matches_phrase(ev, phrase_value):
+                            continue
+                    elif tokens_value:
+                        if not _matches_tokens(ev, tokens_value):
+                            continue
+                    matches.append(ev)
+                return matches
+
+            fallback_used = False
+            if phrase_mode and phrase:
+                filtered = apply_search_filter(phrase, [])
+                if not filtered and tokens:
+                    fallback_used = True
+                    filtered = apply_search_filter(None, tokens)
+            else:
+                filtered = apply_search_filter(None, tokens)
 
             filtered.sort(key=safe_date, reverse=True)
             total = len(filtered)
@@ -26902,6 +27110,9 @@ def create_flask_app():
                     "pages": total_pages,
                     "total": total,
                     "items": page_items,
+                    "phrase_mode": phrase_mode,
+                    "fallback_used": fallback_used,
+                    "phrase": phrase if phrase_mode else None,
                 }
             )
 
