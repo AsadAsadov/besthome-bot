@@ -6031,6 +6031,12 @@ def format_sqlite_datetime(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def build_time_filter(days: Optional[int]) -> str:
+    if days is None:
+        return ""
+    return f"WHERE date_read >= NOW() - INTERVAL '{days} days'"
+
+
 def get_table_columns(cur, table: str):
     try:
         cur.execute(f"PRAGMA table_info({table})")
@@ -14359,6 +14365,12 @@ def compute_stats(
         stats["note"] = "Tarix məlumatı yoxdur, son 0 elan"
         return stats
 
+    cols = get_table_columns(cur, source_table)
+    date_read_col = cols.get("date_read")
+    if date_read_col:
+        stats["meta"]["ts_col"] = date_read_col
+        stats["meta"]["ts_kind"] = "iso"
+
     if ts_col and ts_kind in {"unix", "iso"}:
         try:
             cur.execute(
@@ -14409,40 +14421,16 @@ def compute_stats(
         )
 
     where_clauses = []
-    where_params: List[Any] = []
-    if window != "all" and (not ts_col or ts_kind not in {"unix", "iso"}):
+    if window != "all" and not date_read_col:
         stats["note"] = (
             "⚠️ Zaman məlumatı tapılmadı, yeni elan sayı hesablana bilmədi."
         )
         return stats
-    if window == "24h":
-        start, end = get_last_24h_window()
-        if ts_kind == "unix":
-            where_clauses.append(
-                f"COALESCE(l.\"{ts_col}\", 0) >= ? AND COALESCE(l.\"{ts_col}\", 0) < ?"
-            )
-            where_params.extend([int(start.timestamp()), int(end.timestamp())])
-        elif ts_kind == "iso":
-            where_clauses.append(
-                f"datetime(l.\"{ts_col}\") >= datetime(?) AND datetime(l.\"{ts_col}\") < datetime(?)"
-            )
-            where_params.extend(
-                [format_sqlite_datetime(start), format_sqlite_datetime(end)]
-            )
-    else:
-        window_days = {"7d": 7, "30d": 30}.get(window)
-        if window != "all" and window_days:
-            if ts_kind == "unix":
-                seconds = window_days * 24 * 3600
-                where_clauses.append(
-                    f"COALESCE(l.\"{ts_col}\", 0) >= (strftime('%s','now') - ?)"
-                )
-                where_params.append(seconds)
-            elif ts_kind == "iso":
-                where_clauses.append(
-                    f"datetime(l.\"{ts_col}\") >= datetime('now', ?)"
-                )
-                where_params.append(f"-{window_days} days")
+
+    window_days = {"24h": 1, "7d": 7, "30d": 30, "all": None}.get(window)
+    time_filter = build_time_filter(window_days)
+    if time_filter:
+        where_clauses.append(time_filter.replace("WHERE ", "", 1))
 
     if stat_context == STAT_CONTEXT_USER and source_table == "listings":
         visibility_sql = build_listing_visibility_sql(
@@ -14451,7 +14439,6 @@ def compute_stats(
         if visibility_sql:
             where_clauses.append(visibility_sql.replace(" AND ", "", 1))
 
-    cols = get_table_columns(cur, source_table)
     order_col = None
     for candidate in ("id", "listing_id"):
         if candidate in cols:
@@ -14465,7 +14452,7 @@ def compute_stats(
     where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
     query = f"SELECT {', '.join(select_parts)} FROM {from_clause}{where_sql}"
 
-    cur.execute(query, params + where_params)
+    cur.execute(query, params)
     row = cur.fetchone() or {}
     stats.update(
         {
@@ -14477,6 +14464,22 @@ def compute_stats(
             "land_count": _row_value_safe(row, "land_count", 0) or 0,
         }
     )
+    op_sum = stats["sale_count"] + stats["rent_count"]
+    if stats["total"] != op_sum:
+        logger.warning(
+            "Stats mismatch scope=%s total_count=%s category_sum=%s group=operation",
+            window,
+            stats["total"],
+            op_sum,
+        )
+    prop_sum = stats["apartment_count"] + stats["house_count"] + stats["land_count"]
+    if stats["total"] != prop_sum:
+        logger.warning(
+            "Stats mismatch scope=%s total_count=%s category_sum=%s group=property",
+            window,
+            stats["total"],
+            prop_sum,
+        )
     return stats
 
 
@@ -14496,7 +14499,7 @@ def compute_user_statistics(period: str) -> dict:
         "prop_type_counts": {},
         "meta": {
             "table": "listings",
-            "ts_col": "added_at",
+            "ts_col": "date_read",
             "ts_kind": "iso",
             "op_col": "operation",
             "type_col": "prop_type",
@@ -14526,21 +14529,18 @@ def compute_user_statistics(period: str) -> dict:
 
         col_names = {str(r[1]).lower(): r[1] for r in col_rows if len(r) > 1}
 
-        ts_col = get_listings_timestamp_column(cur)
+        ts_col = col_names.get("date_read")
         if not ts_col:
             logger.error("[STATS] No timestamp column found")
-
-        ts_kind = _detect_ts_kind(cur, "listings", ts_col) if ts_col else "none"
-        if ts_col and ts_kind is None:
-            ts_kind = "iso"
+        ts_kind = "iso"
 
         op_col = col_names.get("operation")
         type_col = col_names.get("prop_type")
 
         stats["meta"] = {
             "table": "listings",
-            "ts_col": ts_col,
-            "ts_kind": ts_kind or "none",
+            "ts_col": "date_read",
+            "ts_kind": "iso",
             "op_col": op_col,
             "type_col": type_col,
         }
@@ -14576,20 +14576,10 @@ def compute_user_statistics(period: str) -> dict:
                 "⚠️ Zaman məlumatı tapılmadı, yeni elan sayı hesablana bilmədi."
             )
             return stats
-        if key_base == "24h" and ts_col:
-            today_start, _ = get_today_range()
-            date_sql, date_params = build_since_clause(f"l.\"{ts_col}\"", today_start)
-            where_clauses.append(date_sql.replace(" AND ", "", 1))
-            where_params.extend(date_params)
-        elif key_base != "all" and ts_col:
-            window_days = {"7d": 7, "30d": 30}.get(key_base)
-            if window_days:
-                date_sql, date_params = _build_market_ts_clause(
-                    ts_col, ts_kind or "none", window_days
-                )
-                if date_sql:
-                    where_clauses.append(date_sql.replace(" AND ", "", 1))
-                    where_params.extend(date_params)
+        window_days = {"24h": 1, "7d": 7, "30d": 30, "all": None}.get(key_base)
+        time_filter = build_time_filter(window_days)
+        if time_filter:
+            where_clauses.append(time_filter.replace("WHERE ", "", 1))
 
         visibility_sql = build_listing_visibility_sql(
             cur, "listings", alias="l", include_hidden=False
@@ -14635,6 +14625,23 @@ def compute_user_statistics(period: str) -> dict:
 
     statistics_cache[cache_key] = {"ts": now_ts, "data": stats}
     logger.debug("USER STATS source=listings prop_type=dynamic operation=exact_string")
+    op_sum = stats.get("sale_count", 0) + stats.get("rent_count", 0)
+    if stats.get("total", 0) != op_sum:
+        logger.warning(
+            "Stats mismatch scope=%s total_count=%s category_sum=%s group=operation",
+            key_base,
+            stats.get("total", 0),
+            op_sum,
+        )
+    prop_counts = stats.get("prop_type_counts", {}) or {}
+    prop_sum = sum(prop_counts.values())
+    if stats.get("total", 0) != prop_sum:
+        logger.warning(
+            "Stats mismatch scope=%s total_count=%s category_sum=%s group=property",
+            key_base,
+            stats.get("total", 0),
+            prop_sum,
+        )
     _log_user_stats_consistency()
     return stats
 
