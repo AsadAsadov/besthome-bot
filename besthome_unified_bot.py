@@ -269,6 +269,7 @@ USER_STATE: Dict[int, str] = {}
 CUSTOMER_REQUEST_COOLDOWN_SECONDS = 300
 LISTING_SESSION_TTL_SECONDS = 4 * 3600
 listing_sessions: Dict[int, Dict[str, Any]] = {}
+user_listing_state: Dict[int, Dict[str, Any]] = {}
 user_stats_filter: Dict[int, str] = {}
 today_results_cache: Dict[int, Dict[str, Any]] = {}
 payment_plan_selection: Dict[int, Dict[str, Any]] = {}
@@ -891,6 +892,7 @@ QR_STATS_RANGE_LABELS = {
 
 # Pagination
 PAGE_SIZE = 20
+LISTINGS_PAGE_SIZE = 10
 NEW_LISTING_WINDOW_HOURS = 24
 HOT_VIEWS_THRESHOLD = 50
 PAGE_SIZE_REQ = 10
@@ -5914,6 +5916,7 @@ def reset_user_state(chat_id: int):
     user_state.pop(chat_id, None)
     user_temp.pop(chat_id, None)
     clear_user_state(chat_id)
+    user_listing_state.pop(chat_id, None)
     customer_request_state.pop(chat_id, None)
     agent_request_lookup_state.pop(chat_id, None)
     admin_customer_request_state.pop(chat_id, None)
@@ -6584,6 +6587,76 @@ def set_pagination_state(
         "params": params or {},
         "page": page,
         "total_pages": total_pages,
+    }
+
+
+def build_listings_page_keyboard() -> types.InlineKeyboardMarkup:
+    mk = types.InlineKeyboardMarkup()
+    mk.row(
+        types.InlineKeyboardButton("⬅️ Əvvəlki", callback_data="listings_prev"),
+        types.InlineKeyboardButton("➡️ Növbəti", callback_data="listings_next"),
+    )
+    mk.add(types.InlineKeyboardButton("🔙 Geri", callback_data="listings_back"))
+    return mk
+
+
+def clear_listings_page_messages(chat_id: int, keep_ids: Optional[Set[int]] = None):
+    keep_ids = keep_ids or set()
+    state = user_listing_state.get(chat_id, {})
+    for msg_id in state.get("message_ids", []) or []:
+        if msg_id in keep_ids:
+            continue
+        try:
+            bot.delete_message(chat_id, msg_id)
+        except Exception:
+            continue
+
+
+def show_listings_page(user_id: int, listings: List[dict], page_index: int):
+    total = len(listings)
+    if total == 0:
+        update_ui_message(user_id, user_id, "Siyahı boşdur.", None)
+        user_listing_state.pop(user_id, None)
+        return
+
+    total_pages = max(1, math.ceil(total / LISTINGS_PAGE_SIZE))
+    page_index = max(0, min(page_index, total_pages - 1))
+    start = page_index * LISTINGS_PAGE_SIZE
+    end = start + LISTINGS_PAGE_SIZE
+    page_items = listings[start:end]
+
+    clear_listings_page_messages(user_id)
+
+    message_ids = []
+    for item in page_items:
+        norm = normalize_listing_item(item)
+        if not norm:
+            continue
+        source = norm["source"]
+        listing_data = norm.get("data", {})
+        try:
+            msg = send_listing_card(
+                user_id, listing_data, source=source, with_fav_button=True
+            )
+        except Exception:
+            msg = None
+        if msg:
+            message_ids.append(msg.message_id)
+
+    nav_text = f"📄 Səhifə {page_index + 1} / {total_pages}"
+    nav_keyboard = build_listings_page_keyboard()
+    try:
+        nav_msg = bot.send_message(user_id, nav_text, reply_markup=nav_keyboard)
+    except Exception:
+        nav_msg = None
+    if nav_msg:
+        message_ids.append(nav_msg.message_id)
+
+    user_listing_state[user_id] = {
+        "source": user_listing_state.get(user_id, {}).get("source", "search"),
+        "listings": listings,
+        "page": page_index,
+        "message_ids": message_ids,
     }
 
 
@@ -8024,7 +8097,7 @@ def send_listing_card(
             mk.add(btn)
 
     text = build_listing_text(ev, source)
-    bot.send_message(chat_id, text, reply_markup=mk)
+    return bot.send_message(chat_id, text, reply_markup=mk)
 
 
 def register_or_update_user_if_needed(message, start_arg: str) -> bool:
@@ -13395,9 +13468,8 @@ def cb_keyword_notification_view(c):
         )
     except Exception:
         logger.debug("Failed to clear keyword summary keyboard chat_id=%s", chat_id)
-    for listing in items:
-        source = listing.get("__source") or "main"
-        send_listing_card(chat_id, listing, source=source, with_fav_button=True)
+    user_listing_state[chat_id] = {"source": "keyword_alert"}
+    show_listings_page(chat_id, items, 0)
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -16707,6 +16779,23 @@ def send_paginated_results(
             update_ui_message(chat_id, chat_id, "Siyahı boşdur.", None)
         return
 
+    list_paging_modes = {"filter", "keyword", "smart", "phone", "keyword_notif", "today"}
+    if mode in list_paging_modes:
+        total_pages = max(1, math.ceil(total / LISTINGS_PAGE_SIZE))
+        page = max(1, min(page, total_pages))
+        set_pagination_state(chat_id, mode, params, page, total_pages)
+
+        if loading_ref:
+            try:
+                bot.delete_message(loading_ref[0], loading_ref[1])
+            except Exception:
+                pass
+
+        source_label = "keyword_alert" if mode == "keyword_notif" else "search"
+        user_listing_state[chat_id] = {"source": source_label}
+        show_listings_page(chat_id, items, page - 1)
+        return
+
     total_pages = compute_total_pages(total) if total else 1
     set_pagination_state(chat_id, mode, params, min(page, total_pages), total_pages)
 
@@ -16763,6 +16852,37 @@ def cb_pagination(c):
         send_paginated_results(
             chat_id, mode=mode, params=params, page=target, show_summary=False
         )
+
+
+@bot.callback_query_handler(func=lambda c: c.data in {"listings_prev", "listings_next", "listings_back"})
+@callback_guard
+def cb_listings_page_nav(c):
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id
+    state = user_listing_state.get(chat_id)
+    if not state:
+        safe_answer_callback_query(c.id, "Siyahı boşdur.")
+        return
+    if c.data == "listings_back":
+        clear_listings_page_messages(chat_id)
+        user_listing_state.pop(chat_id, None)
+        reset_user_state(chat_id)
+        return_to_previous_menu(chat_id)
+        safe_answer_callback_query(c.id)
+        return
+
+    listings = state.get("listings") or []
+    total_pages = max(1, math.ceil(len(listings) / LISTINGS_PAGE_SIZE))
+    page_index = int(state.get("page", 0))
+    if c.data == "listings_prev":
+        page_index = max(0, page_index - 1)
+    elif c.data == "listings_next":
+        page_index = min(total_pages - 1, page_index + 1)
+
+    if page_index != int(state.get("page", 0)):
+        show_listings_page(chat_id, listings, page_index)
+    safe_answer_callback_query(c.id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("nav:"))
@@ -25323,6 +25443,10 @@ def build_profile_url(chat_id: int, username: Optional[str]) -> str:
     return f"tg://user?id={chat_id}"
 
 
+def format_user_id_link(user_id: int) -> str:
+    return f'<a href="tg://user?id={user_id}">{user_id}</a>'
+
+
 def get_profile_url_for_user(user_id: int) -> str:
     record = get_user_record(user_id)
     username = record.get("username") if record else None
@@ -25366,8 +25490,8 @@ def format_active_user_stats(users):
             profile_url = None
 
         name_text = html.escape(display_name)
-        lines.append(f"• {name_text}")
-        lines.append(f"ID: {chat_id} | Axtarış: {cnt}")
+        id_link = format_user_id_link(chat_id)
+        lines.append(f"• {name_text} — {id_link} | Axtarış: {cnt}")
 
     return lines, buttons
 
@@ -25556,7 +25680,7 @@ def show_admin_stats(
     rent_total = main_rent + local_rent
     today_new_listings = get_today_added_count()
 
-    lines = [f"📊 BestHome Statistikalar — {period_label}", ""]
+    lines = ["📊 BestHome Statistika", ""]
     lines.append("👥 İstifadəçilər")
     lines.append(f"• Cəmi: {total_users}")
     lines.append(f"• Aktiv: {active_users}")
@@ -25570,25 +25694,17 @@ def show_admin_stats(
     lines.append(f"• Ümumi: {total_listings}")
     lines.append(f"• Satılır: {sale_total}")
     lines.append(f"• Kirayə: {rent_total}")
-    lines.append(f"📈 Bu gün əlavə olunan: {today_new_listings}")
+    lines.append(f"• Bu gün əlavə olunan: {today_new_listings}")
     lines.append("")
 
-    lines.append("📍 Rayonlar üzrə axtarışlar")
+    lines.append("📍 Axtarışlar (rayon üzrə)")
     if search_stats_available and top_rayons:
         lines.extend(format_rayon_stats(top_rayons))
     else:
         lines.append("• Məlumat yoxdur")
     lines.append("")
 
-    lines.append("🔍 Axtarışlar")
-    if search_stats_available and period_searches > 0:
-        lines.append(f"• Cəmi: {period_searches}")
-    else:
-        lines.append("• Məlumat yoxdur")
-    lines.append("")
-
     lines.append("⚡ Aktiv istifadəçilər")
-    lines.append("────────────────────")
     active_user_blocks, profile_buttons = (
         format_active_user_stats(top_users) if search_stats_available else ([], [])
     )
@@ -25701,8 +25817,9 @@ def show_referral_stats(chat_id: int, message: Optional[types.Message] = None):
         lines.append("\n🏆 Ən çox dəvət edənlər:")
         for idx, row in enumerate(top_rows, start=1):
             rewarded = row["rewarded"] or 0
+            referrer_link = format_user_id_link(row["referrer_id"])
             lines.append(
-                f"{idx}) {row['referrer_id']} — {row['total_refs']} dəvət, bonus: {rewarded}"
+                f"{idx}) {referrer_link} — {row['total_refs']} dəvət, bonus: {rewarded}"
             )
     else:
         lines.append("Hələ referral qeydiyyatı yoxdur.")
@@ -25715,7 +25832,7 @@ def show_referral_stats(chat_id: int, message: Optional[types.Message] = None):
     )
     if message:
         ui_message_state[chat_id] = message.message_id
-    send_or_edit_ui_message(chat_id, "\n".join(lines), mk)
+    send_or_edit_ui_message(chat_id, "\n".join(lines), mk, parse_mode="HTML")
 
 
 
