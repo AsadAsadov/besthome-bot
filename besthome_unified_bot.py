@@ -25470,6 +25470,8 @@ def format_active_user_stats(users):
             cnt = int(row["cnt"] or 0)
         except Exception:
             cnt = 0
+        if cnt <= 0:
+            continue
 
         try:
             full_name = str(row["full_name"] or "").strip()
@@ -25484,15 +25486,16 @@ def format_active_user_stats(users):
         if len(display_name) > 60:
             display_name = display_name[:57].rstrip() + "..."
 
-        try:
-            profile_url = build_profile_url(chat_id, username)
-        except Exception:
-            profile_url = None
-
         name_text = html.escape(display_name)
-        id_link = format_user_id_link(chat_id)
-        lines.append(f"• {name_text} — {id_link} | Axtarış: {cnt}")
+        lines.append(f"• {name_text}")
+        lines.append(
+            f'  🔗 <a href="tg://user?id={chat_id}">Profilə bax</a>'
+        )
+        lines.append(f"  🔍 Axtarış: {cnt}")
+        lines.append("")
 
+    if lines and lines[-1] == "":
+        lines.pop()
     return lines, buttons
 
 
@@ -25621,6 +25624,7 @@ def show_admin_stats(
                     WHERE DATE(sl.created_at) BETWEEN ? AND ?
                     GROUP BY sl.chat_id
                     ORDER BY cnt DESC
+                    LIMIT 10
                     """,
                     (start_str, end_str),
                 )
@@ -25704,7 +25708,7 @@ def show_admin_stats(
         lines.append("• Məlumat yoxdur")
     lines.append("")
 
-    lines.append("⚡ Aktiv istifadəçilər")
+    lines.append("🔍 Axtarış edən istifadəçilər (bugün)")
     active_user_blocks, profile_buttons = (
         format_active_user_stats(top_users) if search_stats_available else ([], [])
     )
