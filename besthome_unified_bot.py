@@ -3067,6 +3067,19 @@ def init_local_db():
 
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS hidden_listings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            listing_id INTEGER,
+            source TEXT,
+            hidden_at TEXT,
+            UNIQUE(chat_id, listing_id, source)
+        )
+    """
+    )
+
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS favorite_price_history (
             source TEXT,
             listing_id INTEGER,
@@ -6785,14 +6798,23 @@ def build_listing_navigation_keyboard(
     *,
     visibility_button: Optional[types.InlineKeyboardButton] = None,
 ) -> types.InlineKeyboardMarkup:
-    fav_label = "❤️ Favori" if is_favorite else "🤍 Favori"
-    mk = build_listing_action_keyboard(
-        fav_label, "fav:toggle", listing_link, whatsapp_url
+    fav_label = "💔 Favori" if is_favorite else "❤️ Favori"
+    mk = types.InlineKeyboardMarkup()
+    mk.row(
+        types.InlineKeyboardButton(fav_label, callback_data="fav:toggle"),
+        types.InlineKeyboardButton("🙈 Gizlət", callback_data="listing_hide"),
     )
     mk.row(
         types.InlineKeyboardButton("⬅️ Əvvəlki", callback_data="nav:prev"),
         types.InlineKeyboardButton("➡️ Növbəti", callback_data="nav:next"),
     )
+    row3 = []
+    if listing_link:
+        row3.append(types.InlineKeyboardButton("🌐 Elana bax", url=listing_link))
+    if whatsapp_url:
+        row3.append(types.InlineKeyboardButton("💬 WhatsApp", url=whatsapp_url))
+    if row3:
+        mk.row(*row3)
     if visibility_button:
         mk.row(visibility_button)
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="nav:back"))
@@ -7306,6 +7328,71 @@ def is_favorite_entry(chat_id: int, source: str, listing_id: int) -> bool:
     row = cur.fetchone()
     conn.close()
     return bool(row)
+
+
+def hide_listing_for_user(chat_id: int, source: str, listing_id: int) -> bool:
+    if not chat_id or listing_id is None:
+        return False
+    source = source or "main"
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO hidden_listings (chat_id, listing_id, source, hidden_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (chat_id, listing_id, source, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    changed = cur.rowcount and cur.rowcount > 0
+    conn.close()
+    return bool(changed)
+
+
+def is_listing_hidden_for_user(chat_id: int, source: str, listing_id: int) -> bool:
+    if not chat_id or listing_id is None:
+        return False
+    source = source or "main"
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT 1 FROM hidden_listings WHERE chat_id=? AND listing_id=? AND source=?",
+        (chat_id, listing_id, source),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return bool(row)
+
+
+def get_hidden_listing_refs(chat_id: int) -> Set[str]:
+    if not chat_id:
+        return set()
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT listing_id, source FROM hidden_listings WHERE chat_id=?",
+        (chat_id,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return {make_listing_ref(row["source"], row["listing_id"]) for row in rows}
+
+
+def filter_hidden_listings(chat_id: int, items: List[dict]) -> List[dict]:
+    hidden_refs = get_hidden_listing_refs(chat_id)
+    if not hidden_refs:
+        return items
+    filtered = []
+    for item in items:
+        norm = normalize_listing_item(item)
+        if not norm:
+            filtered.append(item)
+            continue
+        ref_key = make_listing_ref(norm["source"], norm["id"])
+        if ref_key in hidden_refs:
+            continue
+        filtered.append(item)
+    return filtered
 
 
 def should_track_interaction(
@@ -13015,14 +13102,13 @@ def show_keyword_alert_hits(chat_id: int, period: str, index: int = 0, message=N
             render_ui(chat_id, text, mk)
         return
 
-    render_notification_listing(
+    render_listing_view(
         chat_id,
-        message,
         listings,
-        notif_type="keyword",
-        period=period,
-        index=index,
-        back_callback="kw_hits_menu",
+        index,
+        mode="keyword_hits",
+        params={"period": period},
+        loading_ref=(message.chat.id, message.message_id) if message else None,
     )
 
 
@@ -13084,14 +13170,13 @@ def show_criteria_alert_hits(chat_id: int, period: str, index: int = 0, message=
             render_ui(chat_id, text, mk)
         return
 
-    render_notification_listing(
+    render_listing_view(
         chat_id,
-        message,
         listings,
-        notif_type="criteria",
-        period=period,
-        index=index,
-        back_callback="crit_hits_menu",
+        index,
+        mode="criteria_hits",
+        params={"period": period},
+        loading_ref=(message.chat.id, message.message_id) if message else None,
     )
 
 
@@ -13520,8 +13605,14 @@ def cb_keyword_notification_view(c):
         )
     except Exception:
         logger.debug("Failed to clear keyword summary keyboard chat_id=%s", chat_id)
-    user_listing_state[chat_id] = {"source": "keyword_alert"}
-    show_listings_page(chat_id, items, 0)
+    render_listing_view(
+        chat_id,
+        items,
+        0,
+        mode="keyword_notif",
+        params={},
+        loading_ref=(c.message.chat.id, c.message.message_id),
+    )
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -16655,12 +16746,11 @@ def fetch_all_results(chat_id: int, mode: str, params: dict):
     include_hidden = is_admin(chat_id)
     if mode == "filter":
         filters = params.get("filters") or params
-        return (
-            *query_structured_results(
-                filters, offset=0, limit=None, include_hidden=include_hidden
-            ),
-            None,
+        items, total = query_structured_results(
+            filters, offset=0, limit=None, include_hidden=include_hidden
         )
+        items = filter_hidden_listings(chat_id, items)
+        return items, len(items), None
     if mode == "keyword":
         items, total, meta = query_keyword_results(
             params.get("operation"),
@@ -16672,50 +16762,54 @@ def fetch_all_results(chat_id: int, mode: str, params: dict):
             phrase=params.get("phrase"),
             phrase_mode=bool(params.get("phrase_mode")),
         )
-        return items, total, meta
+        items = filter_hidden_listings(chat_id, items)
+        return items, len(items), meta
     if mode == "smart":
-        return (
-            *query_smart_results(
-                params.get("criteria", {}),
-                offset=0,
-                limit=None,
-                include_hidden=include_hidden,
-            ),
-            None,
+        items, total = query_smart_results(
+            params.get("criteria", {}),
+            offset=0,
+            limit=None,
+            include_hidden=include_hidden,
         )
+        items = filter_hidden_listings(chat_id, items)
+        return items, len(items), None
     if mode == "phone":
-        return (
-            *query_phone_results(
-                params.get("digits", ""), offset=0, limit=None, include_hidden=include_hidden
-            ),
-            None,
+        items, total = query_phone_results(
+            params.get("digits", ""), offset=0, limit=None, include_hidden=include_hidden
         )
+        items = filter_hidden_listings(chat_id, items)
+        return items, len(items), None
     if mode == "favorites":
-        return (*query_favorites_page(chat_id, offset=0, limit=None), None)
+        items, total = query_favorites_page(chat_id, offset=0, limit=None)
+        items = filter_hidden_listings(chat_id, items)
+        return items, len(items), None
     if mode == "topviews":
-        return (
-            *query_top_viewed_listings(
-                days=params.get("days", 7),
-                offset=0,
-                limit=None,
-                include_hidden=include_hidden,
-            ),
-            None,
+        items, total = query_top_viewed_listings(
+            days=params.get("days", 7),
+            offset=0,
+            limit=None,
+            include_hidden=include_hidden,
         )
+        items = filter_hidden_listings(chat_id, items)
+        return items, len(items), None
     if mode == "today":
         filters = params.get("filters", {})
         filters_copy = dict(filters)
         cached = today_results_cache.get(chat_id, {})
         if cached.get("filters") == filters_copy:
             items = cached.get("items") or []
+            items = filter_hidden_listings(chat_id, items)
             return items, len(items), None
         items, total = query_today_results(
             filters_copy, offset=0, limit=None, include_hidden=include_hidden
         )
+        items = filter_hidden_listings(chat_id, items)
         today_results_cache[chat_id] = {"filters": filters_copy, "items": items}
-        return items, total, None
+        return items, len(items), None
     if mode == "admin_hidden":
-        return (*query_hidden_listings(offset=0, limit=None), None)
+        items, total = query_hidden_listings(offset=0, limit=None)
+        items = filter_hidden_listings(chat_id, items)
+        return items, len(items), None
     if mode == "keyword_notif":
         items = keyword_notification_state.get(chat_id, {}).get("items", [])
         seen_ids: Set[str] = set()
@@ -16730,6 +16824,7 @@ def fetch_all_results(chat_id: int, mode: str, params: dict):
                 continue
             seen_ids.add(key)
             deduped.append(item)
+        deduped = filter_hidden_listings(chat_id, deduped)
         total = len(deduped)
         return deduped, total, None
     return [], 0, None
@@ -16752,6 +16847,45 @@ def prepare_listing_session_items(items: List[dict]):
         cache_key = make_listing_ref(norm["source"], norm["id"])
         cache.setdefault(cache_key, norm.get("data", {}))
     return refs, cache
+
+
+def render_listing_view(
+    chat_id: int,
+    listings: List[dict],
+    index: int,
+    *,
+    mode: Optional[str] = None,
+    params: Optional[dict] = None,
+    loading_ref=None,
+    track_view: Optional[bool] = None,
+):
+    listings = filter_hidden_listings(chat_id, listings)
+    refs, cache = prepare_listing_session_items(listings)
+    if not refs:
+        if not replace_loading_message(loading_ref, "Siyahı boşdur."):
+            update_ui_message(chat_id, chat_id, "Siyahı boşdur.", None)
+        listing_sessions.pop(chat_id, None)
+        return
+
+    index = max(0, min(index, len(refs) - 1))
+    existing = get_active_listing_session(chat_id) or {}
+    session_id = existing.get("session_id") or f"{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
+    merged_cache = dict(existing.get("cache", {}))
+    merged_cache.update(cache)
+    listing_sessions[chat_id] = {
+        "session_id": session_id,
+        "mode": mode if mode is not None else existing.get("mode", "search"),
+        "params": params if params is not None else existing.get("params", {}),
+        "result_ids": refs,
+        "listings": listings,
+        "current_index": index,
+        "timestamp": time.time(),
+        "message_id": existing.get("message_id") or (loading_ref[1] if loading_ref else None),
+        "cache": merged_cache,
+        "track_view": track_view if track_view is not None else existing.get("track_view", False),
+        "viewed": existing.get("viewed", set()),
+    }
+    render_listing_for_user(chat_id, session_id, target_message=loading_ref)
 
 
 def render_listing_for_user(
@@ -16781,10 +16915,23 @@ def render_listing_for_user(
 
     if listing and not is_admin(chat_id) and int(listing.get("is_hidden") or 0) == 1:
         listing = None
+    if listing and is_listing_hidden_for_user(chat_id, ref["source"], ref["id"]):
+        listing = None
 
     if not listing:
         if len(refs) > 1:
-            session["result_ids"].pop(idx)
+            removed_ref = session["result_ids"].pop(idx)
+            if session.get("listings"):
+                updated = []
+                for item in session["listings"]:
+                    norm = normalize_listing_item(item)
+                    if not norm:
+                        updated.append(item)
+                        continue
+                    if norm["source"] == removed_ref["source"] and norm["id"] == removed_ref["id"]:
+                        continue
+                    updated.append(item)
+                session["listings"] = updated
             session["current_index"] = max(0, min(idx, len(session["result_ids"]) - 1))
             return render_listing_for_user(chat_id, session.get("session_id"), target_message)
         listing_sessions.pop(chat_id, None)
@@ -16883,27 +17030,15 @@ def start_listing_session(
     loading_ref=None,
     track_view: bool = False,
 ):
-    refs, cache = prepare_listing_session_items(items)
-    if not refs:
-        if not replace_loading_message(loading_ref, "Siyahı boşdur."):
-            update_ui_message(chat_id, chat_id, "Siyahı boşdur.", None)
-        return
-
-    start_index = max(0, min(start_index, len(refs) - 1))
-    session_id = f"{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
-    listing_sessions[chat_id] = {
-        "session_id": session_id,
-        "mode": mode,
-        "params": params or {},
-        "result_ids": refs,
-        "current_index": start_index,
-        "timestamp": time.time(),
-        "message_id": loading_ref[1] if loading_ref else None,
-        "cache": cache,
-        "track_view": track_view,
-        "viewed": set(),
-    }
-    render_listing_for_user(chat_id, session_id, target_message=loading_ref)
+    render_listing_view(
+        chat_id,
+        items,
+        start_index,
+        mode=mode,
+        params=params,
+        loading_ref=loading_ref,
+        track_view=track_view,
+    )
 
 
 def send_paginated_results(
@@ -16950,48 +17085,17 @@ def send_paginated_results(
             update_ui_message(chat_id, chat_id, "Siyahı boşdur.", None)
         return
 
-    list_paging_modes = {"filter", "keyword", "smart", "phone", "keyword_notif", "today"}
-    if mode in list_paging_modes:
-        total_pages = max(1, math.ceil(total / LISTINGS_PAGE_SIZE))
-        page = max(1, min(page, total_pages))
-        set_pagination_state(chat_id, mode, params, page, total_pages)
-
-        if loading_ref:
-            try:
-                bot.delete_message(loading_ref[0], loading_ref[1])
-            except Exception:
-                pass
-
-        source_label = "keyword_alert" if mode == "keyword_notif" else "search"
-        user_listing_state[chat_id] = {"source": source_label}
-        summary_text = None
-        if mode == "keyword" and meta:
-            phrase_used = meta.get("phrase_mode")
-            fallback_used = meta.get("fallback_used")
-            phrase_raw = params.get("phrase_raw") or params.get("phrase") or ""
-            if phrase_used and not fallback_used:
-                summary_text = (
-                    f"🔎 Dəqiq axtarış: \"{phrase_raw}\"\n"
-                    f"Tapılan elan: {total}"
-                )
-            elif phrase_used and fallback_used:
-                summary_text = (
-                    "⚠️ Dəqiq uyğunluq tapılmadı.\nOxşar nəticələr göstərilir."
-                )
-        show_listings_page(chat_id, items, page - 1, summary_text=summary_text)
-        return
-
     total_pages = compute_total_pages(total) if total else 1
     set_pagination_state(chat_id, mode, params, min(page, total_pages), total_pages)
 
     start_index = max(0, min((page - 1) * PAGE_SIZE, max(total - 1, 0)))
     track_view = mode == "favorites"
-    start_listing_session(
+    render_listing_view(
         chat_id,
-        mode,
-        params,
         items,
-        start_index=start_index,
+        start_index,
+        mode=mode,
+        params=params,
         loading_ref=loading_ref,
         track_view=track_view,
     )
@@ -17066,7 +17170,15 @@ def cb_listings_page_nav(c):
         page_index = min(total_pages - 1, page_index + 1)
 
     if page_index != int(state.get("page", 0)):
-        show_listings_page(chat_id, listings, page_index)
+        clear_listings_page_messages(chat_id)
+        start_index = max(0, min(page_index * LISTINGS_PAGE_SIZE, max(len(listings) - 1, 0)))
+        render_listing_view(
+            chat_id,
+            listings,
+            start_index,
+            mode=state.get("source", "search"),
+            params={},
+        )
     safe_answer_callback_query(c.id)
 
 
@@ -17106,10 +17218,21 @@ def cb_listing_nav(c):
     delta = deltas.get(action, 0)
     if delta:
         session["current_index"] = max(
-            0, min(session.get("current_index", 0) + delta, len(session["result_ids"]) - 1)
+            0,
+            min(
+                session.get("current_index", 0) + delta,
+                len(session["result_ids"]) - 1,
+            ),
         )
     session["timestamp"] = time.time()
-    render_listing_for_user(chat_id, session.get("session_id"))
+    render_listing_view(
+        chat_id,
+        session.get("listings") or [],
+        session.get("current_index", 0),
+        mode=session.get("mode"),
+        params=session.get("params", {}),
+        track_view=session.get("track_view", False),
+    )
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -17188,9 +17311,67 @@ def cb_listing_favorite_toggle(c):
     else:
         added = add_favorite_entry(chat_id, ref["source"], ref["id"])
         msg = "❤️ Favoritə əlavə olundu" if added else "Artıq favoritdədir"
-    render_listing_for_user(chat_id, session.get("session_id"))
+    render_listing_view(
+        chat_id,
+        session.get("listings") or [],
+        session.get("current_index", 0),
+        mode=session.get("mode"),
+        params=session.get("params", {}),
+        track_view=session.get("track_view", False),
+    )
     try:
         bot.answer_callback_query(c.id, msg)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "listing_hide")
+@callback_guard
+def cb_listing_hide(c):
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id
+    session = get_active_listing_session(chat_id)
+    if not session or not session.get("result_ids"):
+        try:
+            bot.answer_callback_query(c.id, "Siyahı bitib.")
+        except Exception:
+            pass
+        return
+    idx = session.get("current_index", 0)
+    ref = session["result_ids"][idx]
+    hide_listing_for_user(chat_id, ref["source"], ref["id"])
+    session["result_ids"].pop(idx)
+    if session.get("listings"):
+        updated = []
+        for item in session["listings"]:
+            norm = normalize_listing_item(item)
+            if not norm:
+                updated.append(item)
+                continue
+            if norm["source"] == ref["source"] and norm["id"] == ref["id"]:
+                continue
+            updated.append(item)
+        session["listings"] = updated
+    if not session["result_ids"]:
+        listing_sessions.pop(chat_id, None)
+        update_ui_message(chat_id, chat_id, "Siyahı boşdur.", None)
+        try:
+            bot.answer_callback_query(c.id, "Elan gizlədildi.")
+        except Exception:
+            pass
+        return
+    session["current_index"] = min(idx, len(session["result_ids"]) - 1)
+    render_listing_view(
+        chat_id,
+        session.get("listings") or [],
+        session.get("current_index", 0),
+        mode=session.get("mode"),
+        params=session.get("params", {}),
+        track_view=session.get("track_view", False),
+    )
+    try:
+        bot.answer_callback_query(c.id, "Elan gizlədildi.")
     except Exception:
         pass
 
@@ -26328,7 +26509,7 @@ def admin_search_handler(message):
         return
 
     like = f"%{q}%"
-    found = 0
+    items: List[dict] = []
 
     def build_keyword_columns(cur: sqlite3.Cursor, table: str) -> List[str]:
         cur.execute("PRAGMA table_info(" + table + ")")
@@ -26376,13 +26557,9 @@ def admin_search_handler(message):
             rows = cur.fetchall()
             close_main_conn(conn)
             for r in rows:
-                send_listing_card(
-                    message.chat.id,
-                    dict(r),
-                    source="main",
-                    with_fav_button=False,
-                )
-                found += 1
+                ev = dict(r)
+                ev["__source"] = "main"
+                items.append(ev)
         except:
             pass
 
@@ -26400,13 +26577,9 @@ def admin_search_handler(message):
     rows = cur.fetchall()
     conn.close()
     for r in rows:
-        send_listing_card(
-            message.chat.id,
-            dict(r),
-            source="local",
-            with_fav_button=False,
-        )
-        found += 1
+        ev = dict(r)
+        ev["__source"] = "local"
+        items.append(ev)
 
     # AGENT LISTINGS
     try:
@@ -26427,17 +26600,21 @@ def admin_search_handler(message):
         arows = cur_a.fetchall()
         conn_a.close()
         for r in arows:
-            send_agent_card(message.chat.id, dict(r))
-            found += 1
+            ev = dict(r)
+            ev["__source"] = "agents"
+            items.append(ev)
     except:
         pass
 
-    if found == 0:
+    if not items:
         bot.send_message(message.chat.id, "😕 Heç nə tapılmadı.")
     else:
-        bot.send_message(
+        render_listing_view(
             message.chat.id,
-            f"✅ Admin axtarış nəticəsi: {found} uyğun qeydə baxdın.",
+            items,
+            0,
+            mode="admin_search",
+            params={"query": q},
         )
 
 
