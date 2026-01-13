@@ -25455,7 +25455,6 @@ def get_profile_url_for_user(user_id: int) -> str:
 
 def format_active_user_stats(users):
     lines = []
-    buttons = []
 
     for row in users:
         try:
@@ -25488,15 +25487,13 @@ def format_active_user_stats(users):
 
         name_text = html.escape(display_name)
         lines.append(f"• {name_text}")
-        lines.append(
-            f'  🔗 <a href="tg://user?id={chat_id}">Profilə bax</a>'
-        )
+        lines.append(f"  ID: {format_user_id_link(chat_id)}")
         lines.append(f"  🔍 Axtarış: {cnt}")
         lines.append("")
 
     if lines and lines[-1] == "":
         lines.pop()
-    return lines, buttons
+    return lines
 
 
 def show_admin_stats(
@@ -25568,6 +25565,7 @@ def show_admin_stats(
     total_users = active_users = pending_users = expired_users = blocked_users = 0
     demo_users = 0
     period_searches = 0
+    today_searches = 0
     top_rayons = []
     top_users = []
     search_stats_available = False
@@ -25588,6 +25586,7 @@ def show_admin_stats(
             search_stats_available = True
             start_str = start_date.isoformat()
             end_str = end_date.isoformat()
+            today_str = date.today().isoformat()
             period_searches = safe_count(
                 cur_local,
                 """
@@ -25595,6 +25594,14 @@ def show_admin_stats(
                 WHERE DATE(created_at) BETWEEN ? AND ?
                 """,
                 (start_str, end_str),
+            )
+            today_searches = safe_count(
+                cur_local,
+                """
+                SELECT COUNT(*) FROM search_logs
+                WHERE DATE(created_at) = ?
+                """,
+                (today_str,),
             )
             try:
                 cur_local.execute(
@@ -25621,12 +25628,12 @@ def show_admin_stats(
                            u.username
                     FROM search_logs sl
                     LEFT JOIN users u ON u.chat_id = sl.chat_id
-                    WHERE DATE(sl.created_at) BETWEEN ? AND ?
+                    WHERE DATE(sl.created_at) = ?
                     GROUP BY sl.chat_id
                     ORDER BY cnt DESC
                     LIMIT 10
                     """,
-                    (start_str, end_str),
+                    (today_str,),
                 )
                 top_users = cur_local.fetchall()
             except Exception:
@@ -25708,9 +25715,11 @@ def show_admin_stats(
         lines.append("• Məlumat yoxdur")
     lines.append("")
 
-    lines.append("🔍 Axtarış edən istifadəçilər (bugün)")
-    active_user_blocks, profile_buttons = (
-        format_active_user_stats(top_users) if search_stats_available else ([], [])
+    lines.append("🔍 Axtarış edən istifadəçilər — bu gün")
+    lines.append(f"Cəmi axtarış: {today_searches}")
+    lines.append("")
+    active_user_blocks = (
+        format_active_user_stats(top_users) if search_stats_available else []
     )
     if search_stats_available and active_user_blocks:
         lines.extend(active_user_blocks)
@@ -25719,11 +25728,6 @@ def show_admin_stats(
 
     text = "\n".join(lines)
     keyboard = stats_period_keyboard(selected_period)
-    for btn in profile_buttons:
-        try:
-            keyboard.add(btn)
-        except Exception:
-            continue
 
     render_ui(chat_id, text, keyboard, parse_mode="HTML")
 
