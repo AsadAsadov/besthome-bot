@@ -8203,13 +8203,15 @@ def register_or_update_user_if_needed(message, start_arg: str) -> bool:
     if is_first_start and not is_admin(chat_id):
         bot.send_message(
             chat_id,
-            "👋 Xoş gəldin BestHome-a!\n\n"
-            "Burada sən:\n"
-            "• Satılan və kirayə verilən evləri tapa bilərsən\n"
-            "• Açar sözlə və filtr ilə axtarış edə bilərsən\n"
-            "• Uyğun elan çıxanda bildiriş ala bilərsən\n\n"
-            "Başlamaq üçün Menyudan istədiyin bölməni seç.",
+            "👋 Best Home — Əmlak axtarış platformasına xoş gəldin!\n\n"
+            "🏠 Burada *yalnız əmlak sahiblərinin* yerləşdirdiyi real elanlar var:\n"
+            "• Satış və kirayə evləri\n"
+            "• Filtrlə və açar sözlə axtarış\n"
+            "• Uyğun elan çıxan kimi bildiriş 🔔\n\n"
+            "✨ Axtarma, elanlar səni tapsın.\n\n"
+            "Başlamaq üçün aşağıdakı Menyudan istədiyin bölməni seç.",
             disable_web_page_preview=True,
+            parse_mode="Markdown",
         )
         set_first_start_false_for_user(chat_id)
 
