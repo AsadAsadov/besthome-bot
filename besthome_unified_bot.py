@@ -6037,6 +6037,18 @@ def build_time_filter(days: Optional[int]) -> str:
     return f"WHERE date_read >= NOW() - INTERVAL '{days} days'"
 
 
+def build_time_clause(scope: str) -> str:
+    if scope == "24h":
+        return "WHERE date_read >= datetime('now','-1 day')"
+    if scope == "7d":
+        return "WHERE date_read >= datetime('now','-7 day')"
+    if scope == "30d":
+        return "WHERE date_read >= datetime('now','-30 day')"
+    if scope == "all":
+        return ""
+    raise ValueError("Invalid stats scope")
+
+
 def get_table_columns(cur, table: str):
     try:
         cur.execute(f"PRAGMA table_info({table})")
@@ -9628,21 +9640,9 @@ def format_stats_text(stats: dict, period_key: str, is_admin: bool = False) -> s
 
     if is_admin:
         meta = stats.get("meta") or {}
-        ts_col = meta.get("ts_col")
-        if meta.get("table") == "listings":
-            ts_col = LISTINGS_TS_COLUMN or ts_col
-        lines.append(
-            ""
-        )
-        lines.append(
-            "(dbg: table={} ts={} {} op={} type={})".format(
-                meta.get("table") or "-",
-                ts_col or "-",
-                meta.get("ts_kind") or "none",
-                meta.get("op_col") or "-",
-                meta.get("type_col") or "-",
-            )
-        )
+        scope = meta.get("scope") or period_key
+        lines.append("")
+        lines.append(f"(dbg: table=listings ts=date_read scope={scope})")
     return "\n".join(lines)
 
 
@@ -9652,9 +9652,6 @@ def send_user_statistics(chat_id: int, period_key: str, message_id: Optional[int
         logger.info("STATS start chat_id=%s period=%s", chat_id, selected)
         user_stats_filter[chat_id] = selected
         period_stats = compute_user_statistics(selected)
-        if selected == "24h":
-            period_stats = dict(period_stats)
-            period_stats["total"] = get_today_added_count()
         admin_flag = is_admin(chat_id)
         text = format_stats_text(period_stats, selected, is_admin=admin_flag)
         keyboard = build_user_stats_keyboard(selected)
@@ -14427,10 +14424,17 @@ def compute_stats(
         )
         return stats
 
-    window_days = {"24h": 1, "7d": 7, "30d": 30, "all": None}.get(window)
-    time_filter = build_time_filter(window_days)
-    if time_filter:
-        where_clauses.append(time_filter.replace("WHERE ", "", 1))
+    if source_table == "listings":
+        time_clause = build_time_clause(window)
+        if time_clause is None:
+            raise RuntimeError("Invalid time clause for stats")
+        if time_clause:
+            where_clauses.append(time_clause.replace("WHERE ", "", 1))
+    else:
+        window_days = {"24h": 1, "7d": 7, "30d": 30, "all": None}.get(window)
+        time_filter = build_time_filter(window_days)
+        if time_filter:
+            where_clauses.append(time_filter.replace("WHERE ", "", 1))
 
     if stat_context == STAT_CONTEXT_USER and source_table == "listings":
         visibility_sql = build_listing_visibility_sql(
@@ -14465,19 +14469,13 @@ def compute_stats(
         }
     )
     op_sum = stats["sale_count"] + stats["rent_count"]
-    if stats["total"] != op_sum:
+    prop_sum = stats["apartment_count"] + stats["house_count"] + stats["land_count"]
+    if stats["total"] != op_sum or stats["total"] != prop_sum:
         logger.warning(
-            "Stats mismatch scope=%s total_count=%s category_sum=%s group=operation",
+            "Stats mismatch scope=%s total=%s sum_ops=%s sum_types=%s",
             window,
             stats["total"],
             op_sum,
-        )
-    prop_sum = stats["apartment_count"] + stats["house_count"] + stats["land_count"]
-    if stats["total"] != prop_sum:
-        logger.warning(
-            "Stats mismatch scope=%s total_count=%s category_sum=%s group=property",
-            window,
-            stats["total"],
             prop_sum,
         )
     return stats
@@ -14503,6 +14501,7 @@ def compute_user_statistics(period: str) -> dict:
             "ts_kind": "iso",
             "op_col": "operation",
             "type_col": "prop_type",
+            "scope": key_base,
         },
     }
 
@@ -14543,6 +14542,7 @@ def compute_user_statistics(period: str) -> dict:
             "ts_kind": "iso",
             "op_col": op_col,
             "type_col": type_col,
+            "scope": key_base,
         }
 
         logger.info(
@@ -14550,23 +14550,6 @@ def compute_user_statistics(period: str) -> dict:
             MAIN_DB,
             key_base,
         )
-
-        op_expr = f"l.\"{op_col}\"" if op_col else None
-        type_expr = f"l.\"{type_col}\"" if type_col else None
-
-        select_parts = ["COUNT(*) AS total"]
-        params: List[Any] = []
-
-        if op_expr:
-            select_parts.append(
-                f"SUM(CASE WHEN {op_expr} = ? THEN 1 ELSE 0 END) AS sale_count"
-            )
-            select_parts.append(
-                f"SUM(CASE WHEN {op_expr} = ? THEN 1 ELSE 0 END) AS rent_count"
-            )
-            params.extend(["Satılır", "Kirayə verilir"])
-        else:
-            select_parts.extend(["0 AS sale_count", "0 AS rent_count"])
 
         where_clauses: List[str] = []
         where_params: List[Any] = []
@@ -14576,10 +14559,11 @@ def compute_user_statistics(period: str) -> dict:
                 "⚠️ Zaman məlumatı tapılmadı, yeni elan sayı hesablana bilmədi."
             )
             return stats
-        window_days = {"24h": 1, "7d": 7, "30d": 30, "all": None}.get(key_base)
-        time_filter = build_time_filter(window_days)
-        if time_filter:
-            where_clauses.append(time_filter.replace("WHERE ", "", 1))
+        time_clause = build_time_clause(key_base)
+        if time_clause is None:
+            raise RuntimeError("Invalid time clause for stats")
+        if time_clause:
+            where_clauses.append(time_clause.replace("WHERE ", "", 1))
 
         visibility_sql = build_listing_visibility_sql(
             cur, "listings", alias="l", include_hidden=False
@@ -14588,21 +14572,43 @@ def compute_user_statistics(period: str) -> dict:
             where_clauses.append(visibility_sql.replace(" AND ", "", 1))
 
         where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
-        query = f"SELECT {', '.join(select_parts)} FROM listings l{where_sql}"
+        from_clause = f"FROM listings l{where_sql}"
 
-        cur.execute(query, params + where_params)
+        cur.execute(f"SELECT COUNT(*) AS total {from_clause}", where_params)
         row = cur.fetchone() or {}
         stats.update(
             {
                 "total": _row_value_safe(row, "total", 0) or 0,
-                "sale_count": _row_value_safe(row, "sale_count", 0) or 0,
-                "rent_count": _row_value_safe(row, "rent_count", 0) or 0,
+                "sale_count": 0,
+                "rent_count": 0,
             }
         )
 
-        if type_expr:
+        if op_col:
+            op_expr = f"LOWER(TRIM(COALESCE(l.\"{op_col}\", '')))"
+            op_query = (
+                f"SELECT {op_expr} AS operation, COUNT(*) AS cnt {from_clause} "
+                "GROUP BY operation"
+            )
+            cur.execute(op_query, where_params)
+            sale_vals = set(STATS_OPERATION_BUCKETS["satilir"])
+            rent_vals = set(STATS_OPERATION_BUCKETS["kiraye"])
+            sale_count = 0
+            rent_count = 0
+            for r in cur.fetchall() or []:
+                key = r["operation"] if isinstance(r, dict) else r[0]
+                cnt = r["cnt"] if isinstance(r, dict) else r[1]
+                if key in sale_vals:
+                    sale_count += cnt
+                elif key in rent_vals:
+                    rent_count += cnt
+            stats["sale_count"] = sale_count
+            stats["rent_count"] = rent_count
+
+        if type_col:
+            type_expr = f"TRIM(COALESCE(l.\"{type_col}\", ''))"
             prop_query = (
-                f"SELECT {type_expr} AS prop_type, COUNT(*) AS cnt FROM listings l{where_sql} "
+                f"SELECT {type_expr} AS prop_type, COUNT(*) AS cnt {from_clause} "
                 "GROUP BY prop_type ORDER BY prop_type"
             )
             cur.execute(prop_query, where_params)
@@ -14615,7 +14621,7 @@ def compute_user_statistics(period: str) -> dict:
             stats["prop_type_counts"] = prop_counts
     except Exception:
         logger.exception("Failed to compute user statistics")
-        return {}
+        return stats
     finally:
         if conn:
             try:
@@ -14626,20 +14632,14 @@ def compute_user_statistics(period: str) -> dict:
     statistics_cache[cache_key] = {"ts": now_ts, "data": stats}
     logger.debug("USER STATS source=listings prop_type=dynamic operation=exact_string")
     op_sum = stats.get("sale_count", 0) + stats.get("rent_count", 0)
-    if stats.get("total", 0) != op_sum:
+    prop_counts = stats.get("prop_type_counts", {}) or {}
+    prop_sum = sum(prop_counts.values())
+    if stats.get("total", 0) != op_sum or stats.get("total", 0) != prop_sum:
         logger.warning(
-            "Stats mismatch scope=%s total_count=%s category_sum=%s group=operation",
+            "Stats mismatch scope=%s total=%s sum_ops=%s sum_types=%s",
             key_base,
             stats.get("total", 0),
             op_sum,
-        )
-    prop_counts = stats.get("prop_type_counts", {}) or {}
-    prop_sum = sum(prop_counts.values())
-    if stats.get("total", 0) != prop_sum:
-        logger.warning(
-            "Stats mismatch scope=%s total_count=%s category_sum=%s group=property",
-            key_base,
-            stats.get("total", 0),
             prop_sum,
         )
     _log_user_stats_consistency()
