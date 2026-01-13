@@ -1405,7 +1405,17 @@
             const from = listingsState.total === 0 ? 0 : ( (listingsState.page - 1) * listingsState.pageSize + 1 );
             const to = (listingsState.page - 1) * listingsState.pageSize + items.length;
 
-            listingsInfo.textContent = `${listingsState.total} elan tapıldı`;
+            listingsInfo.style.whiteSpace = "pre-line";
+            const phraseMode = Boolean(data.phrase_mode);
+            const fallbackUsed = Boolean(data.fallback_used);
+            const phraseValue = (data.phrase || "").trim();
+            if (phraseMode && !fallbackUsed && phraseValue) {
+                listingsInfo.textContent = `🔎 Dəqiq axtarış: "${phraseValue}"\nTapılan elan: ${listingsState.total}`;
+            } else if (phraseMode && fallbackUsed) {
+                listingsInfo.textContent = "⚠️ Dəqiq uyğunluq tapılmadı.\nOxşar nəticələr göstərilir.";
+            } else {
+                listingsInfo.textContent = `${listingsState.total} elan tapıldı`;
+            }
             listingsInfoRight.textContent = `Səhifə ${listingsState.page} / ${listingsState.totalPages}`;
             listingsRange.textContent = `${from}–${to}`;
             resultSummary.textContent = `BestHome: ${listingsState.total} aktiv elan`;
