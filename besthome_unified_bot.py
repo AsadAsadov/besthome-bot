@@ -12296,19 +12296,39 @@ def build_notification_property_type_markup() -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup()
     mk.row(
         types.InlineKeyboardButton("Mənzil", callback_data="notif_rule_prop:m"),
-        types.InlineKeyboardButton("Bağ evi", callback_data="notif_rule_prop:b"),
+        types.InlineKeyboardButton("Həyət evi", callback_data="notif_rule_prop:f"),
     )
     mk.row(
+        types.InlineKeyboardButton("Bağ evi", callback_data="notif_rule_prop:b"),
         types.InlineKeyboardButton("Torpaq", callback_data="notif_rule_prop:t"),
-        types.InlineKeyboardButton("Hamısı", callback_data="notif_rule_prop:all"),
     )
-    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="notif_rule_prop_back"))
+    mk.row(
+        types.InlineKeyboardButton("Ofis / Obyekt", callback_data="notif_rule_prop:q"),
+        types.InlineKeyboardButton("Qaraj", callback_data="notif_rule_prop:g"),
+    )
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="notif_rule_prop:back"))
     return mk
 
 
 def send_notification_property_type_prompt(chat_id: int, message=None):
     text = "🏠 Əmlak növü seçin:"
     mk = build_notification_property_type_markup()
+    if message:
+        render_ui(message.chat.id, text, mk)
+        return
+    render_ui(chat_id, text, mk)
+
+
+def build_notification_rule_confirm_markup() -> types.InlineKeyboardMarkup:
+    mk = types.InlineKeyboardMarkup()
+    mk.add(types.InlineKeyboardButton("✅ Yadda saxla", callback_data="notif_rule_confirm:save"))
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="notif_rule_confirm:back"))
+    return mk
+
+
+def send_notification_rule_confirm_prompt(chat_id: int, message=None):
+    text = "✅ Kriteriyanı yadda saxlamaq üçün təsdiqləyin:"
+    mk = build_notification_rule_confirm_markup()
     if message:
         render_ui(message.chat.id, text, mk)
         return
@@ -13581,16 +13601,51 @@ def cb_notification_rule_rayon(c):
                 c.id, "⚠️ Ən azı bir rayon seçin.", show_alert=True
             )
             return
-        state["step"] = "min_price"
+        state["step"] = "prop_type"
         notification_rule_state[chat_id] = state
-        bot.send_message(
-            chat_id,
-            "💰 Minimum qiymət yazın (istəyə görə):",
-            reply_markup=build_optional_input_keyboard(),
-        )
+        send_notification_property_type_prompt(chat_id, message=c.message)
     elif action == "back":
         state["step"] = "operation"
         send_notification_operation_prompt(chat_id, message=c.message)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("notif_rule_prop"))
+@callback_guard
+def cb_notification_rule_property_type(c):
+    if not ensure_feature_available_cb(c, "notifications"):
+        return
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id
+    state = notification_rule_state.get(chat_id)
+    if not state or state.get("step") != "prop_type":
+        return
+    action = c.data.split(":", 1)[1] if ":" in c.data else ""
+    if action == "back":
+        state["step"] = "rayon"
+        notification_rule_state[chat_id] = state
+        send_notification_rayon_prompt(chat_id, message=c.message)
+        try:
+            bot.answer_callback_query(c.id)
+        except Exception:
+            pass
+        return
+    prop_label = resolve_property_type_from_code(action)
+    if not prop_label:
+        bot.answer_callback_query(c.id, "⚠️ Əmlak növünü seçin.", show_alert=True)
+        return
+    state["prop_type"] = prop_label
+    state["step"] = "min_price"
+    notification_rule_state[chat_id] = state
+    bot.send_message(
+        chat_id,
+        "💰 Minimum qiymət yazın (istəyə görə):",
+        reply_markup=build_optional_input_keyboard(),
+    )
     try:
         bot.answer_callback_query(c.id)
     except Exception:
@@ -13607,9 +13662,9 @@ def handle_notification_rule_min_price(message):
     text = (message.text or "").strip()
     state = notification_rule_state.get(chat_id, {})
     if text == "⬅️ Geri":
-        state["step"] = "rayon"
+        state["step"] = "prop_type"
         notification_rule_state[chat_id] = state
-        send_notification_rayon_prompt(chat_id)
+        send_notification_property_type_prompt(chat_id)
         return
     if text == "⚪️ Keç":
         state["price_min"] = None
@@ -13638,9 +13693,13 @@ def handle_notification_rule_max_price(message):
     text = (message.text or "").strip()
     state = notification_rule_state.get(chat_id, {})
     if text == "⬅️ Geri":
-        state["step"] = "rayon"
+        state["step"] = "min_price"
         notification_rule_state[chat_id] = state
-        send_notification_rayon_prompt(chat_id)
+        bot.send_message(
+            chat_id,
+            "💰 Minimum qiymət yazın (istəyə görə):",
+            reply_markup=build_optional_input_keyboard(),
+        )
         return
     if text == "⚪️ Keç":
         state["price_max"] = None
@@ -13669,9 +13728,13 @@ def handle_notification_rule_rooms(message):
     text = (message.text or "").strip()
     state = notification_rule_state.get(chat_id, {})
     if text == "⬅️ Geri":
-        state["step"] = "rayon"
+        state["step"] = "max_price"
         notification_rule_state[chat_id] = state
-        send_notification_rayon_prompt(chat_id)
+        bot.send_message(
+            chat_id,
+            "💰 Maksimum qiymət yazın (istəyə görə):",
+            reply_markup=build_optional_input_keyboard(),
+        )
         return
     if text == "⚪️ Keç":
         state["rooms"] = None
@@ -13712,7 +13775,9 @@ def handle_notification_rule_floor(message):
         state["floor_min"] = None
         state["floor_max"] = None
         notification_rule_state[chat_id] = state
-        finalize_notification_rule(chat_id)
+        state["step"] = "confirm"
+        notification_rule_state[chat_id] = state
+        send_notification_rule_confirm_prompt(chat_id)
         return
 
     txt_clean = re.sub(r"\s+", "", text)
@@ -13736,7 +13801,37 @@ def handle_notification_rule_floor(message):
     state["floor_min"] = floor_min
     state["floor_max"] = floor_max
     notification_rule_state[chat_id] = state
-    finalize_notification_rule(chat_id)
+    state["step"] = "confirm"
+    notification_rule_state[chat_id] = state
+    send_notification_rule_confirm_prompt(chat_id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("notif_rule_confirm:"))
+@callback_guard
+def cb_notification_rule_confirm(c):
+    if not ensure_feature_available_cb(c, "notifications"):
+        return
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id
+    state = notification_rule_state.get(chat_id)
+    if not state or state.get("step") != "confirm":
+        return
+    action = c.data.split(":", 1)[1]
+    if action == "back":
+        state["step"] = "floor"
+        notification_rule_state[chat_id] = state
+        bot.send_message(
+            chat_id,
+            "🏢 Mərtəbə yazın (istəyə görə, məs: 3 və ya 1-3):",
+            reply_markup=build_optional_input_keyboard(),
+        )
+    elif action == "save":
+        finalize_notification_rule(chat_id)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
 
 
 def finalize_notification_rule(chat_id: int):
@@ -13759,7 +13854,17 @@ def finalize_notification_rule(chat_id: int):
             chat_id,
             "✅ Kriteriya əlavə olundu.\n🔔 Uyğun elan çıxanda sizə bildiriş gələcək.",
         )
-    send_criteria_list(chat_id)
+    reset_search_state(chat_id)
+    set_search_menu_active(chat_id, False)
+    set_navigation_state(chat_id, STATE_MAIN_MENU)
+    set_ui_context(chat_id, UI_CONTEXT_MAIN)
+    kb = build_main_menu(
+        chat_id,
+        is_admin(chat_id),
+        has_customer_requests_access(chat_id),
+        should_show_bonus_button(chat_id),
+    )
+    send_with_reply_keyboard(chat_id, "🏠 Əsas menyu:", kb)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_stopcrit:"))
@@ -13966,6 +14071,7 @@ PROP_TYPE_MAP = {
     "qeyri yaşayış sahəsi": "Ofis / Obyekt",
     "bağ evi": "Bağ evi",
     "torpaq": "Torpaq",
+    "qaraj": "Qaraj",
 }
 
 PROPERTY_TYPE_NORMALIZATION_MAP: Dict[str, str] = {}
@@ -13994,6 +14100,7 @@ PROP_TYPES = {
     "q": "Ofis / Obyekt",
     "b": "Bağ evi",
     "t": "Torpaq",
+    "g": "Qaraj",
     "d": "Digər",
 }
 
