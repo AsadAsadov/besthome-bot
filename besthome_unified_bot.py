@@ -595,6 +595,7 @@ notification_rule_state = {}
 notification_menu_state = {}
 keyword_hits_context = {}
 keyword_notification_state: Dict[int, Dict[str, Any]] = {}
+pending_keyword_results: Dict[int, List[dict]] = {}
 admin_selected_users: Dict[int, set] = defaultdict(set)
 admin_user_rows_cache: Dict[int, List[sqlite3.Row]] = defaultdict(list)
 admin_bulk_action_state: Dict[int, Dict[str, Any]] = {}
@@ -5919,6 +5920,7 @@ def reset_user_state(chat_id: int):
     customer_request_rule_state.pop(chat_id, None)
     keyword_alert_state.pop(chat_id, None)
     notification_rule_state.pop(chat_id, None)
+    pending_keyword_results.pop(chat_id, None)
     admin_direct_message_state.pop(chat_id, None)
     admin_user_message_state.pop(chat_id, None)
     admin_user_extend_state.pop(chat_id, None)
@@ -9192,6 +9194,51 @@ def store_keyword_notification_match(
         ctx["id_index"][listing_id_key] = listing_copy
 
 
+def notify_on_keyword_match(matches: List[dict], user_id: int) -> None:
+    if not matches:
+        return
+    existing = pending_keyword_results.get(user_id, [])
+    merged: List[dict] = []
+    seen_keys: Set[str] = set()
+
+    def listing_key(item: dict) -> Optional[str]:
+        listing_id_raw = item.get("id") or item.get("ID") or item.get("Elan_kodu")
+        if listing_id_raw is not None:
+            return f"id:{listing_id_raw}"
+        source = item.get("__source") or "main"
+        unique_key = build_listing_unique_key(item, source)
+        if unique_key:
+            return f"key:{unique_key}"
+        return None
+
+    for item in existing:
+        key = listing_key(item)
+        if key:
+            seen_keys.add(key)
+        merged.append(item)
+
+    for item in matches:
+        key = listing_key(item)
+        if key and key in seen_keys:
+            continue
+        if key:
+            seen_keys.add(key)
+        merged.append(item)
+
+    pending_keyword_results[user_id] = merged
+    total = len(merged)
+    mk = types.InlineKeyboardMarkup()
+    mk.add(types.InlineKeyboardButton("Elanları gör", callback_data="kw_notif_view"))
+    summary_text = f"🔔 Açar sözlərinizə uyğun {total} yeni elan tapıldı."
+    try:
+        bot.send_message(user_id, summary_text, reply_markup=mk)
+        logger.info(
+            "keyword notification summary sent chat_id=%s total=%s", user_id, total
+        )
+    except Exception:
+        logger.exception("Failed to send keyword summary chat_id=%s", user_id)
+
+
 def notify_on_new_listing(
     ev: dict,
     source: str = "main",
@@ -9244,7 +9291,6 @@ def notify_on_new_listing(
     if not matches_by_user:
         return 0
 
-    notifications_sent = 0
     for user_id, info in matches_by_user.items():
         if listing_id_int is None:
             logger.error(
@@ -9268,10 +9314,10 @@ def notify_on_new_listing(
 
         matched_keywords = sorted(info.get("keywords") or [])
         listing_copy = dict(ev)
+        listing_copy["__source"] = source or "main"
         listing_copy["__matched_keywords"] = matched_keywords
         try:
-            send_listing_card(user_id, listing_copy, source=source, with_fav_button=True)
-            notifications_sent += 1
+            notify_on_keyword_match([listing_copy], user_id)
         except Exception:
             logger.exception(
                 "[KW] Failed to send keyword notification user_id=%s listing_id=%s",
@@ -9279,11 +9325,7 @@ def notify_on_new_listing(
                 listing_id_int,
             )
 
-    logger.info("[KW] notifications_sent=%s", notifications_sent)
-    if match_count > 0 and notifications_sent <= 0:
-        logger.error("[KW] MATCHED BUT NO NOTIFICATION SENT — PIPELINE BROKEN")
-
-    return notifications_sent
+    return len(matches_by_user)
 
 
 def process_keyword_alerts_for_listing(
@@ -9322,6 +9364,17 @@ def process_keyword_alerts_for_listing(
         for user_id, info in matches_by_user.items():
             matched_keywords = sorted(info.get("keywords") or [])
             if matched_keywords:
+                listing_id_raw = ev.get("id") or ev.get("ID") or ev.get("Elan_kodu")
+                try:
+                    listing_id_int = int(listing_id_raw) if listing_id_raw else None
+                except Exception:
+                    listing_id_int = None
+                for alert_id in info.get("alerts", set()):
+                    if listing_id_int is None:
+                        continue
+                    record_keyword_alert_hit(
+                        alert_id, user_id, "listing", listing_id_int, source=source
+                    )
                 store_keyword_notification_match(
                     user_id, ev, source, matched_keywords, scan_state, listing_key
                 )
@@ -9342,19 +9395,7 @@ def send_keyword_notification_summaries(scan_state: Dict[int, Dict[str, Any]]):
             "index": ctx.get("index", {}),
             "ts": time.time(),
         }
-        total = len(items)
-        mk = types.InlineKeyboardMarkup()
-        mk.add(
-            types.InlineKeyboardButton("📂 Elanlara bax", callback_data="kw_notif_view")
-        )
-        summary_text = f"🔔 Açar sözlər üzrə {total} uyğun elan tapıldı"
-        try:
-            bot.send_message(user_id, summary_text, reply_markup=mk)
-            logger.info(
-                "keyword notification summary sent chat_id=%s total=%s", user_id, total
-            )
-        except Exception:
-            logger.exception("Failed to send keyword summary chat_id=%s", user_id)
+        notify_on_keyword_match(items, user_id)
 
 
 def process_keyword_alerts_for_request(req_row: dict):
@@ -9383,6 +9424,7 @@ def process_keyword_alerts_for_new_listings(
 
     conn = get_main_conn()
     cur = conn.cursor()
+    scan_state: Dict[int, Dict[str, Any]] = {}
     added_list = list(added_listing_ids)
     chunk_size = 800
     for idx in range(0, len(added_list), chunk_size):
@@ -9395,7 +9437,10 @@ def process_keyword_alerts_for_new_listings(
         for row in cur.fetchall():
             ev = dict(row)
             ev["__source"] = "main"
-            notify_on_new_listing(ev, source="main", alerts=alerts)
+            process_keyword_alerts_for_listing(
+                ev, source="main", alerts=alerts, scan_state=scan_state
+            )
+    send_keyword_notification_summaries(scan_state)
     close_main_conn(conn)
 
 
@@ -13333,13 +13378,28 @@ def cb_open_notifications(c):
 def cb_keyword_notification_view(c):
     if not ensure_feature_available_cb(c, "notifications"):
         return
+    if not ensure_allowed_cb(c):
+        return
     chat_id = c.message.chat.id if c.message else None
-    ctx = keyword_notification_state.get(chat_id or 0, {}) if chat_id else {}
-    items = ctx.get("items") or []
+    if not chat_id:
+        return
+    items = pending_keyword_results.pop(chat_id, [])
     if not items:
         bot.send_message(chat_id, "⚠️ Baxmaq üçün yeni elan yoxdur.")
         return
-    show_keyword_alert_hits(chat_id, period="today", index=0, message=c.message)
+    try:
+        bot.edit_message_reply_markup(
+            chat_id=chat_id, message_id=c.message.message_id, reply_markup=None
+        )
+    except Exception:
+        logger.debug("Failed to clear keyword summary keyboard chat_id=%s", chat_id)
+    for listing in items:
+        source = listing.get("__source") or "main"
+        send_listing_card(chat_id, listing, source=source, with_fav_button=True)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "notif_menu")
@@ -13850,14 +13910,34 @@ def finalize_notification_rule(chat_id: int):
     }
     rule_id = save_notification_rule(chat_id, data)
     if rule_id:
-        bot.send_message(
-            chat_id,
-            "✅ Kriteriya əlavə olundu.\n🔔 Uyğun elan çıxanda sizə bildiriş gələcək.",
-        )
+        finish_criteria_flow(chat_id)
+
+
+def finish_criteria_flow(chat_id: int) -> None:
+    notification_rule_state.pop(chat_id, None)
     reset_search_state(chat_id)
     set_search_menu_active(chat_id, False)
     set_navigation_state(chat_id, STATE_MAIN_MENU)
     set_ui_context(chat_id, UI_CONTEXT_MAIN)
+    message_id = user_last_message_id.get(chat_id) or last_ui_message_id.get(chat_id)
+    if message_id:
+        try:
+            bot.edit_message_reply_markup(
+                chat_id=chat_id, message_id=message_id, reply_markup=None
+            )
+        except Exception:
+            logger.debug(
+                "Failed to clear inline keyboard for criteria flow chat_id=%s",
+                chat_id,
+            )
+    try:
+        bot.send_message(chat_id, "\u2063", reply_markup=types.ReplyKeyboardRemove())
+    except Exception:
+        logger.debug("Failed to remove reply keyboard for criteria flow chat_id=%s", chat_id)
+    bot.send_message(
+        chat_id,
+        "✅ Kriteriya əlavə olundu.\n🔔 Uyğun elan çıxanda sizə bildiriş gələcək.",
+    )
     kb = build_main_menu(
         chat_id,
         is_admin(chat_id),
