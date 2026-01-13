@@ -2816,14 +2816,6 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             logger.exception("[VERIFY] Runtime DB verification failed")
             raise
 
-        update_entry = record_db_update_stats(pre_update_count, post_update_count)
-        update_added = update_entry.get("added", 0)
-        last24h_from_updates = get_last24h_added_from_updates()
-        today_total = get_today_added_count()
-        logger.info("[STATS] update_added=%s", update_added)
-        logger.info("[STATS] last24h_from_updates=%s", last24h_from_updates)
-        logger.info("[STATS] today_added=%s", today_total)
-
         try:
             post_fp = compute_db_fingerprint(MAIN_DB)
         except Exception:
@@ -2877,6 +2869,7 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
                 logger.info("[UPDATE] Added listings: %s", len(added_listing_ids))
                 if not added_listing_ids:
                     logger.info("[UPDATE] No new listings detected by DB diff")
+                process_keyword_alerts_for_new_listings(added_listing_ids, key_column)
                 added_sale, added_rent = count_added_listings_by_operation(
                     MAIN_DB, key_column, added_listing_ids
                 )
@@ -2892,6 +2885,13 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
 
         send_db_update_progress(admin_id, "📊 Statistika hesablanır…")
         try:
+            update_entry = record_db_update_stats(pre_update_count, post_update_count)
+            update_added = update_entry.get("added", 0)
+            last24h_from_updates = get_last24h_added_from_updates()
+            today_total = get_today_added_count()
+            logger.info("[STATS] update_added=%s", update_added)
+            logger.info("[STATS] last24h_from_updates=%s", last24h_from_updates)
+            logger.info("[STATS] today_added=%s", today_total)
             logger.info("[UPDATE] New listings computed from last 24h window")
             try:
                 time_based_new_count = count_listings_since(MAIN_DB, update_start_time)
@@ -2902,11 +2902,6 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             except Exception:
                 logger.exception("[UPDATE] 24h listing count failed")
                 time_based_new_count = 0
-            try:
-                process_keyword_alerts_for_new_listings()
-            except Exception as e:
-                logger.warning("keyword alert listing scan error: %s", e)
-
             safe_admin_step(
                 admin_id,
                 _update_success_message(),
@@ -9034,10 +9029,37 @@ def build_listing_text_blob(ev: dict) -> str:
         ev.get("description") or ev.get("summary") or ev.get("Umumi_melumat") or ""
     )
     address = ev.get("address") or ev.get("Unvan") or ""
+    metro = ev.get("metro") or ev.get("Metro") or ""
+    operation = ev.get("operation") or ev.get("Emeliyyat_novu") or ""
+    prop_type = ev.get("prop_type") or ev.get("Emlakin_novu") or ""
     project_name = ev.get("project_name") or ""
     notes = ev.get("notes") or ""
-    parts = [title, description, address, project_name, notes]
+    parts = [
+        title,
+        description,
+        address,
+        metro,
+        operation,
+        prop_type,
+        project_name,
+        notes,
+    ]
     return normalize_text(" ".join([str(p) for p in parts if p]))
+
+
+def build_keyword_match_fields(ev: dict) -> Dict[str, str]:
+    return {
+        "title": str(
+            ev.get("title") or ev.get("prop_type") or ev.get("Emlakin_novu") or ""
+        ),
+        "summary": str(
+            ev.get("summary") or ev.get("description") or ev.get("Umumi_melumat") or ""
+        ),
+        "address": str(ev.get("address") or ev.get("Unvan") or ""),
+        "metro": str(ev.get("metro") or ev.get("Metro") or ""),
+        "operation": str(ev.get("operation") or ev.get("Emeliyyat_novu") or ""),
+        "property_type": str(ev.get("prop_type") or ev.get("Emlakin_novu") or ""),
+    }
 
 
 def build_listing_unique_key(ev: dict, source: str) -> Optional[str]:
@@ -9077,14 +9099,21 @@ def keyword_matches_text(keyword_raw: str, text_blob: str) -> bool:
     keyword_norm = normalize_text(keyword_raw)
     if not keyword_norm:
         return False
-    tokens = keyword_norm.split()
-    if not tokens:
-        return False
     text_norm = normalize_text(text_blob)
     if not text_norm:
         return False
-    text_tokens = set(text_norm.split())
-    return all(token in text_tokens for token in tokens)
+    return keyword_norm in text_norm
+
+
+def keyword_matches_listing_fields(keyword_raw: str, ev: dict) -> bool:
+    keyword_norm = normalize_text(keyword_raw or "")
+    if not keyword_norm:
+        return False
+    for value in build_keyword_match_fields(ev).values():
+        field_norm = normalize_text(value)
+        if field_norm and keyword_norm in field_norm:
+            return True
+    return False
 
 
 def record_keyword_alert_hit(
@@ -9163,15 +9192,20 @@ def store_keyword_notification_match(
         ctx["id_index"][listing_id_key] = listing_copy
 
 
-def process_keyword_alerts_for_listing(
-    ev: dict, source: str = "main", alerts: Optional[List[dict]] = None, scan_state=None
-):
+def notify_on_new_listing(
+    ev: dict,
+    source: str = "main",
+    alerts: Optional[List[dict]] = None,
+) -> int:
     if not ev:
-        return
+        return 0
+    listing_id_raw = ev.get("id") or ev.get("ID") or ev.get("Elan_kodu")
+    logger.info("[KW] new_listing id=%s", listing_id_raw)
     alerts = alerts or fetch_active_keyword_alerts()
+    logger.info("[KW] active_rules=%s", len(alerts))
     if not alerts:
-        return
-    listing_text = normalize_text(build_listing_text_blob(ev))
+        return 0
+
     listing_rayon = (
         ev.get("rayon")
         or ev.get("Rayon_Qesebe")
@@ -9179,14 +9213,13 @@ def process_keyword_alerts_for_listing(
         or ev.get("Unvan")
         or ""
     )
-    listing_id_raw = ev.get("id") or ev.get("ID") or ev.get("Elan_kodu")
     try:
         listing_id_int = int(listing_id_raw)
     except Exception:
         listing_id_int = None
 
-    listing_key = build_listing_unique_key(ev, source)
     matches_by_user: Dict[int, Dict[str, Any]] = {}
+    match_count = 0
 
     for alert in alerts:
         user_id = alert.get("user_id")
@@ -9195,7 +9228,7 @@ def process_keyword_alerts_for_listing(
         keyword_raw = (alert.get("keywords") or "").strip()
         if not keyword_raw:
             continue
-        if not keyword_matches_text(keyword_raw, listing_text):
+        if not keyword_matches_listing_fields(keyword_raw, ev):
             continue
         if not keyword_region_matches(listing_rayon, alert.get("regions") or ""):
             continue
@@ -9205,27 +9238,95 @@ def process_keyword_alerts_for_listing(
         entry["keywords"].add(keyword_raw)
         if alert.get("id"):
             entry["alerts"].add(alert.get("id"))
+        match_count += 1
 
+    logger.info("[KW] matches_found=%s", match_count)
     if not matches_by_user:
-        return
+        return 0
 
+    notifications_sent = 0
     for user_id, info in matches_by_user.items():
-        for alert_id in info.get("alerts", set()):
-            if listing_id_int is not None:
-                record_keyword_alert_hit(
-                    alert_id, user_id, "listing", listing_id_int, source=source
-                )
-        matched_keywords = sorted(info.get("keywords") or [])
-        if scan_state is not None and matched_keywords:
-            store_keyword_notification_match(
-                user_id, ev, source, matched_keywords, scan_state, listing_key
+        if listing_id_int is None:
+            logger.error(
+                "[KW] missing listing id for notification user_id=%s source=%s",
+                user_id,
+                source,
             )
-        logger.info(
-            "keyword match listing_key=%s user_id=%s keywords=%s",
-            listing_key,
-            user_id,
-            matched_keywords,
+        for alert_id in info.get("alerts", set()):
+            if listing_id_int is None:
+                continue
+            inserted = record_keyword_alert_hit(
+                alert_id, user_id, "listing", listing_id_int, source=source
+            )
+            if not inserted:
+                logger.warning(
+                    "[KW] keyword alert history not recorded alert_id=%s user_id=%s listing_id=%s",
+                    alert_id,
+                    user_id,
+                    listing_id_int,
+                )
+
+        matched_keywords = sorted(info.get("keywords") or [])
+        listing_copy = dict(ev)
+        listing_copy["__matched_keywords"] = matched_keywords
+        try:
+            send_listing_card(user_id, listing_copy, source=source, with_fav_button=True)
+            notifications_sent += 1
+        except Exception:
+            logger.exception(
+                "[KW] Failed to send keyword notification user_id=%s listing_id=%s",
+                user_id,
+                listing_id_int,
+            )
+
+    logger.info("[KW] notifications_sent=%s", notifications_sent)
+    if match_count > 0 and notifications_sent <= 0:
+        logger.error("[KW] MATCHED BUT NO NOTIFICATION SENT — PIPELINE BROKEN")
+
+    return notifications_sent
+
+
+def process_keyword_alerts_for_listing(
+    ev: dict, source: str = "main", alerts: Optional[List[dict]] = None, scan_state=None
+):
+    if not ev:
+        return
+    if scan_state is not None:
+        listing_key = build_listing_unique_key(ev, source)
+        alerts = alerts or fetch_active_keyword_alerts()
+        matches_by_user: Dict[int, Dict[str, Any]] = {}
+        listing_rayon = (
+            ev.get("rayon")
+            or ev.get("Rayon_Qesebe")
+            or ev.get("address")
+            or ev.get("Unvan")
+            or ""
         )
+        for alert in alerts:
+            user_id = alert.get("user_id")
+            if not user_id or not is_user_allowed(user_id):
+                continue
+            keyword_raw = (alert.get("keywords") or "").strip()
+            if not keyword_raw:
+                continue
+            if not keyword_matches_listing_fields(keyword_raw, ev):
+                continue
+            if not keyword_region_matches(listing_rayon, alert.get("regions") or ""):
+                continue
+            entry = matches_by_user.setdefault(
+                user_id, {"keywords": set(), "alerts": set()}
+            )
+            entry["keywords"].add(keyword_raw)
+            if alert.get("id"):
+                entry["alerts"].add(alert.get("id"))
+        for user_id, info in matches_by_user.items():
+            matched_keywords = sorted(info.get("keywords") or [])
+            if matched_keywords:
+                store_keyword_notification_match(
+                    user_id, ev, source, matched_keywords, scan_state, listing_key
+                )
+        return
+    notify_on_new_listing(ev, source=source, alerts=alerts)
 
 
 def send_keyword_notification_summaries(scan_state: Dict[int, Dict[str, Any]]):
@@ -9264,32 +9365,38 @@ def process_keyword_alerts_for_existing_requests(alert_id: int):
     return
 
 
-def process_keyword_alerts_for_new_listings():
-    last_checked = get_keyword_alert_last_checked("listings")
-    now = datetime.utcnow()
-    if last_checked is None:
-        set_keyword_alert_last_checked("listings", now)
-        keyword_notification_state.clear()
+def process_keyword_alerts_for_new_listings(
+    added_listing_ids: Optional[Set[Any]] = None,
+    key_column: Optional[str] = None,
+):
+    if not added_listing_ids or not key_column:
+        logger.info("[KW] new_listing scan skipped: no new listings")
         return
-    candidates = load_recent_listings(last_checked)
+    if not os.path.exists(MAIN_DB):
+        logger.warning("[KW] new_listing scan skipped: main DB missing")
+        return
+
     alerts = fetch_active_keyword_alerts()
-    if not candidates or not alerts:
-        set_keyword_alert_last_checked("listings", now)
-        keyword_notification_state.clear()
+    if not alerts:
+        logger.info("[KW] new_listing scan skipped: no active rules")
         return
 
-    scan_state: Dict[int, Dict[str, Any]] = {}
-    for ev in candidates:
-        process_keyword_alerts_for_listing(
-            ev,
-            source=ev.get("__source", "main"),
-            alerts=alerts,
-            scan_state=scan_state,
+    conn = get_main_conn()
+    cur = conn.cursor()
+    added_list = list(added_listing_ids)
+    chunk_size = 800
+    for idx in range(0, len(added_list), chunk_size):
+        chunk = added_list[idx : idx + chunk_size]
+        placeholders = ", ".join(["?"] * len(chunk))
+        cur.execute(
+            f"SELECT * FROM listings WHERE {key_column} IN ({placeholders})",
+            chunk,
         )
-
-    send_keyword_notification_summaries(scan_state)
-
-    set_keyword_alert_last_checked("listings", now)
+        for row in cur.fetchall():
+            ev = dict(row)
+            ev["__source"] = "main"
+            notify_on_new_listing(ev, source="main", alerts=alerts)
+    close_main_conn(conn)
 
 
 def show_request_type_menu(chat_id: int):
@@ -23766,6 +23873,7 @@ def handle_admin_approve(c):
         conn.close()
 
         ev["id"] = approved_id
+        notify_on_new_listing(ev, source="local")
         send_listing_card(
             CHANNEL_ID,
             ev,
@@ -23773,10 +23881,6 @@ def handle_admin_approve(c):
             with_fav_button=False,
             track_view=False,
         )
-        scan_state = {}
-        process_keyword_alerts_for_listing(ev, source="local", scan_state=scan_state)
-        if scan_state:
-            send_keyword_notification_summaries(scan_state)
 
         bot.answer_callback_query(c.id, "Elan təsdiqləndi ✅")
 
