@@ -214,6 +214,9 @@ SUPPORT_THREAD_STATUS_CLOSED = "CLOSED"
 
 support_admin_state: Dict[int, Dict[str, Optional[Union[str, int]]]] = {}
 support_last_admin_notify_ts: Dict[int, float] = {}
+welcome_back_sent: Set[int] = set()
+
+AZ_PHONE_PREFIXES = {"50", "51", "55", "70", "77", "99"}
 
 
 def _load_bot_token():
@@ -384,6 +387,29 @@ def _edit_last_message_reply_markup(proxy: _BotProxy, edit_func, *args, **kwargs
 def handle_start(message):
     chat_id = message.chat.id
     support_admin_state.pop(chat_id, None)
+    phone_row = get_phone_verification_row(chat_id)
+    if not phone_row:
+        logger.info("NEW_USER_STARTED user_id=%s", chat_id)
+        send_phone_request(chat_id)
+        return
+    is_verified = (
+        bool(phone_row["is_verified"])
+        if phone_row and "is_verified" in phone_row.keys()
+        else False
+    )
+    if not is_verified:
+        logger.info("RETURNING_USER user_id=%s", chat_id)
+        send_phone_request(chat_id)
+        return
+    logger.info("RETURNING_USER user_id=%s", chat_id)
+    if chat_id not in welcome_back_sent:
+        bot.send_message(
+            chat_id,
+            "👋 Yenidən xoş gəldin!\n"
+            "Hesabın aktivdir, botdan istifadə edə bilərsən.\n"
+            "Səni burada görməyə şadıq.",
+        )
+        welcome_back_sent.add(chat_id)
 
     def fetch_user_row():
         conn = get_db()
@@ -470,6 +496,42 @@ def handle_menu(message):
 @bot.message_handler(content_types=["web_app_data"])
 def handle_web_app_data(message):
     return
+
+
+@bot.message_handler(content_types=["contact"])
+def handle_contact(message):
+    chat_id = message.chat.id
+    contact = message.contact
+    if not contact or not contact.phone_number:
+        return
+    phone = normalize_az_phone(contact.phone_number)
+    if not phone:
+        bot.send_message(
+            chat_id,
+            "❌ Nömrə düzgün deyil.\n"
+            "Zəhmət olmasa 070XXXXXXX formatında daxil et.",
+        )
+        return
+    now_iso = datetime.now(timezone.utc).isoformat()
+    row = get_phone_verification_row(chat_id)
+    if row and "is_verified" in row.keys() and row["is_verified"]:
+        return
+    if not row:
+        try:
+            handle_start_attribution_and_demo(message, "")
+        except Exception:
+            logger.exception("Start logic failed after phone verification")
+    update_phone_verification(chat_id, phone, now_iso)
+    logger.info(
+        "PHONE_VERIFIED user_id=%s phone=%s", chat_id, mask_phone(phone)
+    )
+    bot.send_message(
+        chat_id,
+        "✅ Təşəkkürlər!\n"
+        "Hesabın aktiv edildi.",
+    )
+    reset_user_state(chat_id)
+    restore_reply_keyboard(chat_id)
 
 
 def handle_start_attribution_and_demo(message, start_arg: str):
@@ -992,6 +1054,82 @@ def normalize_text(text: str) -> str:
 
 def is_command_text(text: str) -> bool:
     return bool((text or "").strip().startswith("/"))
+
+
+def normalize_az_phone(phone_raw: str) -> Optional[str]:
+    digits = re.sub(r"\D", "", phone_raw or "")
+    if digits.startswith("994") and len(digits) == 12:
+        digits = "0" + digits[3:]
+    if len(digits) != 10 or not digits.startswith("0"):
+        return None
+    if digits[1:3] not in AZ_PHONE_PREFIXES:
+        return None
+    return digits
+
+
+def mask_phone(phone: str) -> str:
+    digits = re.sub(r"\D", "", phone or "")
+    if not digits:
+        return ""
+    if len(digits) <= 6:
+        return "*" * len(digits)
+    return f"{digits[:3]}{'*' * (len(digits) - 6)}{digits[-3:]}"
+
+
+def get_phone_verification_row(chat_id: int) -> Optional[sqlite3.Row]:
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT chat_id, phone, first_seen_at, last_seen_at, is_verified
+        FROM users
+        WHERE chat_id=?
+        """,
+        (chat_id,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def update_phone_verification(
+    chat_id: int, phone: str, now_iso: str
+) -> None:
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE users
+        SET phone=?,
+            last_seen_at=?,
+            is_verified=1,
+            first_seen_at=COALESCE(first_seen_at, ?)
+        WHERE chat_id=?
+        """,
+        (phone, now_iso, now_iso, chat_id),
+    )
+    if cur.rowcount == 0:
+        cur.execute(
+            """
+            INSERT INTO users (chat_id, phone, first_seen_at, last_seen_at, is_verified)
+            VALUES (?, ?, ?, ?, 1)
+            """,
+            (chat_id, phone, now_iso, now_iso),
+        )
+    conn.commit()
+    conn.close()
+
+
+def send_phone_request(chat_id: int) -> None:
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    keyboard.add(types.KeyboardButton("📱 Nömrəni paylaş", request_contact=True))
+    bot.send_message(
+        chat_id,
+        "👋 Xoş gəldin Best Home Əmlak Axtarış Platformasına!\n"
+        "Davam etmək üçün zəhmət olmasa əlaqə nömrəni daxil et.",
+        reply_markup=keyboard,
+    )
+    logger.info("PHONE_REQUESTED user_id=%s", chat_id)
 
 
 def set_ui_context(chat_id: int, context: str):
@@ -3174,6 +3312,10 @@ def init_local_db():
         "ALTER TABLE users ADD COLUMN last_payment_at TEXT",
         "ALTER TABLE users ADD COLUMN user_support_active INTEGER DEFAULT 0",
         "ALTER TABLE users ADD COLUMN user_support_inbox_unread INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN phone TEXT",
+        "ALTER TABLE users ADD COLUMN first_seen_at TEXT",
+        "ALTER TABLE users ADD COLUMN last_seen_at TEXT",
+        "ALTER TABLE users ADD COLUMN is_verified INTEGER DEFAULT 0",
     ]:
         try:
             cur.execute(alter_stmt)
