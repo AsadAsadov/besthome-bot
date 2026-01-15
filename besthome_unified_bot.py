@@ -3926,6 +3926,14 @@ def init_main_db_indices():
                 cur.execute(
                     "ALTER TABLE listings ADD COLUMN is_hidden INTEGER DEFAULT 0"
                 )
+            if "region_id" in listings_cols:
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_listings_region_id ON listings(region_id)"
+                )
+            if "region_name" in listings_cols:
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_listings_region_name ON listings(region_name)"
+                )
         except sqlite3.OperationalError:
             pass
         cur.execute(
@@ -3976,14 +3984,20 @@ def ensure_fts_tables():
             )
             return
 
-        address_cols = pick_cols_in_order(["address", "unvan", "adres"])
         source_text_cols = pick_cols_in_order(["source_text"])
         extra_cols = pick_cols_in_order(
-            ["metro", "rayon", "contact_name", "operation", "project_name"]
+            [
+                "metro",
+                "rayon",
+                "region_name",
+                "contact_name",
+                "operation",
+                "project_name",
+            ]
         )
 
         chosen = list(
-            dict.fromkeys(text_cols + address_cols + source_text_cols + extra_cols)
+            dict.fromkeys(text_cols + source_text_cols + extra_cols)
         )
 
         cur.execute(
@@ -6627,12 +6641,10 @@ def build_rayon_filter_sql(cur, table: str, rayon: Optional[str], prefix: str):
         return "", []
     cols = get_table_columns(cur, table)
     targets = []
-    if "rayon" in cols:
+    if table == "listings" and "region_name" in cols:
+        targets.append(f"{prefix}{cols['region_name']}")
+    elif "rayon" in cols:
         targets.append(f"{prefix}{cols['rayon']}")
-    if "address" in cols:
-        targets.append(f"{prefix}{cols['address']}")
-    if "summary" in cols:
-        targets.append(f"{prefix}{cols['summary']}")
     if not targets:
         return "", []
     conds = [f"LOWER(COALESCE({col},'')) LIKE ?" for col in targets]
@@ -8148,6 +8160,26 @@ def make_whatsapp_url(
     return f"https://wa.me/{p}?text={quote(text, safe='')}"
 
 
+def get_listing_region_value(ev: dict, source: Optional[str] = None) -> str:
+    region = ev.get("region_name") or ev.get("Region_Name") or ev.get("region")
+    if not region:
+        src = source or ev.get("__source")
+        if src == "local":
+            region = ev.get("rayon") or ev.get("Rayon_Qesebe") or ev.get("Rayon")
+    return str(region or "").strip()
+
+
+def get_listing_region_display(ev: dict, source: Optional[str] = None) -> str:
+    region = get_listing_region_value(ev, source)
+    return region if region else "Region not specified"
+
+
+def get_listing_address_display(ev: dict) -> str:
+    address = ev.get("address") or ev.get("Unvan") or ""
+    address = str(address or "").strip()
+    return address if address else "-"
+
+
 def build_whatsapp_message(ev: dict) -> str:
     op_raw = (ev.get("operation") or ev.get("Emeliyyat") or "").lower()
     is_rent = "kir" in op_raw or "rent" in op_raw
@@ -8155,9 +8187,11 @@ def build_whatsapp_message(ev: dict) -> str:
     rooms_val = ev.get("rooms") or ev.get("Otaq_sayi") or ""
     rooms_txt = f"{rooms_val} otaqlı" if rooms_val else ""
 
-    location_raw = ev.get("rayon") or ev.get("Rayon_Qesebe") or ""
-    if not location_raw:
-        location_raw = ev.get("address") or ev.get("Unvan") or ""
+    region_name = get_listing_region_display(ev)
+    address = get_listing_address_display(ev)
+    location_raw = region_name
+    if address and address != "-":
+        location_raw = f"{region_name}, {address}"
 
     message_lines = ["Salam."]
 
@@ -8222,20 +8256,17 @@ def build_listing_text(ev: dict, source: str, progress_text: Optional[str] = Non
     op = ev.get("operation") or ev.get("Emeliyyat") or "-"
     price = format_price(ev.get("price") or ev.get("Qiymet"))
     cur = ev.get("currency") or "AZN"
-    rayon = ev.get("rayon") or ev.get("Rayon_Qesebe") or ""
     metro = ev.get("metro") or ev.get("Metro") or ""
-    addr = ev.get("address") or ev.get("Unvan") or ""
+    region_name = get_listing_region_display(ev, source)
+    addr = get_listing_address_display(ev)
     raw_summary = ev.get("summary") or ev.get("Umumi_melumat") or ""
     summary = _strip_contact_details(raw_summary, ev) or "-"
     listing_id = ev.get("id") or ev.get("ID") or ev.get("Elan_kodu")
     listing_code = f"🆔 Elan kodu: #{listing_id}" if listing_id else "🆔 Elan kodu: -"
 
-    location = addr or rayon
+    address_line = addr
     if metro:
-        if location:
-            location += f" — {metro}"
-        else:
-            location = metro
+        address_line = f"{address_line} — {metro}" if address_line else f"- — {metro}"
 
     badges = []
     try:
@@ -8261,7 +8292,8 @@ def build_listing_text(ev: dict, source: str, progress_text: Optional[str] = Non
         f"📅 {date_val}\n"
         f"🏠 {badge_txt}{title} | {rooms}\n"
         f"💸 {op} | 💰 {price} {cur}\n"
-        f"📍 {location or '-'}\n"
+        f"📍 {region_name}\n"
+        f"🏠 {address_line}\n"
         f"🧾 {summary}"
     )
 
@@ -9351,7 +9383,7 @@ def build_listing_text_blob(ev: dict) -> str:
     description = (
         ev.get("description") or ev.get("summary") or ev.get("Umumi_melumat") or ""
     )
-    address = ev.get("address") or ev.get("Unvan") or ""
+    region_name = get_listing_region_value(ev)
     metro = ev.get("metro") or ev.get("Metro") or ""
     operation = ev.get("operation") or ev.get("Emeliyyat_novu") or ""
     prop_type = ev.get("prop_type") or ev.get("Emlakin_novu") or ""
@@ -9360,7 +9392,7 @@ def build_listing_text_blob(ev: dict) -> str:
     parts = [
         title,
         description,
-        address,
+        region_name,
         metro,
         operation,
         prop_type,
@@ -9378,7 +9410,7 @@ def build_keyword_match_fields(ev: dict) -> Dict[str, str]:
         "summary": str(
             ev.get("summary") or ev.get("description") or ev.get("Umumi_melumat") or ""
         ),
-        "address": str(ev.get("address") or ev.get("Unvan") or ""),
+        "region": get_listing_region_value(ev),
         "metro": str(ev.get("metro") or ev.get("Metro") or ""),
         "operation": str(ev.get("operation") or ev.get("Emeliyyat_novu") or ""),
         "property_type": str(ev.get("prop_type") or ev.get("Emlakin_novu") or ""),
@@ -9449,8 +9481,8 @@ def listing_phrase_matches(ev: dict, phrase_raw: str) -> bool:
     description = str(
         ev.get("description") or ev.get("summary") or ev.get("Umumi_melumat") or ""
     )
-    address = str(ev.get("address") or ev.get("Unvan") or "")
-    for value in (title, description, address):
+    region_name = get_listing_region_value(ev)
+    for value in (title, description, region_name):
         field_norm = normalize_text(value)
         if field_norm and phrase_norm in field_norm:
             return True
@@ -9609,13 +9641,7 @@ def notify_on_new_listing(
     if not alerts:
         return 0
 
-    listing_rayon = (
-        ev.get("rayon")
-        or ev.get("Rayon_Qesebe")
-        or ev.get("address")
-        or ev.get("Unvan")
-        or ""
-    )
+    listing_rayon = get_listing_region_value(ev, source)
     try:
         listing_id_int = int(listing_id_raw)
     except Exception:
@@ -9693,13 +9719,7 @@ def process_keyword_alerts_for_listing(
         listing_key = build_listing_unique_key(ev, source)
         alerts = alerts or fetch_active_keyword_alerts()
         matches_by_user: Dict[int, Dict[str, Any]] = {}
-        listing_rayon = (
-            ev.get("rayon")
-            or ev.get("Rayon_Qesebe")
-            or ev.get("address")
-            or ev.get("Unvan")
-            or ""
-        )
+        listing_rayon = get_listing_region_value(ev, source)
         for alert in alerts:
             user_id = alert.get("user_id")
             if not user_id or not is_user_allowed(user_id):
@@ -11759,9 +11779,9 @@ def prompt_today_property(chat_id: int):
 
 def get_today_rayon_counts(listings: List[dict]) -> Dict[str, int]:
     region_counter = Counter(
-        normalize_region(item.get("rayon"))
+        normalize_region(get_listing_region_value(item))
         for item in listings
-        if item.get("rayon")
+        if get_listing_region_value(item)
     )
     logger.info(
         "REGION COUNTS DEBUG total=%d regions=%s",
@@ -11802,7 +11822,7 @@ def build_today_rayon_keyboard(
 
 
 def prompt_today_rayon(chat_id: int):
-    rayons = REGION_OPTIONS.get("all", {}).get("rayons", [])
+    rayons = get_region_filter_options("all")
     if not rayons:
         send_today_results(chat_id, today_flow_state.get(chat_id, {}))
         return
@@ -14713,12 +14733,10 @@ def build_filters_sql(
         for kw in kws:
             like = f"%{kw}%"
             if mode == "main":
-                conds.append("LOWER(COALESCE(address,'')) LIKE ?")
-                conds.append("LOWER(COALESCE(summary,'')) LIKE ?")
+                conds.append("LOWER(COALESCE(region_name,'')) LIKE ?")
             else:  # local
                 conds.append("LOWER(COALESCE(rayon,'')) LIKE ?")
-                conds.append("LOWER(COALESCE(summary,'')) LIKE ?")
-            params.extend([like, like])
+            params.append(like)
         sql += " AND (" + " OR ".join(conds) + ")"
 
     # Qiymət
@@ -14784,6 +14802,42 @@ ROOM_CODES = [
 ]
 FLOOR_PRESETS = {"f13": (1, 3), "f49": (4, 9), "f10": (10, None), "fall": None}
 DATE_RANGE_DAYS = {"d7": 7, "d30": 30, "d60": 60, "d90": 90, "all": None}
+
+
+def fetch_distinct_region_names() -> List[str]:
+    if not os.path.exists(MAIN_DB):
+        return []
+    conn = get_main_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT DISTINCT region_name
+            FROM listings
+            WHERE TRIM(COALESCE(region_name, '')) != ''
+            ORDER BY region_name
+            """
+        )
+        return [row[0] for row in cur.fetchall() if row and row[0]]
+    except Exception:
+        logger.exception("Failed to load region_name list from listings")
+        return []
+    finally:
+        close_main_conn(conn)
+
+
+def get_region_filter_options(region_code: str) -> List[str]:
+    regions = fetch_distinct_region_names()
+    if not regions:
+        regions = REGION_OPTIONS.get("all", {}).get("rayons", [])
+    if region_code == "all":
+        return regions
+    group = REGION_OPTIONS.get(region_code, REGION_OPTIONS["all"]).get("rayons", [])
+    if not group:
+        return regions
+    group_norm = {normalize_region(name) for name in group}
+    filtered = [name for name in regions if normalize_region(name) in group_norm]
+    return filtered or group
 
 
 def structured_send(chat_id, message, text, markup):
@@ -14878,22 +14932,14 @@ def parse_floor_value(ev: dict):
 def matches_region_rayon(ev: dict, filters: dict) -> bool:
     region = filters.get("region") or "all"
     rayon = filters.get("rayon")
-    text_block = " ".join(
-        [
-            str(ev.get("rayon") or ""),
-            str(ev.get("Rayon_Qesebe") or ""),
-            str(ev.get("address") or ""),
-            str(ev.get("Unvan") or ""),
-            str(ev.get("summary") or ""),
-        ]
-    ).lower()
+    listing_region = get_listing_region_value(ev).lower()
 
     if rayon and rayon != "all":
-        return rayon.lower() in text_block
+        return rayon.lower() in listing_region
 
     region_rayons = REGION_OPTIONS.get(region, {}).get("rayons", [])
     if region != "all":
-        return any(r.lower() in text_block for r in region_rayons)
+        return any(r.lower() in listing_region for r in region_rayons)
     return True
 
 
@@ -14929,13 +14975,9 @@ def normalize_today_rayon(value: Optional[str]) -> str:
 
 
 def extract_today_rayon_candidates(ev: dict) -> List[str]:
-    address_raw = ev.get("address") or ev.get("Unvan") or ""
-    address_first = address_raw.split(",")[0]
+    region_raw = get_listing_region_value(ev)
     candidates = [
-        ev.get("rayon"),
-        ev.get("Rayon_Qesebe"),
-        ev.get("Rayon"),
-        address_first,
+        region_raw,
     ]
     return [normalize_today_rayon(c) for c in candidates if normalize_today_rayon(c)]
 
@@ -15628,18 +15670,8 @@ def matches_saved_search(ev: dict, saved: dict) -> bool:
     rayon_filter = saved.get("rayon")
     if rayon_filter:
         rayons = [normalize_text(r) for r in str(rayon_filter).split(",") if r.strip()]
-        text_block = normalize_text(
-            " ".join(
-                [
-                    str(ev.get("rayon") or ""),
-                    str(ev.get("Rayon_Qesebe") or ""),
-                    str(ev.get("address") or ""),
-                    str(ev.get("Unvan") or ""),
-                    str(ev.get("summary") or ""),
-                ]
-            )
-        )
-        if rayons and not any(r in text_block for r in rayons):
+        listing_region = normalize_text(get_listing_region_value(ev))
+        if rayons and not any(r in listing_region for r in rayons):
             return False
 
     prop_filter = saved.get("prop_type")
@@ -16183,7 +16215,8 @@ def query_keyword_results(
             "title",
             "description",
             "summary",
-            "address",
+            "region_name",
+            "rayon",
             "project_name",
             "source_text",
         ]
@@ -16292,7 +16325,7 @@ def query_keyword_results(
                 phrase_columns = [
                     col
                     for col in columns
-                    if col.lower() in {"title", "description", "summary", "address"}
+                    if col.lower() in {"title", "description", "summary", "region_name", "rayon"}
                 ]
                 kw_sql, kw_params = build_normalized_like_phrase_clause(
                     phrase_columns, phrase_norm
@@ -16586,7 +16619,7 @@ def query_smart_results(
         elif keywords:
             sql_where, kw_params = build_multi_like_sql(
                 keywords,
-                ["summary", "address", "metro", "rayon", "contact_name", "operation"],
+                ["summary", "region_name", "metro", "contact_name", "operation"],
             )
             order_clause = ""
             order_parts = build_listing_order_parts(cur, "listings", date_col)
@@ -17587,7 +17620,7 @@ def render_rayon_step(chat_id, message=None):
     st = search_state.setdefault(chat_id, {})
     st["step"] = "rayon"
     region = st.get("filters", {}).get("region", "all")
-    rayons = REGION_OPTIONS.get(region, REGION_OPTIONS["all"])["rayons"]
+    rayons = get_region_filter_options(region)
     mk = types.InlineKeyboardMarkup()
     mk.add(types.InlineKeyboardButton("Hamısı", callback_data="fs|rn|all"))
     row = []
@@ -17761,7 +17794,7 @@ def cb_structured(c):
     elif action == "rn":
         val = parts[2]
         region = st.get("filters", {}).get("region", "all")
-        rayons = REGION_OPTIONS.get(region, REGION_OPTIONS["all"])["rayons"]
+        rayons = get_region_filter_options(region)
         if val == "all":
             st.setdefault("filters", {})["rayon"] = "all"
         else:
@@ -26661,8 +26694,7 @@ def admin_search_handler(message):
         groups = [
             ["title", "prop_type", "emlakin_novu"],
             ["description", "summary", "umumi_melumat", "text", "details"],
-            ["district", "rayon", "rayon_qesebe", "region"],
-            ["address", "unvan", "adres"],
+            ["district", "rayon", "rayon_qesebe", "region", "region_name"],
         ]
         selected = []
         for group in groups:
