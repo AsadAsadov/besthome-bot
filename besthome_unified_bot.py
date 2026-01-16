@@ -1052,6 +1052,110 @@ def normalize_text(text: str) -> str:
     return text
 
 
+def _extract_first_number(value: str) -> Optional[float]:
+    match = re.search(r"(\d+(?:[.,]\d+)?)", value or "")
+    if not match:
+        return None
+    try:
+        return float(match.group(1).replace(",", "."))
+    except ValueError:
+        return None
+
+
+def parse_area(area_raw) -> Dict[str, Optional[Union[float, str]]]:
+    raw = str(area_raw or "").strip()
+    cleaned = " ".join(raw.split())
+    if not cleaned or cleaned == "-":
+        return {"sot": None, "kvm": None, "raw": cleaned}
+    text = cleaned.lower().strip()
+    text = text.replace(",", ".")
+    text = text.replace("m²", "m2")
+    text = text.replace("kv.m", "kvm").replace("kv m", "kvm")
+    text = re.sub(r"m\s*2", "m2", text)
+    text = text.replace("sot.", "sot")
+    text = re.sub(r"\bs\.", "sot", text)
+    text = text.replace("kvm.", "kvm").replace("kv.", "kv")
+    text = re.sub(r"(\d)([a-z])", r"\1 \2", text)
+    text = re.sub(r"([a-z])(\d)", r"\1 \2", text)
+
+    sot_val = None
+    kvm_val = None
+    for num_str, unit in re.findall(
+        r"(\d+(?:\.\d+)?)\s*(ha|sot|kvm|kv|m2)", text
+    ):
+        try:
+            value = float(num_str)
+        except ValueError:
+            continue
+        if unit == "ha":
+            if sot_val is None:
+                sot_val = value * 100
+            if kvm_val is None:
+                kvm_val = value * 10000
+        elif unit == "sot":
+            sot_val = value
+        else:
+            kvm_val = value
+
+    return {"sot": sot_val, "kvm": kvm_val, "raw": cleaned}
+
+
+def _is_sot_property_type(property_type: Optional[str]) -> bool:
+    keywords = [
+        "torpaq",
+        "həyət",
+        "heyet",
+        "bag",
+        "bağ",
+        "villa",
+        "dacha",
+        "fərdi",
+        "ferdi",
+        "yaşayış evi",
+        "yasayis evi",
+        "private house",
+    ]
+    prop_norm = normalize_text(property_type or "")
+    if not prop_norm:
+        return False
+    return any(normalize_text(keyword) in prop_norm for keyword in keywords)
+
+
+def _format_area_value(value: float) -> str:
+    if value is None:
+        return ""
+    if abs(value - round(value)) < 0.01:
+        return str(int(round(value)))
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def format_area_for_listing(
+    property_type: Optional[str], area_raw: Optional[str]
+) -> Optional[str]:
+    parsed = parse_area(area_raw)
+    raw = parsed.get("raw") or ""
+    if not raw:
+        return None
+    is_sot_type = _is_sot_property_type(property_type)
+    if is_sot_type:
+        if parsed.get("sot") is not None:
+            return f"{_format_area_value(parsed['sot'])} sot"
+        if parsed.get("kvm") is None:
+            number = _extract_first_number(raw)
+            if number is not None:
+                if number <= 60:
+                    return f"{_format_area_value(number)} sot"
+                return f"{_format_area_value(number)} kvm"
+        return raw
+
+    if parsed.get("kvm") is not None:
+        return f"{_format_area_value(parsed['kvm'])} kvm"
+    number = _extract_first_number(raw)
+    if number is not None:
+        return f"{_format_area_value(number)} kvm"
+    return raw
+
+
 def is_command_text(text: str) -> bool:
     return bool((text or "").strip().startswith("/"))
 
@@ -6950,14 +7054,17 @@ def build_listing_navigation_keyboard(
     listing_link: Optional[str] = None,
     whatsapp_url: Optional[str] = None,
     *,
+    show_hide_button: bool = False,
     visibility_button: Optional[types.InlineKeyboardButton] = None,
 ) -> types.InlineKeyboardMarkup:
     fav_label = "💔 Favori" if is_favorite else "❤️ Favori"
     mk = types.InlineKeyboardMarkup()
-    mk.row(
-        types.InlineKeyboardButton(fav_label, callback_data="fav:toggle"),
-        types.InlineKeyboardButton("🙈 Gizlət", callback_data="listing_hide"),
-    )
+    row1 = [types.InlineKeyboardButton(fav_label, callback_data="fav:toggle")]
+    if show_hide_button:
+        row1.append(
+            types.InlineKeyboardButton("🙈 Gizlət", callback_data="listing_hide")
+        )
+    mk.row(*row1)
     mk.row(
         types.InlineKeyboardButton("⬅️ Əvvəlki", callback_data="nav:prev"),
         types.InlineKeyboardButton("➡️ Növbəti", callback_data="nav:next"),
@@ -8288,14 +8395,46 @@ def build_listing_text(ev: dict, source: str, progress_text: Optional[str] = Non
 
     badge_txt = (" ".join(badges) + " ") if badges else ""
 
-    text = (
-        f"📅 {date_val}\n"
-        f"🏠 {badge_txt}{title} | {rooms}\n"
-        f"💸 {op} | 💰 {price} {cur}\n"
-        f"📍 {region_name}\n"
-        f"🏠 {address_line}\n"
-        f"🧾 {summary}"
+    property_type = (
+        ev.get("property_type")
+        or ev.get("estate_type")
+        or ev.get("category")
+        or ev.get("prop_type")
+        or ev.get("Emlakin_novu")
     )
+    floor_raw = ev.get("floor")
+    floor_val = str(floor_raw).strip() if floor_raw is not None else ""
+    if floor_val in ("", "-"):
+        floor_val = ""
+
+    area_raw = ev.get("area_kvm") or ev.get("Sahe_kvm") or ev.get("Sahe_sot")
+    area_val = format_area_for_listing(property_type, area_raw)
+
+    logger.debug(
+        "[LISTING_FMT] id=%s floor=%s area_raw=%s area_out=%s",
+        listing_id,
+        floor_val or "-",
+        area_raw,
+        area_val,
+    )
+
+    lines = [
+        f"📅 {date_val}",
+        f"🏠 {badge_txt}{title} | {rooms}",
+        f"💸 {op} | 💰 {price} {cur}",
+    ]
+    if area_val:
+        lines.append(f"📐 Sahə: {area_val}")
+    if floor_val:
+        lines.append(f"🏢 Mərtəbə: {floor_val}")
+    lines.extend(
+        [
+            f"📍 {region_name}",
+            f"🏠 {address_line}",
+            f"🧾 {summary}",
+        ]
+    )
+    text = "\n".join(lines)
 
     link = ev.get("link") or ev.get("source_link")
     if link:
@@ -17124,7 +17263,11 @@ def render_listing_for_user(
         listing, admin_mode=session.get("mode"), chat_id=chat_id
     )
     markup = build_listing_navigation_keyboard(
-        is_fav, listing_link, wa_url, visibility_button=visibility_button
+        is_fav,
+        listing_link,
+        wa_url,
+        show_hide_button=is_admin(chat_id),
+        visibility_button=visibility_button,
     )
     try:
         markup_signature = json.dumps(markup.to_dic(), sort_keys=True)
@@ -17506,6 +17649,12 @@ def cb_listing_hide(c):
     if not ensure_allowed_cb(c):
         return
     chat_id = c.message.chat.id
+    if not is_admin(chat_id):
+        try:
+            bot.answer_callback_query(c.id, "Bu əməliyyat yalnız admin üçündür.")
+        except Exception:
+            pass
+        return
     session = get_active_listing_session(chat_id)
     if not session or not session.get("result_ids"):
         try:
