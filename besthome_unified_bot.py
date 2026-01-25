@@ -17753,6 +17753,17 @@ def render_prop_step(chat_id, message=None):
 
 def render_region_step(chat_id, message=None):
     st = search_state.setdefault(chat_id, {})
+    if st.get("step") in {
+        "rayon",
+        "price",
+        "price_min",
+        "price_max",
+        "rooms",
+        "floor",
+        "floor_manual",
+        "results",
+    }:
+        return
     st["step"] = "region"
     mk = types.InlineKeyboardMarkup()
     mk.add(types.InlineKeyboardButton("Bütün ərazilər", callback_data="fs|rg|all"))
@@ -17929,13 +17940,19 @@ def cb_structured(c):
         render_region_step(chat_id, c.message)
     elif action == "rg":
         filters = st.setdefault("filters", {})
-        filters["region"] = parts[2]
+        region_code = parts[2]
         filters.pop("rayon", None)
+        if region_code == "all":
+            filters["region"] = None
+            structured_push_history(chat_id)
+            render_price_step(chat_id, c.message)
+            return
+        filters["region"] = region_code
         structured_push_history(chat_id)
-        if parts[2] == "sum":
+        if region_code == "sum":
             filters["rayon"] = "Sumqayıt"
             render_price_step(chat_id, c.message)
-        elif parts[2] == "abs":
+        elif region_code == "abs":
             filters["rayon"] = "Abşeron"
             render_price_step(chat_id, c.message)
         else:
