@@ -15880,10 +15880,15 @@ def process_saved_search_notifications():
     if not searches:
         return
 
-    now_iso = datetime.utcnow().isoformat()
+    cycle_ts = datetime.utcnow()
+    cycle_iso = cycle_ts.isoformat()
+    notified_this_cycle = set()
 
     for s in searches:
         if str(s.get("is_active", 1)) in {"0", "False", "false"}:
+            continue
+        criteria_id = s.get("id")
+        if criteria_id in notified_this_cycle:
             continue
         since_raw = s.get("last_notified_at") or s.get("created_at")
         try:
@@ -15899,29 +15904,36 @@ def process_saved_search_notifications():
         if not matches:
             continue
 
-        listing_ids = []
+        listing_ids = set()
         for ev in matches:
             listing_id = ev.get("id") or ev.get("ID") or ev.get("Elan_kodu")
             if listing_id is None:
                 continue
             try:
-                listing_ids.append(int(listing_id))
+                listing_ids.add(int(listing_id))
             except Exception:
                 continue
 
-        new_count = ensure_notification_records(s["chat_id"], s.get("id"), listing_ids)
+        if not listing_ids:
+            continue
+
+        new_count = ensure_notification_records(
+            s["chat_id"], criteria_id, list(listing_ids)
+        )
+
+        if new_count <= 0:
+            continue
 
         conn = get_local_conn()
         cur = conn.cursor()
         cur.execute(
             "UPDATE saved_searches SET last_notified_at=? WHERE id=?",
-            (now_iso, s.get("id")),
+            (cycle_iso, criteria_id),
         )
         conn.commit()
         conn.close()
 
-        if new_count <= 0:
-            continue
+        notified_this_cycle.add(criteria_id)
 
         text = (
             f"🔔 Axtardığınız kriteriyaya uyğun {new_count} yeni elan tapıldı — "
