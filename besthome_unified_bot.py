@@ -636,6 +636,9 @@ DB_UPDATE_VALIDATE_TIMEOUT_SECONDS = 60
 DB_UPDATE_REPLACE_TIMEOUT_SECONDS = 60
 DB_UPDATE_STATE_PATH = os.path.join(DATA_DIR, "db_update_state.json")
 LAST_DB_LINK_PATH = os.path.join(DATA_DIR, "last_db_link.txt")
+SAVED_SEARCH_NOTIFY_STATE_PATH = os.path.join(
+    DATA_DIR, "saved_search_notify_state.json"
+)
 DB_UPDATE_TMP_DIR = "/tmp/besthome_update"
 DB_UPDATE_BACKUP_DIR = "/tmp/besthome_backups"
 DB_UPDATE_ZIP_PATH = "/tmp/besthome_update.zip"
@@ -1610,6 +1613,29 @@ def _save_db_update_state_file(state: Dict[str, Any]) -> None:
             json.dump(state, f)
     except Exception:
         logger.exception("Failed to write db update state file")
+
+
+def _load_saved_search_notify_state() -> Dict[str, Any]:
+    if not os.path.exists(SAVED_SEARCH_NOTIFY_STATE_PATH):
+        return {"criteria": {}}
+    try:
+        with open(SAVED_SEARCH_NOTIFY_STATE_PATH, "r", encoding="utf-8") as f:
+            state = json.load(f)
+    except Exception:
+        logger.exception("Failed to read saved search notify state file")
+        return {"criteria": {}}
+    if not isinstance(state, dict):
+        return {"criteria": {}}
+    state.setdefault("criteria", {})
+    return state
+
+
+def _save_saved_search_notify_state(state: Dict[str, Any]) -> None:
+    try:
+        with open(SAVED_SEARCH_NOTIFY_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except Exception:
+        logger.exception("Failed to write saved search notify state file")
 
 
 def save_last_db_link(link: str) -> None:
@@ -15882,14 +15908,15 @@ def process_saved_search_notifications():
 
     cycle_ts = datetime.utcnow()
     cycle_iso = cycle_ts.isoformat()
-    notified_this_cycle = set()
+    scan_id = uuid.uuid4().hex
+    notify_state = _load_saved_search_notify_state()
+    criteria_state = notify_state.setdefault("criteria", {})
+    pending_notifications: Dict[int, Dict[str, Any]] = {}
 
     for s in searches:
         if str(s.get("is_active", 1)) in {"0", "False", "false"}:
             continue
         criteria_id = s.get("id")
-        if criteria_id in notified_this_cycle:
-            continue
         since_raw = s.get("last_notified_at") or s.get("created_at")
         try:
             since_dt = (
@@ -15917,8 +15944,39 @@ def process_saved_search_notifications():
         if not listing_ids:
             continue
 
+        pending_notifications[criteria_id] = {
+            "criteria": s,
+            "listing_ids": listing_ids,
+        }
+
+    if not pending_notifications:
+        return
+
+    state_updated = False
+    for criteria_id, payload in pending_notifications.items():
+        criteria = payload["criteria"]
+        listing_ids = payload["listing_ids"]
+        state_key = str(criteria_id)
+        last_scan_id = criteria_state.get(state_key, {}).get("last_notified_scan_id")
+        if last_scan_id == scan_id:
+            continue
+
+        last_notified_raw = criteria.get("last_notified_at") or criteria_state.get(
+            state_key, {}
+        ).get("last_notified_at")
+        last_notified_at = None
+        try:
+            if last_notified_raw:
+                last_notified_at = datetime.fromisoformat(str(last_notified_raw))
+        except Exception:
+            last_notified_at = None
+
+        if last_notified_at:
+            if cycle_ts - last_notified_at < timedelta(minutes=10):
+                continue
+
         new_count = ensure_notification_records(
-            s["chat_id"], criteria_id, list(listing_ids)
+            criteria["chat_id"], criteria_id, list(listing_ids)
         )
 
         if new_count <= 0:
@@ -15933,7 +15991,11 @@ def process_saved_search_notifications():
         conn.commit()
         conn.close()
 
-        notified_this_cycle.add(criteria_id)
+        criteria_state[state_key] = {
+            "last_notified_scan_id": scan_id,
+            "last_notified_at": cycle_iso,
+        }
+        state_updated = True
 
         text = (
             f"🔔 Axtardığınız kriteriyaya uyğun {new_count} yeni elan tapıldı — "
@@ -15946,18 +16008,21 @@ def process_saved_search_notifications():
             ),
             types.InlineKeyboardButton("⚙️ Kriteriyalar", callback_data="notif_crit"),
         )
-        if s.get("id"):
+        if criteria.get("id"):
             mk.add(
                 types.InlineKeyboardButton(
                     "❌ Bu kriteriyanı dayandır",
-                    callback_data=f"notif_stopcrit:{s['id']}",
+                    callback_data=f"notif_stopcrit:{criteria['id']}",
                 )
             )
 
         try:
-            bot.send_message(s["chat_id"], text, reply_markup=mk)
+            bot.send_message(criteria["chat_id"], text, reply_markup=mk)
         except Exception as e:
             print("⚠️ Notification send error:", e)
+
+    if state_updated:
+        _save_saved_search_notify_state(notify_state)
 
 
 def saved_search_worker():
