@@ -1,0 +1,79 @@
+{% extends 'base.html' %}
+{% block title %}DM Şablonları | BestHome Admin{% endblock %}
+{% block content %}
+<div class="alert alert-warning border-0 shadow-sm">
+  <strong>Vacib:</strong> Bu şablonlar yalnız <strong>gələn DM mesajlarına</strong> tətbiq olunur. Şərhlər (comments) üçün işləmir.
+</div>
+
+<div class="card border-0 shadow-sm mb-3">
+  <div class="card-header bg-white"><h5 class="mb-0">DM Auto-reply Templates</h5></div>
+  <div class="card-body">
+    <form method="post" action="/admin/templates" class="row g-2">
+      <div class="col-md-3">
+        <label class="form-label">Ad</label>
+        <input type="text" name="name" class="form-control" required>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">Trigger növü</label>
+        <select name="trigger_type" class="form-select" required>
+          <option value="exact">{{ labels['exact'] }}</option>
+          <option value="contains">{{ labels['contains'] }}</option>
+          <option value="regex">{{ labels['regex'] }}</option>
+          <option value="any">{{ labels['any'] }}</option>
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">Trigger dəyəri</label>
+        <input type="text" name="trigger_value" class="form-control" placeholder="exact/contains/regex üçün">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">Aktivlik</label>
+        <select name="is_active" class="form-select">
+          <option value="1">Aktiv</option>
+          <option value="0">Passiv</option>
+        </select>
+      </div>
+      <div class="col-12">
+        <label class="form-label">Cavab mətni</label>
+        <textarea name="reply_text" class="form-control" rows="3" required></textarea>
+      </div>
+      <div class="col-12">
+        <button type="submit" class="btn btn-primary">Şablon yarat</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card border-0 shadow-sm">
+  <div class="card-body p-0">
+    <div class="table-responsive">
+      <table class="table table-hover mb-0">
+        <thead class="table-light">
+          <tr>
+            <th>ID</th><th>Ad</th><th>Trigger</th><th>Dəyər</th><th>Cavab</th><th>Status</th><th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for t in templates_data %}
+          <tr>
+            <td>{{ t.id }}</td>
+            <td>{{ t.name }}</td>
+            <td>{{ labels[t.trigger_type] }}</td>
+            <td>{{ t.trigger_value }}</td>
+            <td>{{ t.reply_text }}</td>
+            <td>{% if t.is_active %}<span class="badge text-bg-success">Aktiv</span>{% else %}<span class="badge text-bg-secondary">Passiv</span>{% endif %}</td>
+            <td>
+              <form method="post" action="/admin/templates/{{ t.id }}/delete">
+                <button class="btn btn-sm btn-outline-danger" type="submit">Sil</button>
+              </form>
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="7" class="text-center text-muted py-4">Şablon yoxdur.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

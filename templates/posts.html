@@ -1,0 +1,14 @@
+{% extends 'base.html' %}
+{% block title %}Post Seçimi | BestHome Admin{% endblock %}
+{% block content %}
+<div class="card border-0 shadow-sm">
+  <div class="card-body p-5 text-center">
+    <h4 class="mb-3">Post picker hələ aktiv deyil</h4>
+    <p class="text-muted mb-2">OAuth not enabled, post picker not available yet.</p>
+    <p class="text-muted">
+      Bu funksiya üçün Instagram Graph API icazələri (məs: <code>instagram_manage_comments</code>,
+      <code>pages_read_engagement</code>) və Meta App Review mərhələsi tələb olunur.
+    </p>
+  </div>
+</div>
+{% endblock %}
