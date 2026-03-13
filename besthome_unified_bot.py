@@ -476,7 +476,7 @@ def handle_start(message):
     paid_until_dt = to_utc(parse_dt_safe(paid_until_raw))
     demo_end_dt = to_utc(parse_dt_safe(demo_end_raw))
 
-    user_active = (
+    user_active = is_admin(chat_id) or (
         (not blocked)
         and (
             (paid_until_dt is not None and paid_until_dt > now)
@@ -4213,14 +4213,22 @@ def ensure_fts_tables():
 
 def is_admin(chat_id: int) -> bool:
     try:
-        cid = int(chat_id)
+        cid = int(str(chat_id).strip())
     except Exception:
         return False
 
     try:
-        return cid in set(int(x) for x in ADMIN_IDS)
+        admin_ids = {int(str(x).strip()) for x in ADMIN_IDS}
+        if ADMIN_ID is not None:
+            admin_ids.add(int(str(ADMIN_ID).strip()))
+        return cid in admin_ids
     except Exception:
         return False
+
+
+# Access rule: admins always pass; non-admins must have an active subscription/demo.
+def has_access(chat_id: int) -> bool:
+    return is_admin(chat_id) or is_user_active(chat_id)
 
 
 def format_price(v) -> str:
@@ -6172,9 +6180,9 @@ def send_blocked_prompt(chat_id: int):
 def check_subscription(
     chat_id: int, silent: bool = False, allow_blocked: bool = False
 ) -> bool:
-    status = get_user_computed_status(chat_id)
-    if status == "ACTIVE":
+    if has_access(chat_id):
         return True
+    status = get_user_computed_status(chat_id)
     if status == "BLOCKED":
         if allow_blocked:
             return True
@@ -6192,7 +6200,7 @@ def check_subscription(
 
 
 def is_user_allowed(chat_id: int) -> bool:
-    return is_user_active(chat_id)
+    return has_access(chat_id)
 
 
 def ensure_allowed(message, allow_blocked: bool = False) -> bool:
