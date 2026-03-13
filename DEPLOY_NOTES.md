@@ -67,3 +67,14 @@ Expected response:
 Not applicable in current setup because Telegram runs in **polling mode**, not webhook mode.
 - `setWebhook` is **not required**.
 - `getWebhookInfo` should normally show no active webhook URL when polling is used.
+
+
+## Storage paths (Render-safe defaults)
+The Telegram bot no longer hard-requires `/data` at import/startup.
+
+- Base directory env: `BASE_DATA_DIR` (recommended)
+- Backward-compatible alias: `DATA_DIR`
+- Default when unset: `/tmp/besthome`
+- Main DB default when `BESTHOME_DB_PATH` is unset: `/tmp/besthome/besthome.db`
+
+This prevents `PermissionError` on platforms where `/data` is not writable. Local SQLite files are now created only when related features initialize.
