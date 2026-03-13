@@ -196,15 +196,13 @@ WEB_APP_URL = (
 )
 EMLAK_BAZASI_URL = "https://emlak-bazasi.com/search/agency/"
 
-BASE_DATA_DIR = os.getenv("DATA_DIR", "/data")
+BASE_DATA_DIR = os.getenv("BASE_DATA_DIR") or os.getenv("DATA_DIR") or "/tmp/besthome"
+os.environ.setdefault("BASE_DATA_DIR", BASE_DATA_DIR)
 os.environ.setdefault("DATA_DIR", BASE_DATA_DIR)
-os.makedirs(BASE_DATA_DIR, exist_ok=True)
 DATA_DIR = BASE_DATA_DIR
 
-MAIN_DB = os.path.realpath(os.getenv("BESTHOME_DB_PATH", "/data/besthome.db"))
-MAIN_DB_DIR = os.path.dirname(MAIN_DB)
-if MAIN_DB_DIR:
-    os.makedirs(MAIN_DB_DIR, exist_ok=True)
+MAIN_DB_DEFAULT_PATH = os.path.join(BASE_DATA_DIR, "besthome.db")
+MAIN_DB = os.path.realpath(os.getenv("BESTHOME_DB_PATH", MAIN_DB_DEFAULT_PATH))
 LOCAL_DB = os.path.join(BASE_DATA_DIR, "local_data.db")
 AGENTS_DB = os.path.join(BASE_DATA_DIR, "agents.db")
 SUPPORT_THREAD_STATUS_OPEN = "OPEN"
@@ -217,6 +215,18 @@ support_last_admin_notify_ts: Dict[int, float] = {}
 welcome_back_sent: Set[int] = set()
 
 AZ_PHONE_PREFIXES = {"50", "51", "55", "70", "77", "99"}
+
+
+def _ensure_parent_dir(path: str) -> bool:
+    parent_dir = os.path.dirname(path)
+    if not parent_dir:
+        return True
+    try:
+        os.makedirs(parent_dir, exist_ok=True)
+        return True
+    except Exception as exc:
+        logger.warning("Could not create parent directory for %s: %s", path, exc)
+        return False
 
 
 def _load_bot_token():
@@ -1004,6 +1014,7 @@ def close_all_main_conns():
 
 
 def get_main_conn():
+    _ensure_parent_dir(MAIN_DB)
     conn = sqlite3.connect(MAIN_DB)
     conn.row_factory = sqlite3.Row
     register_main_conn(conn)
@@ -1011,12 +1022,14 @@ def get_main_conn():
 
 
 def get_local_conn():
+    _ensure_parent_dir(LOCAL_DB)
     conn = sqlite3.connect(LOCAL_DB, check_same_thread=False)  # 🔥 ÇOX VACİB
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def get_db():
+    _ensure_parent_dir(LOCAL_DB)
     conn = sqlite3.connect(LOCAL_DB, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -1024,6 +1037,7 @@ def get_db():
 
 
 def get_agents_conn():
+    _ensure_parent_dir(AGENTS_DB)
     conn = sqlite3.connect(AGENTS_DB, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
@@ -1609,6 +1623,8 @@ def _load_db_update_state_file() -> Dict[str, Any]:
 
 def _save_db_update_state_file(state: Dict[str, Any]) -> None:
     try:
+        if not _ensure_parent_dir(DB_UPDATE_STATE_PATH):
+            return
         with open(DB_UPDATE_STATE_PATH, "w", encoding="utf-8") as f:
             json.dump(state, f)
     except Exception:
@@ -1632,6 +1648,8 @@ def _load_saved_search_notify_state() -> Dict[str, Any]:
 
 def _save_saved_search_notify_state(state: Dict[str, Any]) -> None:
     try:
+        if not _ensure_parent_dir(SAVED_SEARCH_NOTIFY_STATE_PATH):
+            return
         with open(SAVED_SEARCH_NOTIFY_STATE_PATH, "w", encoding="utf-8") as f:
             json.dump(state, f)
     except Exception:
@@ -1640,6 +1658,8 @@ def _save_saved_search_notify_state(state: Dict[str, Any]) -> None:
 
 def save_last_db_link(link: str) -> None:
     try:
+        if not _ensure_parent_dir(LAST_DB_LINK_PATH):
+            return
         with open(LAST_DB_LINK_PATH, "w", encoding="utf-8") as f:
             f.write((link or "").strip())
     except Exception:
@@ -2107,7 +2127,8 @@ def ensure_tmp_workspace():
 
 
 def ensure_sufficient_disk_space(admin_id: int):
-    usage = shutil.disk_usage(DATA_DIR)
+    disk_usage_target = DATA_DIR if os.path.isdir(DATA_DIR) else "/tmp"
+    usage = shutil.disk_usage(disk_usage_target)
     if usage.free < 200 * 1024 * 1024:
         logger.warning("❌ Update aborted: disk full")
         safe_admin_step(admin_id, "❌ Disk doludur. Köhnə backup-lar silinməlidir.")
@@ -3114,6 +3135,7 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
             raise RuntimeError("DB replace failed: runtime fingerprint mismatch")
         logger.info("[VERIFY] outcome=REPLACED_OK")
 
+        _ensure_parent_dir(MAIN_DB)
         conn = sqlite3.connect(MAIN_DB)
         try:
             ensure_created_at_column(
@@ -3220,6 +3242,7 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
 
 
 def sanity_check_main_db():
+    _ensure_parent_dir(MAIN_DB)
     conn = sqlite3.connect(MAIN_DB)
     try:
         cur = conn.cursor()
@@ -3230,7 +3253,7 @@ def sanity_check_main_db():
 
 
 def init_local_db():
-    os.makedirs(BASE_DATA_DIR, exist_ok=True)
+    _ensure_parent_dir(LOCAL_DB)
     conn = get_local_conn()
     cur = conn.cursor()
 
@@ -4003,7 +4026,7 @@ def init_local_db():
 
 def init_agents_db():
     """Vasitəçi elanları üçün ayrıca baza."""
-    os.makedirs(BASE_DATA_DIR, exist_ok=True)
+    _ensure_parent_dir(AGENTS_DB)
     conn = get_agents_conn()
     cur = conn.cursor()
     cur.execute(
@@ -6792,6 +6815,7 @@ def count_main_active_listings(
     if not os.path.exists(MAIN_DB):
         return 0
     if use_direct_conn or main_db_update_in_progress.is_set():
+        _ensure_parent_dir(MAIN_DB)
         conn = sqlite3.connect(MAIN_DB)
         conn.row_factory = sqlite3.Row
         use_direct_conn = True
@@ -27519,7 +27543,7 @@ def create_flask_app():
 
     @app.route("/download/local_data.db", methods=["GET"])
     def download_local_db():
-        file_path = "/opt/render/project/src/local_data.db"
+        file_path = LOCAL_DB
         if os.path.exists(file_path):
             return send_file(file_path, as_attachment=True)
         return "File not found", 404
