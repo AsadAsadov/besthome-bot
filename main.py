@@ -1,3 +1,5 @@
+"""Instagram/Meta webhook web app entrypoint (not the Telegram polling worker)."""
+
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
