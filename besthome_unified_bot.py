@@ -200,6 +200,8 @@ BASE_DATA_DIR = os.getenv("BASE_DATA_DIR") or os.getenv("DATA_DIR") or "/tmp/bes
 os.environ.setdefault("BASE_DATA_DIR", BASE_DATA_DIR)
 os.environ.setdefault("DATA_DIR", BASE_DATA_DIR)
 DATA_DIR = BASE_DATA_DIR
+AUTO_DB_URL = os.getenv("AUTO_DB_URL", "").strip()
+AUTO_DB_FILE_ID = os.getenv("AUTO_DB_FILE_ID", "").strip()
 
 MAIN_DB_DEFAULT_PATH = os.path.join(BASE_DATA_DIR, "besthome.db")
 MAIN_DB = os.path.realpath(os.getenv("BESTHOME_DB_PATH", MAIN_DB_DEFAULT_PATH))
@@ -2281,6 +2283,14 @@ def build_gdrive_direct_download_url(file_id: str) -> str:
     )
 
 
+def resolve_auto_db_source_url() -> Optional[str]:
+    if AUTO_DB_URL:
+        return AUTO_DB_URL
+    if AUTO_DB_FILE_ID:
+        return build_gdrive_direct_download_url(AUTO_DB_FILE_ID)
+    return None
+
+
 def _log_download_response(
     normalized_url: str,
     response: requests.Response,
@@ -2476,6 +2486,17 @@ def extract_main_db_from_zip(zip_path: str) -> Tuple[str, str]:
         bad_file = zf.testzip()
         if bad_file:
             raise RuntimeError(f"ZIP faylında zədəli fayl var: {bad_file}")
+        base_dir = os.path.realpath(temp_dir)
+        for member in zf.infolist():
+            member_name = member.filename
+            if not member_name or member_name.endswith("/"):
+                continue
+            member_path = os.path.realpath(os.path.join(base_dir, member_name))
+            if not (
+                member_path == base_dir
+                or member_path.startswith(base_dir + os.sep)
+            ):
+                raise RuntimeError(f"ZIP içində təhlükəli yol aşkarlandı: {member_name}")
         zf.extractall(temp_dir)
     candidates: List[Tuple[int, str]] = []
     for current_root, _dirs, files in os.walk(temp_dir):
@@ -2973,6 +2994,63 @@ def atomic_replace_main_db(new_db_path: str) -> Optional[str]:
         logger.debug("[DEBUG] inode/size unchanged")
     logger.info("✅ DB REAL olaraq yeniləndi: %s", MAIN_DB)
     return backup_path
+
+
+def restore_main_db_from_auto_source(force: bool = False) -> bool:
+    if os.path.exists(MAIN_DB) and not force:
+        logger.info("[AUTO-RESTORE] MAIN_DB already exists, skipping download")
+        return False
+
+    source_url = resolve_auto_db_source_url()
+    if not source_url:
+        logger.warning(
+            "[AUTO-RESTORE] MAIN_DB missing and no source configured. Set AUTO_DB_URL or AUTO_DB_FILE_ID"
+        )
+        return False
+
+    logger.info("[AUTO-RESTORE] Starting DB restore from Google Drive source")
+    logger.info("[AUTO-RESTORE] Source URL: %s", source_url)
+    temp_download_path = None
+    extracted_db_path = None
+    extracted_dir = None
+    try:
+        os.makedirs(BASE_DATA_DIR, exist_ok=True)
+        _ensure_parent_dir(MAIN_DB)
+
+        temp_download_path, is_zip, _download_info = download_main_db_file(source_url)
+        if not is_zip:
+            raise RuntimeError("Downloaded file is not a ZIP archive")
+
+        extracted_db_path, extracted_dir = extract_main_db_from_zip(temp_download_path)
+        listing_count = validate_main_db_file(extracted_db_path)
+        logger.info(
+            "[AUTO-RESTORE] Extracted DB validated successfully listings=%s",
+            listing_count,
+        )
+
+        incoming_db_path = os.path.realpath(extracted_db_path)
+        with main_db_replace_lock:
+            close_all_main_conns()
+            prepare_main_db_for_swap()
+            atomic_replace_main_db(incoming_db_path)
+
+        if not os.path.exists(MAIN_DB):
+            raise RuntimeError("Restored DB file not found at target path")
+
+        logger.info("[AUTO-RESTORE] Restore completed successfully path=%s", MAIN_DB)
+        return True
+    except Exception:
+        logger.exception("[AUTO-RESTORE] Restore failed")
+        raise
+    finally:
+        for path in (temp_download_path, extracted_db_path):
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+        if extracted_dir and os.path.exists(extracted_dir):
+            shutil.rmtree(extracted_dir, ignore_errors=True)
 
 
 def send_db_update_progress(admin_id: int, message: str) -> None:
@@ -27480,6 +27558,8 @@ def _initialize_app_state():
     if _app_initialized:
         return
     logger.info("DATA_DIR resolved to %s", BASE_DATA_DIR)
+    if not os.path.exists(MAIN_DB):
+        restore_main_db_from_auto_source(force=False)
     _log_main_db_boot_status()
     _log_db_status()
     init_local_db()
