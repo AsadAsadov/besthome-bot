@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import sys
+from urllib.parse import parse_qs, urlparse
 from pathlib import Path
 from typing import Optional
 
@@ -37,8 +38,78 @@ def last_link_path() -> Path:
     return script_dir() / "last_db_link.txt"
 
 
+def last_file_id_path() -> Path:
+    return script_dir() / "last_db_file_id.txt"
+
+
 def notify_path() -> Path:
     return script_dir() / "notify.py"
+
+
+def extract_file_id(value: str) -> Optional[str]:
+    candidate = value.strip()
+    if not candidate:
+        return None
+
+    if "drive.google.com" not in candidate:
+        return candidate
+
+    parsed = urlparse(candidate)
+    query_id = parse_qs(parsed.query).get("id", [None])[0]
+    if query_id:
+        return query_id
+
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if "d" in path_parts:
+        index = path_parts.index("d")
+        if index + 1 < len(path_parts):
+            return path_parts[index + 1]
+
+    return None
+
+
+def read_saved_file_id() -> Optional[str]:
+    id_file = last_file_id_path()
+    if id_file.exists():
+        file_id = extract_file_id(id_file.read_text(encoding="utf-8"))
+        if file_id:
+            log(f"Using saved file_id from {id_file}: {file_id}")
+            return file_id
+
+    link_file = last_link_path()
+    if link_file.exists():
+        file_id = extract_file_id(link_file.read_text(encoding="utf-8"))
+        if file_id:
+            log(f"Using saved file_id from {link_file}: {file_id}")
+            return file_id
+
+    return None
+
+
+def save_last_file_id_atomic(file_id: str) -> None:
+    destination = last_file_id_path()
+    temp_path = destination.with_suffix(destination.suffix + ".tmp")
+    temp_path.write_text(f"{file_id}\n", encoding="utf-8")
+    os.replace(str(temp_path), str(destination))
+    log(f"Saved file_id atomically to: {destination}")
+
+
+def find_existing_file_id(service: object, filename: str) -> Optional[str]:
+    safe_filename = filename.replace("'", "\\'")
+    query = f"name = '{safe_filename}' and trashed = false"
+    result = service.files().list(
+        q=query,
+        spaces="drive",
+        fields="files(id, name, modifiedTime)",
+        orderBy="modifiedTime desc",
+        pageSize=1,
+    ).execute()
+    files = result.get("files", [])
+    if files:
+        file_id = files[0]["id"]
+        log(f"Found existing Drive file by name: {filename} (file_id={file_id})")
+        return file_id
+    return None
 
 
 def save_token(creds: Credentials) -> None:
@@ -131,18 +202,49 @@ def upload_and_get_direct_link(zip_path: Path) -> str:
         raise FileNotFoundError(f"ZIP file not found: {zip_path}")
 
     service = get_service()
-    metadata = {"name": zip_path.name}
     media = MediaFileUpload(str(zip_path), mimetype="application/zip", resumable=True)
+    metadata = {"name": zip_path.name}
 
-    log(f"Uploading ZIP: {zip_path}")
-    result = service.files().create(
-        body=metadata,
-        media_body=media,
-        fields="id, webViewLink",
-    ).execute()
+    file_id = read_saved_file_id()
+    if file_id:
+        try:
+            log(f"Updating existing Drive file_id={file_id}")
+            result = service.files().update(
+                fileId=file_id,
+                body=metadata,
+                media_body=media,
+                fields="id, webViewLink",
+            ).execute()
+        except HttpError as exc:
+            status_code = getattr(getattr(exc, "resp", None), "status", None)
+            if status_code == 404:
+                log("Saved file_id no longer exists on Drive. Will search/create.")
+                file_id = None
+            else:
+                raise
+
+    if not file_id:
+        file_id = find_existing_file_id(service, zip_path.name)
+
+        if file_id:
+            log(f"Updating Drive file: {zip_path} -> file_id={file_id}")
+            result = service.files().update(
+                fileId=file_id,
+                body=metadata,
+                media_body=media,
+                fields="id, webViewLink",
+            ).execute()
+        else:
+            log(f"Uploading ZIP as new file: {zip_path}")
+            result = service.files().create(
+                body=metadata,
+                media_body=media,
+                fields="id, webViewLink",
+            ).execute()
 
     file_id = result["id"]
-    log(f"Upload complete. file_id={file_id}")
+    log(f"Upload complete. stable file_id={file_id}")
+    save_last_file_id_atomic(file_id)
 
     log("Setting file permission: anyone with link can read")
     service.permissions().create(
