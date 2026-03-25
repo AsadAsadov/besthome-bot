@@ -1,6 +1,17 @@
 """Render entrypoint for running the Telegram bot worker (polling mode)."""
 
 import os
+import threading
+
+from flask import Flask
+
+
+flask_app = Flask(__name__)
+
+
+@flask_app.route("/")
+def healthcheck() -> str:
+    return "Bot is running"
 
 
 def _require_env(name: str) -> str:
@@ -25,8 +36,16 @@ def bootstrap_env() -> None:
         os.environ["ADMIN_IDS"] = admin_id
 
 
+def run_http_server() -> None:
+    port = int(os.getenv("PORT", "10000"))
+    flask_app.run(host="0.0.0.0", port=port, use_reloader=False)
+
+
 if __name__ == "__main__":
     bootstrap_env()
+
+    server_thread = threading.Thread(target=run_http_server, daemon=True)
+    server_thread.start()
 
     from besthome_unified_bot import main as run_telegram_bot
 
