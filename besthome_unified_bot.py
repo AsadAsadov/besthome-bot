@@ -202,6 +202,8 @@ os.environ.setdefault("DATA_DIR", BASE_DATA_DIR)
 DATA_DIR = BASE_DATA_DIR
 AUTO_DB_URL = os.getenv("AUTO_DB_URL", "").strip()
 AUTO_DB_FILE_ID = os.getenv("AUTO_DB_FILE_ID", "").strip()
+DRIVE_DIRECT_LINK = os.getenv("DRIVE_DIRECT_LINK", "DRIVE_DIRECT_LINK").strip()
+DB_SYNC_INTERVAL_SECONDS = 7200
 
 MAIN_DB_DEFAULT_PATH = os.path.join(BASE_DATA_DIR, "besthome.db")
 MAIN_DB = os.path.realpath(os.getenv("BESTHOME_DB_PATH", MAIN_DB_DEFAULT_PATH))
@@ -1016,11 +1018,15 @@ def close_all_main_conns():
 
 
 def get_main_conn():
-    _ensure_parent_dir(MAIN_DB)
-    conn = sqlite3.connect(MAIN_DB)
+    conn = get_conn()
     conn.row_factory = sqlite3.Row
     register_main_conn(conn)
     return conn
+
+
+def get_conn():
+    _ensure_parent_dir(MAIN_DB)
+    return sqlite3.connect(MAIN_DB)
 
 
 def get_local_conn():
@@ -28290,6 +28296,7 @@ def main():
     threading.Thread(target=favorite_price_worker, daemon=True).start()
     threading.Thread(target=subscription_notifier, daemon=True).start()
     threading.Thread(target=keepalive_worker, daemon=True).start()
+    threading.Thread(target=sync_loop, daemon=True).start()
 
     create_flask_app()
     run_bot()
@@ -28322,3 +28329,59 @@ def keepalive_worker(interval_seconds: int = 300):
         except Exception as exc:
             logger.warning("Keep-alive ping failed: %s", exc)
         time.sleep(interval_seconds)
+
+
+def download_db() -> bool:
+    if not DRIVE_DIRECT_LINK or DRIVE_DIRECT_LINK == "DRIVE_DIRECT_LINK":
+        logger.warning("DB sync skipped: DRIVE_DIRECT_LINK is not configured.")
+        return False
+
+    tmp_path = None
+    try:
+        _ensure_parent_dir(MAIN_DB)
+        with requests.get(DRIVE_DIRECT_LINK, stream=True, timeout=60) as response:
+            response.raise_for_status()
+            with tempfile.NamedTemporaryFile(
+                dir=os.path.dirname(MAIN_DB) or None,
+                prefix="besthome_sync_",
+                suffix=".tmp",
+                delete=False,
+            ) as tmp_file:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        tmp_file.write(chunk)
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
+                tmp_path = tmp_file.name
+
+        if not tmp_path or not os.path.exists(tmp_path):
+            raise RuntimeError("Temporary DB file was not created.")
+        if os.path.getsize(tmp_path) == 0:
+            raise RuntimeError("Downloaded DB file is empty.")
+
+        with main_db_replace_lock:
+            close_all_main_conns()
+            prepare_main_db_for_swap()
+            os.replace(tmp_path, MAIN_DB)
+            tmp_path = None
+
+        logger.info("✅ Database synced from Google Drive.")
+        return True
+    except Exception as exc:
+        logger.warning("DB sync failed: %s", exc)
+        return False
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+
+def sync_loop():
+    while True:
+        try:
+            download_db()
+        except Exception:
+            logger.exception("Unexpected error in DB sync loop")
+        time.sleep(DB_SYNC_INTERVAL_SECONDS)
