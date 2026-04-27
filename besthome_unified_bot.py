@@ -3649,8 +3649,6 @@ def init_local_db():
             price_max INTEGER,
             rayon TEXT,
             prop_type TEXT,
-            floor_min INTEGER,
-            floor_max INTEGER,
             created_at TEXT,
             last_notified_at TEXT,
             is_active INTEGER DEFAULT 1
@@ -3928,10 +3926,6 @@ def init_local_db():
         cur.execute("ALTER TABLE saved_searches ADD COLUMN created_at TEXT")
     if "is_active" not in saved_cols:
         cur.execute("ALTER TABLE saved_searches ADD COLUMN is_active INTEGER DEFAULT 1")
-    if "floor_min" not in saved_cols:
-        cur.execute("ALTER TABLE saved_searches ADD COLUMN floor_min INTEGER")
-    if "floor_max" not in saved_cols:
-        cur.execute("ALTER TABLE saved_searches ADD COLUMN floor_max INTEGER")
 
     conn.commit()
     conn.close()
@@ -6054,13 +6048,6 @@ def reset_user_state(chat_id: int):
     admin_update_state.pop(chat_id, None)
 
 def reset_search_state(chat_id: int):
-    state = search_state.get(chat_id)
-    if (
-        state
-        and state.get("mode") == "structured"
-        and state.get("awaiting_floor_range")
-    ):
-        pass
     search_state.pop(chat_id, None)
 
 def compute_total_pages(total_count: int) -> int:
@@ -6592,7 +6579,9 @@ def build_absheron_settlement_sql(
     params = ["%abşeron%"] * len(region_targets)
 
     settlement_col = cols.get("settlement")
-    if settlement_col and settlement_val:
+    if settlement_val:
+        if not settlement_col:
+            return " AND 1=0", []
         sql += f' AND LOWER(COALESCE({prefix}"{settlement_col}", \'\')) = LOWER(?)'
         params.append(settlement_val)
     return sql, params
@@ -11561,7 +11550,6 @@ def start_structured_search_from_menu(chat_id: int, op_code: str):
         "mode": "structured",
         "filters": {},
         "history": [],
-        "awaiting_floor_range": False,
         "step": "op",
     }
     search_state[chat_id]["filters"]["op"] = op_code
@@ -11874,19 +11862,6 @@ def format_saved_search_entry(row: dict) -> str:
     prop_type = _row_value_safe(row, "prop_type")
     if prop_type:
         parts.append(f"🏠 {prop_type}")
-
-    floor_min = _row_value_safe(row, "floor_min")
-    floor_max = _row_value_safe(row, "floor_max")
-    if floor_min is not None or floor_max is not None:
-        if floor_min is not None and floor_max is not None:
-            if floor_min == floor_max:
-                parts.append(f"🏢 {floor_min}")
-            else:
-                parts.append(f"🏢 {floor_min}-{floor_max}")
-        elif floor_min is not None:
-            parts.append(f"🏢 {floor_min}+")
-        elif floor_max is not None:
-            parts.append(f"🏢 0-{floor_max}")
 
     return " | ".join(parts)
 
@@ -12333,9 +12308,9 @@ def save_notification_rule(user_id: int, data: dict) -> Optional[int]:
         """
         INSERT INTO saved_searches (
             chat_id, operation, rooms, price_min, price_max, rayon, prop_type,
-            floor_min, floor_max, created_at, last_notified_at, is_active
+            created_at, last_notified_at, is_active
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
         """,
         (
             user_id,
@@ -12345,8 +12320,6 @@ def save_notification_rule(user_id: int, data: dict) -> Optional[int]:
             data.get("price_max"),
             data.get("rayon"),
             data.get("prop_type"),
-            data.get("floor_min"),
-            data.get("floor_max"),
             datetime.utcnow().isoformat(),
             None,
         ),
@@ -13678,62 +13651,6 @@ def handle_notification_rule_rooms(message):
             bot.send_message(chat_id, "⚠️ Otaq sayını rəqəm ilə yazın.")
             return
         state["rooms"] = int(value)
-    state["step"] = "floor"
-    notification_rule_state[chat_id] = state
-    bot.send_message(
-        chat_id,
-        "🏢 Mərtəbə yazın (istəyə görə, məs: 3 və ya 1-3):",
-        reply_markup=build_optional_input_keyboard(),
-    )
-
-@bot.message_handler(
-    func=lambda m: notification_rule_state.get(m.chat.id, {}).get("step") == "floor"
-)
-def handle_notification_rule_floor(message):
-    if not ensure_allowed(message):
-        return
-    chat_id = message.chat.id
-    text = (message.text or "").strip()
-    state = notification_rule_state.get(chat_id, {})
-    if text == "⬅️ Geri":
-        state["step"] = "rooms"
-        notification_rule_state[chat_id] = state
-        bot.send_message(
-            chat_id,
-            "🛏 Otaq sayı yazın (istəyə görə):",
-            reply_markup=build_optional_input_keyboard(),
-        )
-        return
-    if text == "⚪️ Keç":
-        state["floor_min"] = None
-        state["floor_max"] = None
-        notification_rule_state[chat_id] = state
-        state["step"] = "confirm"
-        notification_rule_state[chat_id] = state
-        send_notification_rule_confirm_prompt(chat_id)
-        return
-
-    txt_clean = re.sub(r"\s+", "", text)
-    single_match = re.fullmatch(r"\d+", txt_clean)
-    range_match = re.fullmatch(r"\d+-\d+", txt_clean)
-
-    if single_match:
-        floor_min = floor_max = int(txt_clean)
-    elif range_match:
-        parts = txt_clean.split("-")
-        try:
-            floor_min = int(parts[0])
-            floor_max = int(parts[1])
-        except Exception:
-            bot.send_message(chat_id, "❌ Yanlış format. Məsələn: 3 və ya 1-3")
-            return
-    else:
-        bot.send_message(chat_id, "❌ Yanlış format. Məsələn: 3 və ya 1-3")
-        return
-
-    state["floor_min"] = floor_min
-    state["floor_max"] = floor_max
-    notification_rule_state[chat_id] = state
     state["step"] = "confirm"
     notification_rule_state[chat_id] = state
     send_notification_rule_confirm_prompt(chat_id)
@@ -13751,11 +13668,11 @@ def cb_notification_rule_confirm(c):
         return
     action = c.data.split(":", 1)[1]
     if action == "back":
-        state["step"] = "floor"
+        state["step"] = "rooms"
         notification_rule_state[chat_id] = state
         bot.send_message(
             chat_id,
-            "🏢 Mərtəbə yazın (istəyə görə, məs: 3 və ya 1-3):",
+            "🛏 Otaq sayı yazın (istəyə görə):",
             reply_markup=build_optional_input_keyboard(),
         )
     elif action == "save":
@@ -13776,8 +13693,6 @@ def finalize_notification_rule(chat_id: int):
         "price_max": state.get("price_max"),
         "rayon": ", ".join(state.get("rayons") or []),
         "prop_type": state.get("prop_type"),
-        "floor_min": state.get("floor_min"),
-        "floor_max": state.get("floor_max"),
     }
     rule_id = save_notification_rule(chat_id, data)
     if rule_id:
@@ -14395,16 +14310,6 @@ def search_flow_back_keyboard() -> types.InlineKeyboardMarkup:
 def price_input_keyboard() -> types.InlineKeyboardMarkup:
     return search_flow_back_keyboard()
 
-def parse_floor_value(ev: dict):
-    for k in ("floor", "Floor", "Mertebe", "mertebe"):
-        if ev.get(k):
-            num = parse_number(ev.get(k))
-            if num is not None:
-                return num
-    text = ev.get("summary") or ev.get("Umumi_melumat") or ""
-    num = parse_number(text)
-    return num
-
 def matches_region_rayon(ev: dict, filters: dict) -> bool:
     region = filters.get("region") or "all"
     rayon = filters.get("rayon")
@@ -14427,9 +14332,7 @@ def matches_region_rayon(ev: dict, filters: dict) -> bool:
             listing_region
         ):
             return False
-        if listing_settlement:
-            return listing_settlement == settlement.lower()
-        return settlement.lower() in listing_region
+        return listing_settlement == settlement.lower()
 
     if rayon and rayon != "all":
         return rayon.lower() in listing_region
@@ -14493,19 +14396,6 @@ def matches_rooms(ev: dict, room_code: str) -> bool:
         return room_val == desired
     except Exception:
         return True
-
-def matches_floor(ev: dict, floor_range):
-    if not floor_range:
-        return True
-    floor_val = parse_floor_value(ev)
-    if floor_val is None:
-        return True
-    mn, mx = floor_range
-    if mn is not None and floor_val < mn:
-        return False
-    if mx is not None and floor_val > mx:
-        return False
-    return True
 
 def compute_stats(
     conn: sqlite3.Connection,
@@ -15110,12 +15000,6 @@ def matches_saved_search(ev: dict, saved: dict) -> bool:
         elif prop_filter.lower() not in prop_text:
             return False
 
-    floor_min = saved.get("floor_min")
-    floor_max = saved.get("floor_max")
-    if floor_min is not None or floor_max is not None:
-        if not matches_floor(ev, (floor_min, floor_max)):
-            return False
-
     return True
 
 def load_recent_listings(since_dt: datetime):
@@ -15362,6 +15246,10 @@ def query_structured_results(
     date_days = filters.get("date_days")
     min_p = filters.get("min_price")
     max_p = filters.get("max_price")
+    region_for_debug = filters.get("rayon") or filters.get("region")
+    settlement_for_debug = filters.get("settlement")
+    print("FILTER DEBUG → region:", region_for_debug)
+    print("FILTER DEBUG → settlement:", settlement_for_debug)
     if min_p is None and max_p is None:
         price_code = filters.get("price", "s0")
         min_p, max_p = decode_price_range(price_code)
@@ -15427,8 +15315,6 @@ def query_structured_results(
         if not matches_region_rayon(ev, filters):
             continue
         if not matches_rooms(ev, filters.get("rooms")):
-            continue
-        if not matches_floor(ev, filters.get("floor_range")):
             continue
         filtered.append(ev)
 
@@ -16865,8 +16751,6 @@ def render_region_step(chat_id, message=None):
         "price_min",
         "price_max",
         "rooms",
-        "floor",
-        "floor_manual",
         "results",
     }:
         return
@@ -16933,27 +16817,12 @@ def render_room_step(chat_id, message=None):
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="fs|bk"))
     structured_send(chat_id, message, "🚪 Otaq sayını seç:", mk)
 
-def render_floor_step(chat_id, message=None):
-    st = search_state.setdefault(chat_id, {})
-    st["step"] = "floor"
-    mk = types.InlineKeyboardMarkup()
-    mk.add(
-        types.InlineKeyboardButton("1-3", callback_data="fs|fl|f13"),
-        types.InlineKeyboardButton("4-9", callback_data="fs|fl|f49"),
-    )
-    mk.add(types.InlineKeyboardButton("10+", callback_data="fs|fl|f10"))
-    mk.add(types.InlineKeyboardButton("Hamısı", callback_data="fs|fl|fall"))
-    mk.add(types.InlineKeyboardButton("✏️ Əl ilə daxil et", callback_data="fs|fm"))
-    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="fs|bk"))
-    structured_send(chat_id, message, "🏢 Mərtəbə seçin:", mk)
-
 def send_structured_start(chat_id, message=None):
     reset_search_state(chat_id)
     search_state[chat_id] = {
         "mode": "structured",
         "filters": {},
         "history": [],
-        "awaiting_floor_range": False,
         "step": "op",
     }
     render_op_step(chat_id, message)
@@ -16989,7 +16858,7 @@ def structured_go_back(chat_id, message=None):
     elif step == "rooms":
         render_room_step(chat_id, message)
     else:
-        render_floor_step(chat_id, message)
+        render_op_step(chat_id, message)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("fs|"))
 @callback_guard
@@ -17005,7 +16874,6 @@ def cb_structured(c):
             "mode": "structured",
             "filters": {},
             "history": [],
-            "awaiting_floor_range": False,
         },
     )
 
@@ -17023,7 +16891,6 @@ def cb_structured(c):
 
     if action == "op":
         st["history"] = []
-        st["awaiting_floor_range"] = False
         st["filters"] = {"op": parts[2]}
         structured_push_history(chat_id)
         render_date_range_step(chat_id, c.message)
@@ -17043,7 +16910,6 @@ def cb_structured(c):
             "min_price",
             "max_price",
             "rooms",
-            "floor_range",
         ):
             filters.pop(key, None)
         filters["prop"] = parts[2]
@@ -17110,37 +16976,14 @@ def cb_structured(c):
         set_price_range_step(chat_id, step=1)
     elif action == "rm":
         filters = st.setdefault("filters", {})
-        filters.pop("floor_range", None)
         if parts[2] == "r0":
             filters.pop("rooms", None)
         else:
             filters["rooms"] = parts[2]
         structured_push_history(chat_id)
-        prop = st.get("filters", {}).get("prop")
-        if prop in {"t", "q"}:
-            perform_structured_search(
-                chat_id,
-                offset=0,
-            )
-        else:
-            render_floor_step(chat_id, c.message)
-    elif action == "fl":
-        filters = st.setdefault("filters", {})
-        floor_val = FLOOR_PRESETS.get(parts[2])
-        if floor_val is None:
-            filters.pop("floor_range", None)
-        else:
-            filters["floor_range"] = floor_val
         perform_structured_search(
             chat_id,
             offset=0,
-        )
-    elif action == "fm":
-        structured_push_history(chat_id)
-        st["awaiting_floor_range"] = True
-        st["step"] = "floor_manual"
-        update_ui_message(
-            chat_id, chat_id, "✏️ Mərtəbəni yazın (məs: 3 və ya 1-3):", None
         )
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("settlement_"))
@@ -17155,7 +16998,6 @@ def cb_absheron_settlement(c):
             "mode": "structured",
             "filters": {},
             "history": [],
-            "awaiting_floor_range": False,
         },
     )
     settlement = c.data[len("settlement_") :].strip()
@@ -17171,46 +17013,6 @@ def cb_absheron_settlement(c):
     structured_push_history(chat_id)
     render_price_step(chat_id, c.message)
     safe_answer_callback_query(c.id)
-
-@bot.message_handler(
-    func=lambda m: search_state.get(m.chat.id, {}).get("awaiting_floor_range")
-)
-def handle_floor_range_input(message):
-    chat_id = message.chat.id
-    st = search_state.get(chat_id, {})
-    txt = (message.text or "").strip()
-    import re as _re
-
-    if not st:
-        return
-    delete_user_command_message(message)
-
-    txt_clean = _re.sub(r"\s+", "", txt)
-
-    single_match = _re.fullmatch(r"\d+", txt_clean)
-    range_match = _re.fullmatch(r"\d+-\d+", txt_clean)
-
-    if single_match:
-        mn = mx = int(txt_clean)
-    elif range_match:
-        parts = txt_clean.split("-")
-        try:
-            mn = int(parts[0])
-            mx = int(parts[1])
-        except Exception:
-            update_ui_message(
-                chat_id, chat_id, "❌ Yanlış format. Məsələn: 3 və ya 1-2", None
-            )
-            return
-    else:
-        update_ui_message(
-            chat_id, chat_id, "❌ Yanlış format. Məsələn: 3 və ya 1-2", None
-        )
-        return
-
-    st.setdefault("filters", {})["floor_range"] = (mn, mx)
-    st["awaiting_floor_range"] = False
-    perform_structured_search(chat_id, offset=0, edit_msg=None)
 
 def cancel_price_range_flow(chat_id: int) -> None:
     user_state[chat_id] = None
