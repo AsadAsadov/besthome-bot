@@ -11082,6 +11082,61 @@ def my_listings(message):
 
 # =============== ⭐ FAVORİLƏRİM ===============
 
+def _normalize_favorite_source(source: Optional[str]) -> str:
+    src = (source or "main").strip().lower()
+    return "main" if src in {"", "besthome", "main"} else src
+
+def is_favorite_entry(chat_id: int, source: str, listing_id: int) -> bool:
+    norm_source = _normalize_favorite_source(source)
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT 1
+        FROM favorites
+        WHERE chat_id=? AND source=? AND listing_id=?
+        LIMIT 1
+        """,
+        (chat_id, norm_source, listing_id),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return bool(row)
+
+def add_favorite_entry(chat_id: int, source: str, listing_id: int) -> bool:
+    norm_source = _normalize_favorite_source(source)
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO favorites (chat_id, listing_id, source, added_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (chat_id, listing_id, norm_source, datetime.utcnow().isoformat()),
+    )
+    inserted = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    if inserted:
+        record_favorite_price(norm_source, listing_id)
+    return inserted
+
+def remove_favorite_entry(chat_id: int, source: str, listing_id: int) -> bool:
+    norm_source = _normalize_favorite_source(source)
+    conn = get_local_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        DELETE FROM favorites
+        WHERE chat_id=? AND source=? AND listing_id=?
+        """,
+        (chat_id, norm_source, listing_id),
+    )
+    removed = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return removed
+
 @bot.message_handler(func=lambda m: m.text == "⭐ Favorilərim")
 def show_favorites(message):
     if message.text and message.text.startswith('/'):
