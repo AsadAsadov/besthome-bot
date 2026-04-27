@@ -83,7 +83,6 @@ ALLOWED_START_AREAS = {
 BOT_TOKEN = None
 BOT_USERNAME = None
 
-
 class _BotProxy:
     def __init__(self):
         self._bot = None
@@ -166,7 +165,6 @@ class _BotProxy:
 
         return attr
 
-
 ADMIN_ID = 1311851277
 CHANNEL_ID = -1001878623087  # Bot bu kanalda admin olmalıdır
 
@@ -220,7 +218,6 @@ welcome_back_sent: Set[int] = set()
 
 AZ_PHONE_PREFIXES = {"50", "51", "55", "70", "77", "99"}
 
-
 def _ensure_parent_dir(path: str) -> bool:
     parent_dir = os.path.dirname(path)
     if not parent_dir:
@@ -232,7 +229,6 @@ def _ensure_parent_dir(path: str) -> bool:
         logger.warning("Could not create parent directory for %s: %s", path, exc)
         return False
 
-
 def _load_bot_token():
     token = os.getenv("BOT_TOKEN")
     if not token:
@@ -240,7 +236,6 @@ def _load_bot_token():
             "BOT_TOKEN env dəyişəni tapılmadı. Zəhmət olmasa BOT_TOKEN dəyərini təyin edin."
         )
     return token
-
 
 def _log_db_status():
     for label, db_path in (
@@ -257,7 +252,6 @@ def _log_db_status():
         else:
             logger.warning("DB status %s path=%s MISSING", label, db_path)
 
-
 def _log_main_db_boot_status():
     logger.info("[BOOT] MAIN_DB resolved to: %s", MAIN_DB)
     logger.info("[BOOT] MAIN_DB real path: %s", os.path.realpath(MAIN_DB))
@@ -268,7 +262,6 @@ def _log_main_db_boot_status():
         logger.warning("[BOOT] MAIN_DB size: missing (file not found)")
     except Exception as exc:
         logger.warning("[BOOT] MAIN_DB size check failed: %s", exc)
-
 
 # ==============================
 # 🛡️ DB TƏHLÜKƏSİZLİK YOXLAMASI
@@ -293,7 +286,6 @@ payment_plan_selection: Dict[int, Dict[str, Any]] = {}
 
 logger = logging.getLogger("besthome_bot")
 
-
 def _record_last_bot_message(
     chat_id: Optional[int], message_id: Optional[int], editable: bool
 ) -> None:
@@ -303,14 +295,12 @@ def _record_last_bot_message(
     last_ui_message_id[chat_id] = message_id
     user_last_message[chat_id] = {"message_id": message_id, "editable": editable}
 
-
 def _extract_send_chat_id(args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> Optional[int]:
     if "chat_id" in kwargs:
         return kwargs.get("chat_id")
     if args:
         return args[0]
     return None
-
 
 def _extract_message_id_from_result(result: Any) -> Optional[int]:
     if isinstance(result, list):
@@ -321,14 +311,12 @@ def _extract_message_id_from_result(result: Any) -> Optional[int]:
         return None
     return getattr(result, "message_id", None)
 
-
 def _track_sent_message(
     chat_id: Optional[int], result: Any, *, editable: bool
 ) -> None:
     message_id = _extract_message_id_from_result(result)
     if message_id:
         _record_last_bot_message(chat_id, message_id, editable)
-
 
 def _extract_edit_text_payload(
     args: Tuple[Any, ...], kwargs: Dict[str, Any]
@@ -345,7 +333,6 @@ def _extract_edit_text_payload(
     payload.pop("message_id", None)
     return text, chat_id, payload
 
-
 def _extract_edit_reply_markup_payload(
     args: Tuple[Any, ...], kwargs: Dict[str, Any]
 ) -> Tuple[Optional[int], Optional[types.InlineKeyboardMarkup], Dict[str, Any]]:
@@ -361,7 +348,6 @@ def _extract_edit_reply_markup_payload(
     payload.pop("reply_markup", None)
     return chat_id, reply_markup, payload
 
-
 def _edit_last_message_text(proxy: _BotProxy, edit_func, *args, **kwargs):
     text, chat_id, payload = _extract_edit_text_payload(args, kwargs)
     if chat_id is None or text is None:
@@ -374,7 +360,6 @@ def _edit_last_message_text(proxy: _BotProxy, edit_func, *args, **kwargs):
         parse_mode=payload.get("parse_mode"),
         disable_preview=payload.get("disable_web_page_preview"),
     )
-
 
 def _edit_last_message_reply_markup(proxy: _BotProxy, edit_func, *args, **kwargs):
     chat_id, reply_markup, payload = _extract_edit_reply_markup_payload(args, kwargs)
@@ -395,7 +380,6 @@ def _edit_last_message_reply_markup(proxy: _BotProxy, edit_func, *args, **kwargs
         return result
     fallback_text = payload.pop("fallback_text", "\u2063")
     return proxy.send_message(chat_id, fallback_text, reply_markup=reply_markup)
-
 
 @bot.message_handler(commands=["start"])
 def handle_start(message):
@@ -499,18 +483,15 @@ def handle_start(message):
     reset_user_state(chat_id)
     restore_reply_keyboard(chat_id)
 
-
 @bot.message_handler(commands=["menu"])
 def handle_menu(message):
     chat_id = message.chat.id
     reset_user_state(chat_id)
     restore_reply_keyboard(chat_id, "📋 Əsas menyudan seçim et:")
 
-
 @bot.message_handler(content_types=["web_app_data"])
 def handle_web_app_data(message):
     return
-
 
 @bot.message_handler(content_types=["contact"])
 def handle_contact(message):
@@ -547,11 +528,9 @@ def handle_contact(message):
     reset_user_state(chat_id)
     restore_reply_keyboard(chat_id)
 
-
 def handle_start_attribution_and_demo(message, start_arg: str):
     # existing start logic here (do not remove)
     return register_or_update_user_if_needed(message, start_arg)
-
 
 def _pbkdf2_hash_password(password: str, iterations: int = 120_000) -> str:
     salt = os.urandom(16).hex()
@@ -559,7 +538,6 @@ def _pbkdf2_hash_password(password: str, iterations: int = 120_000) -> str:
         "sha256", password.encode("utf-8"), salt.encode("utf-8"), iterations
     )
     return f"pbkdf2_sha256${iterations}${salt}${digest.hex()}"
-
 
 def _verify_password_hash(password: str, stored_hash: str) -> bool:
     try:
@@ -573,7 +551,6 @@ def _verify_password_hash(password: str, stored_hash: str) -> bool:
         "sha256", password.encode("utf-8"), salt.encode("utf-8"), iterations
     ).hex()
     return hashlib.compare_digest(check_digest, digest)
-
 
 def _load_admin_password_config():
     mapping = {}
@@ -602,7 +579,6 @@ def _load_admin_password_config():
         shared_hash = _pbkdf2_hash_password(shared_plain)
 
     return mapping, (shared_hash or None)
-
 
 ADMIN_PANEL_PASSWORD_HASHES, ADMIN_PANEL_SHARED_PASSWORD_HASH = (
     _load_admin_password_config()
@@ -712,7 +688,6 @@ TEXTS_AZ = {
     "admin_panel_nav_prev": "◀️ Əvvəlki səhifə",
     "admin_panel_back_main": "🔙 Geri",
     "admin_panel_pending_listings": "✅ Təsdiqlənməyən elanlar",
-    "admin_panel_hidden_listings": "🕶 Gizlədilən elanlar",
     "admin_panel_stats": "📊 Statistikalar",
     "admin_panel_customer_requests": "📌 Müştəri istəkləri",
     "admin_panel_financial_reports": "💰 Maliyyə hesabatları",
@@ -884,7 +859,6 @@ FINANCIAL_REPORTS_MENU = [
 ADMIN_PAYMENTS_BUTTON = "💳 Ödənişlər"
 ADMIN_PANEL_BUTTONS = [
     TEXTS_AZ["admin_panel_stats"],
-    TEXTS_AZ["admin_panel_hidden_listings"],
     FINANCIAL_REPORTS_BUTTON,
     ADMIN_PAYMENTS_BUTTON,
     TEXTS_AZ["admin_panel_support_chats"],
@@ -982,17 +956,14 @@ PAGE_SIZE_USERS = 10
 PAGE_SIZE_NOTIFICATIONS = 10
 admin_user_page_state = {}
 
-
 main_db_connections = set()
 main_db_connections_lock = threading.Lock()
 main_db_update_in_progress = threading.Event()
 main_db_replace_lock = threading.Lock()
 
-
 def register_main_conn(conn):
     with main_db_connections_lock:
         main_db_connections.add(conn)
-
 
 def close_main_conn(conn):
     if conn is None:
@@ -1005,7 +976,6 @@ def close_main_conn(conn):
         with main_db_connections_lock:
             main_db_connections.discard(conn)
 
-
 def close_all_main_conns():
     with main_db_connections_lock:
         conns = list(main_db_connections)
@@ -1016,25 +986,21 @@ def close_all_main_conns():
         except Exception as e:
             print("⚠️ main DB close error:", e)
 
-
 def get_main_conn():
     conn = get_conn()
     conn.row_factory = sqlite3.Row
     register_main_conn(conn)
     return conn
 
-
 def get_conn():
     _ensure_parent_dir(MAIN_DB)
     return sqlite3.connect(MAIN_DB)
-
 
 def get_local_conn():
     _ensure_parent_dir(LOCAL_DB)
     conn = sqlite3.connect(LOCAL_DB, check_same_thread=False)  # 🔥 ÇOX VACİB
     conn.row_factory = sqlite3.Row
     return conn
-
 
 def get_db():
     _ensure_parent_dir(LOCAL_DB)
@@ -1043,13 +1009,11 @@ def get_db():
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
-
 def get_agents_conn():
     _ensure_parent_dir(AGENTS_DB)
     conn = sqlite3.connect(AGENTS_DB, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
-
 
 def _table_columns(conn: sqlite3.Connection, table_name: str) -> set:
     try:
@@ -1058,7 +1022,6 @@ def _table_columns(conn: sqlite3.Connection, table_name: str) -> set:
         return {row[1] for row in cur.fetchall() if len(row) > 1}
     except Exception:
         return set()
-
 
 def normalize_text(text: str) -> str:
     mapping = {
@@ -1076,7 +1039,6 @@ def normalize_text(text: str) -> str:
     text = " ".join(text.split())
     return text
 
-
 def _extract_first_number(value: str) -> Optional[float]:
     match = re.search(r"(\d+(?:[.,]\d+)?)", value or "")
     if not match:
@@ -1085,7 +1047,6 @@ def _extract_first_number(value: str) -> Optional[float]:
         return float(match.group(1).replace(",", "."))
     except ValueError:
         return None
-
 
 def parse_area(area_raw) -> Dict[str, Optional[Union[float, str]]]:
     raw = str(area_raw or "").strip()
@@ -1124,7 +1085,6 @@ def parse_area(area_raw) -> Dict[str, Optional[Union[float, str]]]:
 
     return {"sot": sot_val, "kvm": kvm_val, "raw": cleaned}
 
-
 def _is_sot_property_type(property_type: Optional[str]) -> bool:
     keywords = [
         "torpaq",
@@ -1145,14 +1105,12 @@ def _is_sot_property_type(property_type: Optional[str]) -> bool:
         return False
     return any(normalize_text(keyword) in prop_norm for keyword in keywords)
 
-
 def _format_area_value(value: float) -> str:
     if value is None:
         return ""
     if abs(value - round(value)) < 0.01:
         return str(int(round(value)))
     return f"{value:.2f}".rstrip("0").rstrip(".")
-
 
 def format_area_for_listing(
     property_type: Optional[str], area_raw: Optional[str]
@@ -1180,10 +1138,8 @@ def format_area_for_listing(
         return f"{_format_area_value(number)} kvm"
     return raw
 
-
 def is_command_text(text: str) -> bool:
     return bool((text or "").strip().startswith("/"))
-
 
 def normalize_az_phone(phone_raw: str) -> Optional[str]:
     digits = re.sub(r"\D", "", phone_raw or "")
@@ -1195,7 +1151,6 @@ def normalize_az_phone(phone_raw: str) -> Optional[str]:
         return None
     return digits
 
-
 def mask_phone(phone: str) -> str:
     digits = re.sub(r"\D", "", phone or "")
     if not digits:
@@ -1203,7 +1158,6 @@ def mask_phone(phone: str) -> str:
     if len(digits) <= 6:
         return "*" * len(digits)
     return f"{digits[:3]}{'*' * (len(digits) - 6)}{digits[-3:]}"
-
 
 def get_phone_verification_row(chat_id: int) -> Optional[sqlite3.Row]:
     conn = get_db()
@@ -1219,7 +1173,6 @@ def get_phone_verification_row(chat_id: int) -> Optional[sqlite3.Row]:
     row = cur.fetchone()
     conn.close()
     return row
-
 
 def update_phone_verification(
     chat_id: int, phone: str, now_iso: str
@@ -1248,7 +1201,6 @@ def update_phone_verification(
     conn.commit()
     conn.close()
 
-
 def send_phone_request(chat_id: int) -> None:
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     keyboard.add(types.KeyboardButton("📱 Nömrəni paylaş", request_contact=True))
@@ -1260,25 +1212,20 @@ def send_phone_request(chat_id: int) -> None:
     )
     logger.info("PHONE_REQUESTED user_id=%s", chat_id)
 
-
 def set_ui_context(chat_id: int, context: str):
     ui_context_state[chat_id] = context
-
 
 def get_ui_context(chat_id: int) -> str:
     return ui_context_state.get(chat_id, UI_CONTEXT_MAIN)
 
-
 def safe_send(chat_id: int, text: str, **kwargs):
     return bot.send_message(chat_id, text, **kwargs)
-
 
 def safe_admin_step(chat_id: int, text: str, **kwargs):
     try:
         safe_send(chat_id, text, **kwargs)
     except Exception:
         logger.exception("Admin send failed chat_id=%s text=%s", chat_id, text)
-
 
 def safe_answer_callback_query(
     callback_id: Optional[str], text: Optional[str] = None, **kwargs
@@ -1289,7 +1236,6 @@ def safe_answer_callback_query(
         bot.answer_callback_query(callback_id, text, **kwargs)
     except Exception:
         logger.exception("answer_callback_query failed callback_id=%s", callback_id)
-
 
 def callback_guard(handler):
     @wraps(handler)
@@ -1334,7 +1280,6 @@ def callback_guard(handler):
 
     return wrapper
 
-
 def ensure_feature_flag_tables(cur: sqlite3.Cursor):
     cur.execute(
         """
@@ -1365,7 +1310,6 @@ def ensure_feature_flag_tables(cur: sqlite3.Cursor):
             (key, int(enabled)),
         )
 
-
 def is_feature_enabled(key: str, user_id: Optional[int] = None) -> bool:
     conn = get_local_conn()
     try:
@@ -1386,7 +1330,6 @@ def is_feature_enabled(key: str, user_id: Optional[int] = None) -> bool:
         return bool(FEATURE_FLAG_DEFAULTS.get(key, 1))
     finally:
         conn.close()
-
 
 def set_feature_flag_state(
     key: str, enabled: bool, user_ids: Optional[List[int]] = None
@@ -1418,19 +1361,16 @@ def set_feature_flag_state(
     finally:
         conn.close()
 
-
 def get_feature_state_for_scope(key: str, user_ids: Optional[List[int]] = None) -> bool:
     if user_ids:
         return all(is_feature_enabled(key, uid) for uid in user_ids)
     return is_feature_enabled(key)
-
 
 def ensure_feature_available(chat_id: int, key: str) -> bool:
     if is_feature_enabled(key, chat_id):
         return True
     bot.send_message(chat_id, FEATURE_DISABLED_MESSAGE)
     return False
-
 
 def ensure_feature_available_cb(c, key: str) -> bool:
     chat_id = c.message.chat.id if getattr(c, "message", None) else c.from_user.id
@@ -1440,18 +1380,14 @@ def ensure_feature_available_cb(c, key: str) -> bool:
     safe_answer_callback_query(getattr(c, "id", None))
     return False
 
-
 def set_user_state(chat_id: int, state: str):
     USER_STATE[chat_id] = state
-
 
 def clear_user_state(chat_id: int):
     USER_STATE.pop(chat_id, None)
 
-
 def get_user_state(chat_id: int) -> Optional[str]:
     return USER_STATE.get(chat_id)
-
 
 def acquire_user_action_lock(user_id: Optional[int]) -> Optional[threading.Lock]:
     if not user_id:
@@ -1460,7 +1396,6 @@ def acquire_user_action_lock(user_id: Optional[int]) -> Optional[threading.Lock]
     if lock.acquire(blocking=False):
         return lock
     return None
-
 
 def run_callback_background(
     call,
@@ -1512,7 +1447,6 @@ def run_callback_background(
 
     threading.Thread(target=runner, daemon=True).start()
 
-
 def run_with_timeout(step_name: str, timeout_seconds: int, func, *args, **kwargs):
     logger.info("DB update step start step=%s timeout=%s", step_name, timeout_seconds)
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -1530,10 +1464,8 @@ def run_with_timeout(step_name: str, timeout_seconds: int, func, *args, **kwargs
             logger.exception("DB update step failed step=%s", step_name)
             raise
 
-
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
-
 
 def get_support_session_state(user_id: int) -> Dict[str, Any]:
     state = support_sessions.get(user_id)
@@ -1542,14 +1474,12 @@ def get_support_session_state(user_id: int) -> Dict[str, Any]:
         support_sessions[user_id] = state
     return state
 
-
 def get_user_support_flags(chat_id: int) -> Dict[str, Any]:
     record = get_user_record(chat_id) or {}
     return {
         "active": bool(record.get("user_support_active")),
         "inbox_unread": int(record.get("user_support_inbox_unread") or 0),
     }
-
 
 def set_user_support_active_flag(chat_id: int, active: bool) -> None:
     conn = get_local_conn()
@@ -1565,7 +1495,6 @@ def set_user_support_active_flag(chat_id: int, active: bool) -> None:
     finally:
         conn.close()
 
-
 def set_user_support_inbox_unread(chat_id: int, unread_count: int) -> None:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -1579,7 +1508,6 @@ def set_user_support_inbox_unread(chat_id: int, unread_count: int) -> None:
         pass
     finally:
         conn.close()
-
 
 def increment_user_support_inbox_unread(chat_id: int, delta: int = 1) -> None:
     conn = get_local_conn()
@@ -1599,7 +1527,6 @@ def increment_user_support_inbox_unread(chat_id: int, delta: int = 1) -> None:
     finally:
         conn.close()
 
-
 def set_support_session_active(
     user_id: int, active: bool, started_at: Optional[str] = None
 ) -> Dict[str, Any]:
@@ -1609,14 +1536,12 @@ def set_support_session_active(
     set_user_support_active_flag(user_id, active)
     return state
 
-
 def set_support_session_last_ui_message_id(
     user_id: int, message_id: Optional[int]
 ) -> Dict[str, Any]:
     state = get_support_session_state(user_id)
     state["last_ui_message_id"] = message_id
     return state
-
 
 def _load_db_update_state_file() -> Dict[str, Any]:
     if not os.path.exists(DB_UPDATE_STATE_PATH):
@@ -1628,7 +1553,6 @@ def _load_db_update_state_file() -> Dict[str, Any]:
         logger.exception("Failed to read db update state file")
         return {}
 
-
 def _save_db_update_state_file(state: Dict[str, Any]) -> None:
     try:
         if not _ensure_parent_dir(DB_UPDATE_STATE_PATH):
@@ -1637,7 +1561,6 @@ def _save_db_update_state_file(state: Dict[str, Any]) -> None:
             json.dump(state, f)
     except Exception:
         logger.exception("Failed to write db update state file")
-
 
 def _load_saved_search_notify_state() -> Dict[str, Any]:
     if not os.path.exists(SAVED_SEARCH_NOTIFY_STATE_PATH):
@@ -1653,7 +1576,6 @@ def _load_saved_search_notify_state() -> Dict[str, Any]:
     state.setdefault("criteria", {})
     return state
 
-
 def _save_saved_search_notify_state(state: Dict[str, Any]) -> None:
     try:
         if not _ensure_parent_dir(SAVED_SEARCH_NOTIFY_STATE_PATH):
@@ -1663,7 +1585,6 @@ def _save_saved_search_notify_state(state: Dict[str, Any]) -> None:
     except Exception:
         logger.exception("Failed to write saved search notify state file")
 
-
 def save_last_db_link(link: str) -> None:
     try:
         if not _ensure_parent_dir(LAST_DB_LINK_PATH):
@@ -1672,7 +1593,6 @@ def save_last_db_link(link: str) -> None:
             f.write((link or "").strip())
     except Exception:
         logger.exception("Failed to save last db link")
-
 
 def load_last_db_link() -> Optional[str]:
     if not os.path.exists(LAST_DB_LINK_PATH):
@@ -1685,7 +1605,6 @@ def load_last_db_link() -> Optional[str]:
         return None
     return link or None
 
-
 def _parse_db_update_ts(raw: Any) -> Optional[datetime]:
     if not raw:
         return None
@@ -1696,7 +1615,6 @@ def _parse_db_update_ts(raw: Any) -> Optional[datetime]:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed
-
 
 def record_db_update_stats(
     previous_total: Optional[int], new_total: Optional[int]
@@ -1724,7 +1642,6 @@ def record_db_update_stats(
     _save_db_update_state_file(data)
     return entry
 
-
 def get_last24h_added_from_updates() -> int:
     data = _load_db_update_state_file()
     updates = data.get("updates")
@@ -1745,7 +1662,6 @@ def get_last24h_added_from_updates() -> int:
             total += added_val
     return total
 
-
 def load_last_update_max_id() -> Optional[int]:
     data = _load_db_update_state_file()
     try:
@@ -1754,19 +1670,16 @@ def load_last_update_max_id() -> Optional[int]:
     except Exception:
         return None
 
-
 def save_last_update_max_id(max_id: int) -> None:
     data = _load_db_update_state_file()
     data["last_max_id"] = int(max_id)
     data["updated_at"] = now_utc().isoformat()
     _save_db_update_state_file(data)
 
-
 def _support_row_to_dict(row: Optional[sqlite3.Row]) -> Optional[dict]:
     if not row:
         return None
     return {key: row[key] for key in row.keys()}
-
 
 def get_support_thread_by_user(user_id: int) -> Optional[dict]:
     conn = get_local_conn()
@@ -1775,7 +1688,6 @@ def get_support_thread_by_user(user_id: int) -> Optional[dict]:
     row = cur.fetchone()
     conn.close()
     return _support_row_to_dict(row)
-
 
 def upsert_support_thread(
     user_id: int,
@@ -1824,7 +1736,6 @@ def upsert_support_thread(
     conn.close()
     return _support_row_to_dict(row)
 
-
 def update_support_thread(user_id: int, **fields: Any) -> Optional[dict]:
     allowed_fields = {
         "status",
@@ -1855,7 +1766,6 @@ def update_support_thread(user_id: int, **fields: Any) -> Optional[dict]:
     conn.close()
     return _support_row_to_dict(row)
 
-
 def ensure_support_thread(user_id: int, status: str) -> Optional[dict]:
     existing = get_support_thread_by_user(user_id)
     if existing:
@@ -1871,7 +1781,6 @@ def ensure_support_thread(user_id: int, status: str) -> Optional[dict]:
         last_message_at=now_utc().isoformat(),
     )
 
-
 def add_support_message(thread_id: int, sender: str, text: Optional[str]) -> None:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -1884,7 +1793,6 @@ def add_support_message(thread_id: int, sender: str, text: Optional[str]) -> Non
     )
     conn.commit()
     conn.close()
-
 
 def list_support_threads() -> List[dict]:
     conn = get_local_conn()
@@ -1902,7 +1810,6 @@ def list_support_threads() -> List[dict]:
     rows = cur.fetchall()
     conn.close()
     return [{key: row[key] for key in row.keys()} for row in rows]
-
 
 def list_support_messages(thread_id: int, limit: int = 20) -> List[dict]:
     conn = get_local_conn()
@@ -1923,7 +1830,6 @@ def list_support_messages(thread_id: int, limit: int = 20) -> List[dict]:
     messages.reverse()
     return messages
 
-
 def load_last_dropbox_url() -> Optional[str]:
     data = _load_db_update_state_file()
     url = data.get("last_dropbox_url")
@@ -1932,13 +1838,11 @@ def load_last_dropbox_url() -> Optional[str]:
     url_text = str(url).strip()
     return url_text or None
 
-
 def save_last_dropbox_url(url: str) -> None:
     data = _load_db_update_state_file()
     data["last_dropbox_url"] = url
     data["updated_at"] = now_utc().isoformat()
     _save_db_update_state_file(data)
-
 
 def load_dropbox_url_history() -> List[Dict[str, str]]:
     data = _load_db_update_state_file()
@@ -1956,13 +1860,11 @@ def load_dropbox_url_history() -> List[Dict[str, str]]:
         history.append({"url": url, "datetime": datetime_text})
     return history
 
-
 def save_dropbox_url_history(history: List[Dict[str, str]]) -> None:
     data = _load_db_update_state_file()
     data["dropbox_url_history"] = history
     data["updated_at"] = now_utc().isoformat()
     _save_db_update_state_file(data)
-
 
 def append_dropbox_url_history(url: str) -> None:
     history = load_dropbox_url_history()
@@ -1971,7 +1873,6 @@ def append_dropbox_url_history(url: str) -> None:
     )
     history = history[:5]
     save_dropbox_url_history(history)
-
 
 def cleanup_stale_db_updates() -> List[int]:
     stale = []
@@ -1995,14 +1896,12 @@ def cleanup_stale_db_updates() -> List[int]:
             admin_update_state.pop(admin_id, None)
     return stale
 
-
 def get_running_db_update() -> Optional[Tuple[int, Dict[str, Any]]]:
     with db_update_state_lock:
         for admin_id, state in db_update_state.items():
             if state.get("status") == "running":
                 return admin_id, dict(state)
     return None
-
 
 def set_db_update_state(admin_id: int, status: str) -> None:
     with db_update_state_lock:
@@ -2011,7 +1910,6 @@ def set_db_update_state(admin_id: int, status: str) -> None:
             "started_at": now_utc(),
             "last_progress": now_utc(),
         }
-
 
 def acquire_db_update_lock(admin_id: int) -> bool:
     now = now_utc()
@@ -2031,12 +1929,10 @@ def acquire_db_update_lock(admin_id: int) -> bool:
         db_update_started_at[admin_id] = now
         return True
 
-
 def release_db_update_lock(admin_id: int) -> None:
     with db_update_lock_by_admin_lock:
         db_update_lock_by_admin.pop(admin_id, None)
         db_update_started_at.pop(admin_id, None)
-
 
 def update_db_update_progress(admin_id: int) -> None:
     with db_update_state_lock:
@@ -2044,11 +1940,9 @@ def update_db_update_progress(admin_id: int) -> None:
         if state:
             state["last_progress"] = now_utc()
 
-
 def clear_db_update_state(admin_id: int) -> None:
     with db_update_state_lock:
         db_update_state.pop(admin_id, None)
-
 
 def format_seconds(seconds: float) -> str:
     seconds = max(0, int(seconds))
@@ -2057,10 +1951,8 @@ def format_seconds(seconds: float) -> str:
         return f"{minutes} dəq {secs} san"
     return f"{secs} san"
 
-
 _users_schema_cache = None
 _users_schema_lock = threading.Lock()
-
 
 def detect_users_schema():
     global _users_schema_cache
@@ -2091,17 +1983,14 @@ def detect_users_schema():
         _users_schema_cache = {"columns": columns}
         return _users_schema_cache
 
-
 def get_user_step(chat_id: int):
     state = user_state.get(chat_id)
     if isinstance(state, dict):
         return state.get("step")
     return None
 
-
 class DiskFullError(RuntimeError):
     pass
-
 
 def clean_old_update_artifacts():
     for path in glob.glob(os.path.join(DATA_DIR, "besthome_update_*.db")):
@@ -2128,11 +2017,9 @@ def clean_old_update_artifacts():
 
     logger.info("🧹 Old backups cleaned")
 
-
 def ensure_tmp_workspace():
     shutil.rmtree(DB_UPDATE_TMP_DIR, ignore_errors=True)
     os.makedirs(DB_UPDATE_TMP_DIR, exist_ok=True)
-
 
 def ensure_sufficient_disk_space(admin_id: int):
     disk_usage_target = DATA_DIR if os.path.isdir(DATA_DIR) else "/tmp"
@@ -2142,7 +2029,6 @@ def ensure_sufficient_disk_space(admin_id: int):
         safe_admin_step(admin_id, "❌ Disk doludur. Köhnə backup-lar silinməlidir.")
         raise DiskFullError("Diskdə kifayət qədər boş yer yoxdur")
 
-
 def prepare_main_db_for_swap():
     try:
         conn = sqlite3.connect(MAIN_DB, timeout=5)
@@ -2150,7 +2036,6 @@ def prepare_main_db_for_swap():
         conn.close()
     except Exception as e:
         print("⚠️ DB checkpoint xətası:", e)
-
 
 def backup_main_db_file(db_path: str) -> Optional[str]:
     if not os.path.exists(db_path):
@@ -2162,7 +2047,6 @@ def backup_main_db_file(db_path: str) -> Optional[str]:
     shutil.copy2(db_path, backup_path)
     return backup_path
 
-
 def restore_main_db_from_backup(backup_path: Optional[str]):
     if not backup_path or not os.path.exists(backup_path):
         return
@@ -2172,7 +2056,6 @@ def restore_main_db_from_backup(backup_path: Optional[str]):
     except Exception:
         pass
     shutil.copy2(backup_path, MAIN_DB)
-
 
 def get_inactive_users(days: int = 10) -> List[int]:
     activity_sources = [
@@ -2223,7 +2106,6 @@ def restart_bot_safely(delay: int = 2):
     time.sleep(delay)
     os._exit(0)
 
-
 DB_ALLOWED_MIME_TYPES = {
     "application/vnd.sqlite3",
     "application/octet-stream",
@@ -2234,7 +2116,6 @@ ZIP_ALLOWED_MIME_TYPES = {
     "application/x-zip-compressed",
     "application/octet-stream",
 }
-
 
 def normalize_dropbox_urls(url: str) -> List[str]:
     url = url.strip()
@@ -2260,7 +2141,6 @@ def normalize_dropbox_urls(url: str) -> List[str]:
         )
     return list(dict.fromkeys(candidates))
 
-
 def is_google_drive_url(url: str) -> bool:
     parts = urlsplit(url)
     netloc = parts.netloc.lower()
@@ -2271,7 +2151,6 @@ def is_google_drive_url(url: str) -> bool:
         or "usercontent.google.com" in netloc
     )
 
-
 def extract_drive_file_id(url: str) -> str:
     match = re.search(r"[?&]id=([A-Za-z0-9_-]+)", url)
     if match:
@@ -2281,13 +2160,11 @@ def extract_drive_file_id(url: str) -> str:
         return match.group(1)
     raise RuntimeError("Google Drive linkində file id tapılmadı")
 
-
 def build_gdrive_direct_download_url(file_id: str) -> str:
     return (
         "https://drive.usercontent.google.com/download"
         f"?id={file_id}&export=download&confirm=t"
     )
-
 
 def resolve_auto_db_source_url() -> Optional[str]:
     if AUTO_DB_URL:
@@ -2295,7 +2172,6 @@ def resolve_auto_db_source_url() -> Optional[str]:
     if AUTO_DB_FILE_ID:
         return build_gdrive_direct_download_url(AUTO_DB_FILE_ID)
     return None
-
 
 def _log_download_response(
     normalized_url: str,
@@ -2323,7 +2199,6 @@ def _log_download_response(
     )
     return info
 
-
 def _response_looks_like_zip(response: requests.Response) -> bool:
     content_type = (response.headers.get("Content-Type") or "").lower()
     if "text/html" in content_type:
@@ -2338,7 +2213,6 @@ def _response_looks_like_zip(response: requests.Response) -> bool:
     effective_url = (response.url or "").lower().split("?", 1)[0]
     return effective_url.endswith(".zip")
 
-
 def _response_looks_like_db(response: requests.Response) -> bool:
     content_type = (response.headers.get("Content-Type") or "").lower()
     if any(mt in content_type for mt in DB_ALLOWED_MIME_TYPES):
@@ -2346,13 +2220,11 @@ def _response_looks_like_db(response: requests.Response) -> bool:
     effective_url = (response.url or "").lower().split("?", 1)[0]
     return effective_url.endswith(".db")
 
-
 def _ensure_zip_magic(path: str) -> None:
     with open(path, "rb") as file_handle:
         signature = file_handle.read(4)
     if signature != b"PK\x03\x04":
         raise RuntimeError("Yüklənən fayl ZIP deyil")
-
 
 def download_zip_stream(url: str) -> str:
     last_error = None
@@ -2397,7 +2269,6 @@ def download_zip_stream(url: str) -> str:
                 os.remove(temp_path)
             logger.warning("Failed to download zip from %s: %s", candidate, exc)
     raise RuntimeError(f"ZIP yükləmə alınmadı: {last_error}")
-
 
 def download_main_db_file(url: str) -> Tuple[str, bool, Dict[str, Optional[str]]]:
     last_error = None
@@ -2459,7 +2330,6 @@ def download_main_db_file(url: str) -> Tuple[str, bool, Dict[str, Optional[str]]
             logger.warning("Failed to download db from %s: %s", candidate, exc)
     raise RuntimeError(f"DB yükləmə alınmadı: {last_error}")
 
-
 def find_db_file(root: str) -> Optional[str]:
     candidates: List[Tuple[int, str]] = []
     for current_root, _dirs, files in os.walk(root):
@@ -2476,7 +2346,6 @@ def find_db_file(root: str) -> Optional[str]:
         return None
     candidates.sort(key=lambda item: item[0], reverse=True)
     return candidates[0][1]
-
 
 def extract_main_db_from_zip(zip_path: str) -> Tuple[str, str]:
     if not zipfile.is_zipfile(zip_path):
@@ -2530,7 +2399,6 @@ def extract_main_db_from_zip(zip_path: str) -> Tuple[str, str]:
     )
     return resolved_path, temp_dir
 
-
 def validate_main_db_file(db_path: str) -> int:
     conn = sqlite3.connect(db_path)
     try:
@@ -2547,7 +2415,6 @@ def validate_main_db_file(db_path: str) -> int:
     finally:
         conn.close()
 
-
 def _sha256_file(path: str) -> str:
     hasher = hashlib.sha256()
     with open(path, "rb") as f:
@@ -2555,13 +2422,11 @@ def _sha256_file(path: str) -> str:
             hasher.update(chunk)
     return hasher.hexdigest()
 
-
 def _listings_table_exists(cur: sqlite3.Cursor) -> bool:
     cur.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='listings'"
     )
     return cur.fetchone() is not None
-
 
 def _get_listings_freshness_marker(cur: sqlite3.Cursor) -> Tuple[str, Any]:
     cur.execute("PRAGMA table_info(listings)")
@@ -2576,7 +2441,6 @@ def _get_listings_freshness_marker(cur: sqlite3.Cursor) -> Tuple[str, Any]:
             return col, cur.fetchone()[0]
     cur.execute("SELECT MAX(rowid) FROM listings")
     return "rowid", cur.fetchone()[0]
-
 
 def compute_db_fingerprint(db_path: str) -> Dict[str, Any]:
     file_size = os.path.getsize(db_path)
@@ -2611,7 +2475,6 @@ def compute_db_fingerprint(db_path: str) -> Dict[str, Any]:
         "freshness_marker": freshness_marker,
     }
 
-
 def _fingerprint_log_payload(fp: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not fp:
         return None
@@ -2624,7 +2487,6 @@ def _fingerprint_log_payload(fp: Optional[Dict[str, Any]]) -> Optional[Dict[str,
         "freshness_marker": fp.get("freshness_marker"),
     }
 
-
 def get_listings_count(db_path: str) -> int:
     conn = sqlite3.connect(db_path)
     try:
@@ -2634,7 +2496,6 @@ def get_listings_count(db_path: str) -> int:
         return int(row[0]) if row and row[0] is not None else 0
     finally:
         conn.close()
-
 
 def count_recent_listings_by_created_at(db_path: str) -> Optional[int]:
     conn = sqlite3.connect(db_path)
@@ -2656,7 +2517,6 @@ def count_recent_listings_by_created_at(db_path: str) -> Optional[int]:
     finally:
         conn.close()
 
-
 def get_max_listing_id(db_path: str) -> int:
     conn = sqlite3.connect(db_path)
     try:
@@ -2666,7 +2526,6 @@ def get_max_listing_id(db_path: str) -> int:
         return int(row[0]) if row and row[0] is not None else 0
     finally:
         conn.close()
-
 
 def count_new_listings_since(db_path: str, last_max_id: Optional[int]) -> int:
     if last_max_id is None:
@@ -2680,7 +2539,6 @@ def count_new_listings_since(db_path: str, last_max_id: Optional[int]) -> int:
     finally:
         conn.close()
 
-
 def fetch_listing_ids(db_path: str) -> Set[int]:
     conn = sqlite3.connect(db_path)
     try:
@@ -2690,10 +2548,8 @@ def fetch_listing_ids(db_path: str) -> Set[int]:
     finally:
         conn.close()
 
-
 def _chunk_list(values: List[int], size: int = 900) -> List[List[int]]:
     return [values[i : i + size] for i in range(0, len(values), size)]
-
 
 def count_listings_by_op_for_ids(
     db_path: str, op_code: str, listing_ids: Set[int]
@@ -2728,7 +2584,6 @@ def count_listings_by_op_for_ids(
     finally:
         conn.close()
 
-
 def count_recent_listings_for_ids(db_path: str, listing_ids: Set[int]) -> int:
     if not listing_ids:
         return 0
@@ -2760,7 +2615,6 @@ def count_recent_listings_for_ids(db_path: str, listing_ids: Set[int]) -> int:
     finally:
         conn.close()
 
-
 def count_new_listings_by_op(
     db_path: str, op_code: str, from_id: int, to_id: int
 ) -> int:
@@ -2787,7 +2641,6 @@ def count_new_listings_by_op(
     finally:
         conn.close()
 
-
 def count_new_listings_today(db_path: str, from_id: int, to_id: int) -> int:
     conn = sqlite3.connect(db_path)
     try:
@@ -2811,7 +2664,6 @@ def count_new_listings_today(db_path: str, from_id: int, to_id: int) -> int:
         return int(row[0]) if row and row[0] is not None else 0
     finally:
         conn.close()
-
 
 def count_last_24h_listings(db_path: str) -> Tuple[int, int, int]:
     sale_value = detect_db_operation_value("sale", "main")
@@ -2870,7 +2722,6 @@ def count_last_24h_listings(db_path: str) -> Tuple[int, int, int]:
     finally:
         conn.close()
 
-
 def count_listings_since(db_path: str, since_dt: datetime) -> int:
     conn = sqlite3.connect(db_path)
     try:
@@ -2894,7 +2745,6 @@ def count_listings_since(db_path: str, since_dt: datetime) -> int:
     finally:
         conn.close()
 
-
 def collect_existing_listing_ids(db_path: str) -> Tuple[Set[Any], Optional[str]]:
     conn = sqlite3.connect(db_path)
     try:
@@ -2914,7 +2764,6 @@ def collect_existing_listing_ids(db_path: str) -> Tuple[Set[Any], Optional[str]]
         return {row[0] for row in cur.fetchall() if row and row[0] is not None}, key_column
     finally:
         conn.close()
-
 
 def count_added_listings_by_operation(
     db_path: str, id_column: Optional[str], added_ids: Set[Any]
@@ -2953,7 +2802,6 @@ def count_added_listings_by_operation(
         return sale_count, rent_count
     finally:
         conn.close()
-
 
 def atomic_replace_main_db(new_db_path: str) -> Optional[str]:
     previous_stat = None
@@ -3000,7 +2848,6 @@ def atomic_replace_main_db(new_db_path: str) -> Optional[str]:
         logger.debug("[DEBUG] inode/size unchanged")
     logger.info("✅ DB REAL olaraq yeniləndi: %s", MAIN_DB)
     return backup_path
-
 
 def restore_main_db_from_auto_source(force: bool = False) -> bool:
     if os.path.exists(MAIN_DB) and not force:
@@ -3058,12 +2905,10 @@ def restore_main_db_from_auto_source(force: bool = False) -> bool:
         if extracted_dir and os.path.exists(extracted_dir):
             shutil.rmtree(extracted_dir, ignore_errors=True)
 
-
 def send_db_update_progress(admin_id: int, message: str) -> None:
     update_db_update_progress(admin_id)
     logger.info("DB update progress chat_id=%s step=%s", admin_id, message)
     safe_admin_step(admin_id, message)
-
 
 def run_db_update_pipeline(admin_id: int, url: str) -> None:
     temp_download_path = None
@@ -3324,7 +3169,6 @@ def run_db_update_pipeline(admin_id: int, url: str) -> None:
         elif os.path.exists(DB_UPDATE_TMP_DIR):
             shutil.rmtree(DB_UPDATE_TMP_DIR, ignore_errors=True)
 
-
 def sanity_check_main_db():
     _ensure_parent_dir(MAIN_DB)
     conn = sqlite3.connect(MAIN_DB)
@@ -3334,7 +3178,6 @@ def sanity_check_main_db():
         cur.fetchone()
     finally:
         conn.close()
-
 
 def init_local_db():
     _ensure_parent_dir(LOCAL_DB)
@@ -3435,19 +3278,6 @@ def init_local_db():
             listing_id INTEGER,
             source TEXT,
             added_at TEXT,
-            UNIQUE(chat_id, listing_id, source)
-        )
-    """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS hidden_listings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
-            listing_id INTEGER,
-            source TEXT,
-            hidden_at TEXT,
             UNIQUE(chat_id, listing_id, source)
         )
     """
@@ -4107,7 +3937,6 @@ def init_local_db():
     conn.close()
     print("✅ local_data.db hazırdır.")
 
-
 def init_agents_db():
     """Vasitəçi elanları üçün ayrıca baza."""
     _ensure_parent_dir(AGENTS_DB)
@@ -4143,7 +3972,6 @@ def init_agents_db():
     conn.close()
     print("✅ agents.db hazırdır.")
 
-
 def init_main_db_indices():
     """Əsas bazada indekslər."""
     if not os.path.exists(MAIN_DB):
@@ -4159,10 +3987,6 @@ def init_main_db_indices():
         )
         try:
             listings_cols = _table_columns(conn, "listings")
-            if "is_hidden" not in listings_cols:
-                cur.execute(
-                    "ALTER TABLE listings ADD COLUMN is_hidden INTEGER DEFAULT 0"
-                )
             if "region_id" in listings_cols:
                 cur.execute(
                     "CREATE INDEX IF NOT EXISTS idx_listings_region_id ON listings(region_id)"
@@ -4183,7 +4007,6 @@ def init_main_db_indices():
         print("✅ besthome.db indeksləri hazırdır.")
     except Exception as e:
         print("⚠️ İndeks yaradarkən xəta:", e)
-
 
 def ensure_fts_tables():
     """FTS5 cədvəllərini yalnız boş olduqda qur."""
@@ -4291,9 +4114,7 @@ def ensure_fts_tables():
     except Exception:
         logger.exception("FTS (local) yaradarkən xəta")
 
-
 # =============== ÜMUMİ UTIL FUNKSİYALAR ===============
-
 
 def is_admin(chat_id: int) -> bool:
     try:
@@ -4309,11 +4130,9 @@ def is_admin(chat_id: int) -> bool:
     except Exception:
         return False
 
-
 # Access rule: admins always pass; non-admins must have an active subscription/demo.
 def has_access(chat_id: int) -> bool:
     return is_admin(chat_id) or is_user_active(chat_id)
-
 
 def format_price(v) -> str:
     if v is None:
@@ -4327,14 +4146,12 @@ def format_price(v) -> str:
     except:
         return s
 
-
 def safe_clear_ui(bot_ref, chat_id: int, message_ids: List[int]):
     for message_id in list(message_ids):
         try:
             bot_ref.delete_message(chat_id, message_id)
         except Exception:
             pass
-
 
 def parse_price_value(raw) -> Optional[int]:
     if raw is None:
@@ -4349,7 +4166,6 @@ def parse_price_value(raw) -> Optional[int]:
         return int(digits)
     except Exception:
         return None
-
 
 def extract_listing_datetime(row: dict) -> Optional[datetime]:
     if not row:
@@ -4370,11 +4186,9 @@ def extract_listing_datetime(row: dict) -> Optional[datetime]:
                 return dt
     return None
 
-
 def safe_date(row: dict):
     dt = extract_listing_datetime(row)
     return dt or datetime.min
-
 
 def parse_dt_safe(raw: Optional[str]) -> Optional[datetime]:
     if not raw:
@@ -4386,7 +4200,6 @@ def parse_dt_safe(raw: Optional[str]) -> Optional[datetime]:
             return datetime.fromisoformat(str(raw).replace(" ", "T"))
         except Exception:
             return None
-
 
 def _row_value_safe(row, key: str, default=None):
     if row is None:
@@ -4403,7 +4216,6 @@ def _row_value_safe(row, key: str, default=None):
     except Exception:
         return default
 
-
 def resolve_user_status(
     user_row,
 ) -> Literal["active", "demo", "expired", "unverified", "blocked", "rejected"]:
@@ -4419,7 +4231,6 @@ def resolve_user_status(
         return "expired"
     return "expired"
 
-
 def admin_datetime_expr(column: str) -> str:
     return (
         "CASE "
@@ -4430,7 +4241,6 @@ def admin_datetime_expr(column: str) -> str:
         f"THEN datetime({column}, 'unixepoch') "
         f"ELSE datetime(replace({column},'T',' ')) END"
     )
-
 
 def admin_effective_expires_expr() -> str:
     paid_expr = admin_datetime_expr("u.paid_until")
@@ -4444,7 +4254,6 @@ def admin_effective_expires_expr() -> str:
         ")"
     )
 
-
 def admin_user_status_subquery() -> str:
     return (
         "(SELECT uw.chat_id, uw.full_name, uw.username, uw.effective_expires_at, "
@@ -4453,10 +4262,8 @@ def admin_user_status_subquery() -> str:
         "LEFT JOIN users u ON u.chat_id = uw.chat_id)"
     )
 
-
 def admin_user_status_case_sql() -> str:
     return "computed_status"
-
 
 def demo_user_clause(prefix_status: str = "uw", prefix_user: str = "u") -> str:
     def col(prefix: str, name: str) -> str:
@@ -4481,7 +4288,6 @@ def demo_user_clause(prefix_status: str = "uw", prefix_user: str = "u") -> str:
         ")"
     )
 
-
 def admin_user_status_where(status: str) -> tuple:
     normalized = (status or "active").lower()
     if normalized == "unverified":
@@ -4504,7 +4310,6 @@ def admin_user_status_where(status: str) -> tuple:
     computed = status_map.get(normalized, "ACTIVE")
     return "computed_status = ?", (computed,)
 
-
 def admin_user_status_count(cur: sqlite3.Cursor, status: str) -> int:
     where_clause, params = admin_user_status_where(status)
     try:
@@ -4514,7 +4319,6 @@ def admin_user_status_count(cur: sqlite3.Cursor, status: str) -> int:
         return (row[0] if row else 0) or 0
     except Exception:
         return 0
-
 
 def get_effective_expires_at(chat_id: int) -> Optional[datetime]:
     conn = get_local_conn()
@@ -4535,14 +4339,12 @@ def get_effective_expires_at(chat_id: int) -> Optional[datetime]:
     raw = row["effective_expires_at"] if isinstance(row, sqlite3.Row) else row[0]
     return parse_effective_expires_at(raw)
 
-
 def resolve_extension_base(chat_id: int) -> datetime:
     now = datetime.utcnow()
     effective = get_effective_expires_at(chat_id)
     if effective and effective > now:
         return effective
     return now
-
 
 def get_user_record(chat_id: int) -> Optional[dict]:
     conn = get_local_conn()
@@ -4568,7 +4370,6 @@ def get_user_record(chat_id: int) -> Optional[dict]:
     if not row:
         return None
     return dict(row)
-
 
 def ensure_user_exists(chat_id: int, username: str = "", full_name: str = "") -> dict:
     now_iso = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -4618,7 +4419,6 @@ def ensure_user_exists(chat_id: int, username: str = "", full_name: str = "") ->
     conn.close()
     return get_user_record(chat_id) or {}
 
-
 def get_user_computed_status(chat_id: int) -> Optional[str]:
     record = get_user_record(chat_id)
     if not record:
@@ -4649,10 +4449,8 @@ def get_user_computed_status(chat_id: int) -> Optional[str]:
         return "ACTIVE"
     return "EXPIRED"
 
-
 def is_user_active(chat_id: int) -> bool:
     return get_user_computed_status(chat_id) == "ACTIVE"
-
 
 def parse_effective_expires_at(raw: Optional[str]) -> Optional[datetime]:
     if raw is None:
@@ -4661,7 +4459,6 @@ def parse_effective_expires_at(raw: Optional[str]) -> Optional[datetime]:
         return datetime.utcfromtimestamp(float(raw))
     except Exception:
         return parse_dt_safe(raw)
-
 
 def has_customer_requests_access(user_id: int) -> bool:
     if not is_user_active(user_id):
@@ -4679,10 +4476,8 @@ def has_customer_requests_access(user_id: int) -> bool:
     value = row["enabled"] if isinstance(row, dict) else row[0]
     return value == 1
 
-
 def get_customer_requests_enabled(chat_id: int) -> bool:
     return has_customer_requests_access(chat_id)
-
 
 def set_customer_requests_enabled(chat_id: int, enabled: bool):
     conn = get_local_conn()
@@ -4707,13 +4502,11 @@ def set_customer_requests_enabled(chat_id: int, enabled: bool):
     conn.commit()
     conn.close()
 
-
 def ensure_customer_requests_enabled(chat_id: int) -> bool:
     if not has_customer_requests_access(chat_id):
         bot.send_message(chat_id, "❌ Bu funksiya sizin üçün aktiv deyil.")
         return False
     return True
-
 
 def fetch_customer_requests_access_users() -> List[dict]:
     conn = get_local_conn()
@@ -4729,7 +4522,6 @@ def fetch_customer_requests_access_users() -> List[dict]:
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return rows
-
 
 def show_customer_requests_access_admin(
     chat_id: int, message: Optional[types.Message] = None
@@ -4777,7 +4569,6 @@ def show_customer_requests_access_admin(
         return
     render_ui(chat_id, text, mk)
 
-
 def get_first_start_flag(chat_id: int) -> bool:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -4795,7 +4586,6 @@ def get_first_start_flag(chat_id: int) -> bool:
         return False
     return bool(value)
 
-
 def set_first_start_false_for_user(chat_id: int):
     conn = get_local_conn()
     cur = conn.cursor()
@@ -4806,7 +4596,6 @@ def set_first_start_false_for_user(chat_id: int):
         pass
     finally:
         conn.close()
-
 
 def update_user_status(
     chat_id: int,
@@ -4849,7 +4638,6 @@ def update_user_status(
     )
     conn.commit()
     conn.close()
-
 
 def register_user(message):
     chat = message.chat
@@ -4908,14 +4696,12 @@ def register_user(message):
     conn.commit()
     conn.close()
 
-
 # ==============================
 # 💳 ABUNƏLİK FUNKSİYALARI
 # ==============================
 
 subscription_warn_cache = set()
 demo_warn_cache = set()
-
 
 def ensure_subscription_record(chat_id: int):
     with get_db() as conn:
@@ -4928,7 +4714,6 @@ def ensure_subscription_record(chat_id: int):
             (chat_id,),
         )
         conn.commit()
-
 
 def get_subscription(chat_id: int) -> Optional[dict]:
     with get_db() as conn:
@@ -4948,7 +4733,6 @@ def get_subscription(chat_id: int) -> Optional[dict]:
         "is_demo": row[4],
         "last_payment_note": row[5],
     }
-
 
 def set_subscription(
     chat_id: int,
@@ -4978,7 +4762,6 @@ def set_subscription(
     conn.commit()
     conn.close()
 
-
 def get_user_demo_status(chat_id: int) -> dict:
     record = get_user_record(chat_id)
     if not record:
@@ -4987,7 +4770,6 @@ def get_user_demo_status(chat_id: int) -> dict:
         "demo_used": record.get("demo_used", 0),
         "demo_expires_at": record.get("demo_end_at") or record.get("demo_expires_at"),
     }
-
 
 def ensure_bonus_tables(cur: sqlite3.Cursor):
     cur.execute(
@@ -5013,7 +4795,6 @@ def ensure_bonus_tables(cur: sqlite3.Cursor):
             "INSERT OR IGNORE INTO bonus_probabilities (days, weight) VALUES (?, ?)",
             (days, weight),
         )
-
 
 def get_bonus_probabilities() -> Dict[int, int]:
     conn = get_local_conn()
@@ -5043,7 +4824,6 @@ def get_bonus_probabilities() -> Dict[int, int]:
         return dict(BONUS_DEFAULT_PROBABILITIES)
     return weights
 
-
 def update_bonus_probabilities(new_weights: Dict[int, int]) -> Dict[int, int]:
     normalized: Dict[int, int] = {}
     allowed_days = set(BONUS_DEFAULT_PROBABILITIES.keys())
@@ -5069,13 +4849,11 @@ def update_bonus_probabilities(new_weights: Dict[int, int]) -> Dict[int, int]:
     conn.close()
     return normalized
 
-
 def bonus_stats_period_range(period: str) -> Tuple[datetime, datetime, str]:
     start_date, end_date, label = stats_period_range(period)
     start_dt = datetime.combine(start_date, datetime.min.time())
     end_dt = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
     return start_dt, end_dt, label
-
 
 def fetch_bonus_stats(period: str) -> dict:
     start_dt, end_dt, label = bonus_stats_period_range(period)
@@ -5134,7 +4912,6 @@ def fetch_bonus_stats(period: str) -> dict:
         "unique_users": unique_users,
     }
 
-
 def fetch_recent_bonus_usage(limit: int = 10) -> List[Tuple[int, Optional[datetime]]]:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -5160,7 +4937,6 @@ def fetch_recent_bonus_usage(limit: int = 10) -> List[Tuple[int, Optional[dateti
         recent.append((user_id, created_at))
     return recent
 
-
 def set_bonus_allowed(user_id: int, allowed: bool) -> bool:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -5173,14 +4949,12 @@ def set_bonus_allowed(user_id: int, allowed: bool) -> bool:
     conn.close()
     return updated
 
-
 def reset_bonus_spin(user_id: int):
     conn = get_local_conn()
     cur = conn.cursor()
     cur.execute("UPDATE users SET last_spin_at=NULL WHERE chat_id=?", (user_id,))
     conn.commit()
     conn.close()
-
 
 def set_last_spin_at(user_id: int, ts: datetime):
     conn = get_local_conn()
@@ -5189,12 +4963,10 @@ def set_last_spin_at(user_id: int, ts: datetime):
     conn.commit()
     conn.close()
 
-
 def parse_last_spin_at(record: Optional[dict]) -> Optional[datetime]:
     if not record:
         return None
     return parse_dt_safe(record.get("last_spin_at"))
-
 
 def resolve_user_entitlement(chat_id: int) -> Tuple[Optional[str], Optional[datetime]]:
     record = get_user_record(chat_id)
@@ -5219,7 +4991,6 @@ def resolve_user_entitlement(chat_id: int) -> Tuple[Optional[str], Optional[date
     entitlements.sort(key=lambda x: x[1], reverse=True)
     return entitlements[0]
 
-
 def apply_bonus_days(user_id: int, bonus_days: int, entitlement_type: Optional[str]):
     ensure_subscription_record(user_id)
     if entitlement_type == "demo":
@@ -5231,7 +5002,6 @@ def apply_bonus_days(user_id: int, bonus_days: int, entitlement_type: Optional[s
         )
         return new_exp
     return extend_subscription_with_bonus(user_id, bonus_days, "bonus_spin")
-
 
 def pick_bonus_days() -> int:
     probabilities = get_bonus_probabilities()
@@ -5245,7 +5015,6 @@ def pick_bonus_days() -> int:
         options = list(BONUS_DEFAULT_PROBABILITIES.keys())
         weights = list(BONUS_DEFAULT_PROBABILITIES.values())
     return random.choices(options, weights=weights, k=1)[0]
-
 
 def is_paid_user(record: Optional[dict], chat_id: int) -> bool:
     if is_user_unlimited(chat_id):
@@ -5265,7 +5034,6 @@ def is_paid_user(record: Optional[dict], chat_id: int) -> bool:
             return True
     return False
 
-
 def update_user_chance_usage(chat_id: int, last_used_at: Optional[datetime]):
     conn = get_local_conn()
     cur = conn.cursor()
@@ -5281,7 +5049,6 @@ def update_user_chance_usage(chat_id: int, last_used_at: Optional[datetime]):
     conn.commit()
     conn.close()
 
-
 def log_chance_bonus(user_id: int, granted_days: int, created_at: datetime):
     conn = get_local_conn()
     cur = conn.cursor()
@@ -5296,14 +5063,12 @@ def log_chance_bonus(user_id: int, granted_days: int, created_at: datetime):
     conn.commit()
     conn.close()
 
-
 def can_use_chance(record: Optional[dict], now: datetime) -> Tuple[bool, Optional[datetime]]:
     last_used_at = parse_dt_safe(record.get("chance_last_used_at")) if record else None
     if not last_used_at:
         return True, None
     next_available = last_used_at + timedelta(hours=BONUS_SPIN_COOLDOWN_HOURS)
     return now >= next_available, next_available
-
 
 def ensure_chance_usage_state(
     chat_id: int, record: Optional[dict], now: Optional[datetime] = None
@@ -5319,7 +5084,6 @@ def ensure_chance_usage_state(
     extra_clicks = 0
 
     return allowed_today, used_today, last_used_at, extra_clicks
-
 
 def handle_chance_request(user_id: int) -> None:
     chat_id = user_id
@@ -5370,8 +5134,6 @@ def handle_chance_request(user_id: int) -> None:
 
     bot.send_message(chat_id, message_text)
 
-
-
 def update_user_demo_end(chat_id: int, demo_end_at: Optional[datetime], approve: bool):
     conn = get_local_conn()
     cur = conn.cursor()
@@ -5389,7 +5151,6 @@ def update_user_demo_end(chat_id: int, demo_end_at: Optional[datetime], approve:
     )
     conn.commit()
     conn.close()
-
 
 def insert_subscription(
     chat_id: int,
@@ -5422,10 +5183,8 @@ def insert_subscription(
     conn.commit()
     conn.close()
 
-
 def mark_demo_used(chat_id: int, expires_at: datetime):
     update_user_demo_end(chat_id, expires_at, approve=True)
-
 
 def set_payment_note(chat_id: int, note: str):
     conn = get_local_conn()
@@ -5436,7 +5195,6 @@ def set_payment_note(chat_id: int, note: str):
     )
     conn.commit()
     conn.close()
-
 
 def log_approved_payment(chat_id: int, plan: str, amount: int):
     conn = get_local_conn()
@@ -5450,7 +5208,6 @@ def log_approved_payment(chat_id: int, plan: str, amount: int):
     )
     conn.commit()
     conn.close()
-
 
 def create_manual_payment_request(
     user_id: int, payment_code: str, selected_package: str, plan_key: Optional[str]
@@ -5478,7 +5235,6 @@ def create_manual_payment_request(
     conn.close()
     return request_id
 
-
 def get_manual_payment_request(request_id: int) -> Optional[dict]:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -5494,7 +5250,6 @@ def get_manual_payment_request(request_id: int) -> Optional[dict]:
     conn.close()
     return dict(row) if row else None
 
-
 def update_manual_payment_status(request_id: int, status: str) -> bool:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -5506,7 +5261,6 @@ def update_manual_payment_status(request_id: int, status: str) -> bool:
     updated = cur.rowcount > 0
     conn.close()
     return updated
-
 
 def resolve_plan_key_from_request(req: dict) -> Optional[str]:
     if not req:
@@ -5520,7 +5274,6 @@ def resolve_plan_key_from_request(req: dict) -> Optional[str]:
             return key
     return None
 
-
 def format_display_time(dt_raw: Optional[str]) -> str:
     if not dt_raw:
         return "-"
@@ -5530,7 +5283,6 @@ def format_display_time(dt_raw: Optional[str]) -> str:
     except Exception:
         return str(dt_raw)
 
-
 def parse_subscription_expiry(sub) -> Optional[datetime]:
     if sub and sub.get("expires_at"):
         try:
@@ -5538,7 +5290,6 @@ def parse_subscription_expiry(sub) -> Optional[datetime]:
         except Exception:
             return None
     return None
-
 
 def parse_referrer_from_text(text: str) -> Optional[int]:
     if not text:
@@ -5554,7 +5305,6 @@ def parse_referrer_from_text(text: str) -> Optional[int]:
             except Exception:
                 return None
     return None
-
 
 def format_referral_date(dt: datetime) -> str:
     months = [
@@ -5572,7 +5322,6 @@ def format_referral_date(dt: datetime) -> str:
         "Dekabr",
     ]
     return f"{dt.day} {months[dt.month - 1]} {dt.year}"
-
 
 def save_referral(
     referrer_chat_id: Optional[int], referred_chat_id: int, is_new_user: bool = False
@@ -5617,7 +5366,6 @@ def save_referral(
         conn.commit()
     conn.close()
 
-
 def get_referral(referred_chat_id: int) -> Optional[dict]:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -5636,7 +5384,6 @@ def get_referral(referred_chat_id: int) -> Optional[dict]:
         "reward_given": row[3],
     }
 
-
 def mark_referral_rewarded(referred_chat_id: int):
     conn = get_local_conn()
     cur = conn.cursor()
@@ -5646,7 +5393,6 @@ def mark_referral_rewarded(referred_chat_id: int):
     )
     conn.commit()
     conn.close()
-
 
 def record_referral_log(
     referrer_id: int, referred_user_id: Optional[int], bonus_days: int
@@ -5663,7 +5409,6 @@ def record_referral_log(
     conn.commit()
     conn.close()
 
-
 def extend_subscription_with_bonus(
     chat_id: int, bonus_days: int, note: str
 ) -> datetime:
@@ -5673,7 +5418,6 @@ def extend_subscription_with_bonus(
     plan_name = sub.get("plan") or note
     set_subscription(chat_id, plan_name, new_exp, is_active=1, is_demo=0, note=note)
     return new_exp
-
 
 def maybe_award_milestone_bonus(referrer_chat_id: int):
     conn = get_local_conn()
@@ -5720,7 +5464,6 @@ def maybe_award_milestone_bonus(referrer_chat_id: int):
     except Exception:
         pass
 
-
 def apply_referral_bonus(referred_chat_id: int):
     conn = get_local_conn()
     cur = conn.cursor()
@@ -5764,14 +5507,12 @@ def apply_referral_bonus(referred_chat_id: int):
         pass
     maybe_award_milestone_bonus(referrer_id)
 
-
 def process_referral_on_payment(
     referred_chat_id: int, sub_before_payment: Optional[dict], amount_paid: int
 ):
     if amount_paid <= 0:
         return
     apply_referral_bonus(referred_chat_id)
-
 
 def get_promo(code: str) -> Optional[dict]:
     conn = get_local_conn()
@@ -5790,7 +5531,6 @@ def get_promo(code: str) -> Optional[dict]:
         "is_active": row[2],
         "created_at": row[3],
     }
-
 
 def generate_promo_code(days: int) -> Optional[str]:
     conn = get_local_conn()
@@ -5815,7 +5555,6 @@ def generate_promo_code(days: int) -> Optional[str]:
     conn.close()
     return code
 
-
 def set_promo_status(code: str, active: bool):
     conn = get_local_conn()
     cur = conn.cursor()
@@ -5826,11 +5565,9 @@ def set_promo_status(code: str, active: bool):
     conn.commit()
     conn.close()
 
-
 def has_active_promo(chat_id: int) -> bool:
     status = get_user_promo_status(chat_id)
     return bool(status.get("active"))
-
 
 def has_used_promo(chat_id: int, code: str) -> bool:
     conn = get_local_conn()
@@ -5842,7 +5579,6 @@ def has_used_promo(chat_id: int, code: str) -> bool:
     res = cur.fetchone()[0] or 0
     conn.close()
     return res > 0
-
 
 def record_promo_usage(code: str, chat_id: int, expires_at: datetime):
     conn = get_local_conn()
@@ -5857,14 +5593,12 @@ def record_promo_usage(code: str, chat_id: int, expires_at: datetime):
     conn.commit()
     conn.close()
 
-
 def format_promo_date(dt: Optional[datetime], include_year: bool = False) -> str:
     if not dt:
         return "—"
     fmt = "%d %b %Y" if include_year else "%d %b"
     display_time = dt + timedelta(hours=4)
     return display_time.strftime(fmt)
-
 
 def set_user_promo_status(
     chat_id: int, active: bool, expires_at: Optional[datetime] = None
@@ -5882,7 +5616,6 @@ def set_user_promo_status(
         pass
     finally:
         conn.close()
-
 
 def get_user_promo_status(chat_id: int) -> dict:
     status = {"active": False, "expires_at": None}
@@ -5953,7 +5686,6 @@ def get_user_promo_status(chat_id: int) -> dict:
     conn.close()
     return status
 
-
 def build_promo_button(
     chat_id: int, include_year: bool = False
 ) -> types.InlineKeyboardButton:
@@ -5966,12 +5698,10 @@ def build_promo_button(
         "🎁 Promo kod daxil et", callback_data="promo_enter"
     )
 
-
 def send_promo_quick_action(chat_id: int):
     mk = types.InlineKeyboardMarkup()
     mk.add(build_promo_button(chat_id))
     bot.send_message(chat_id, "🎁 Promo menyusu:", reply_markup=mk)
-
 
 def apply_promo_code(chat_id: int, code_raw: str):
     code = (code_raw or "").strip().upper()
@@ -6074,7 +5804,6 @@ def apply_promo_code(chat_id: int, code_raw: str):
 
     return True, success_msg, new_exp
 
-
 def activate_demo_if_needed(chat_id: int, force: bool = False):
     sub = get_subscription(chat_id)
     if not sub:
@@ -6086,10 +5815,8 @@ def activate_demo_if_needed(chat_id: int, force: bool = False):
     expires = datetime.utcnow() + timedelta(days=3)
     set_subscription(chat_id, "demo", expires, is_active=1, is_demo=1, note="demo")
 
-
 def subscription_payment_code(chat_id: int) -> str:
     return f"BH-{chat_id}"
-
 
 def is_demo_available(chat_id: int) -> bool:
     status = get_user_computed_status(chat_id)
@@ -6107,14 +5834,12 @@ def is_demo_available(chat_id: int) -> bool:
         return False
     return True
 
-
 def build_card_payment_button(plan_key: str) -> types.InlineKeyboardButton:
     if CARD_PAYMENT_URL:
         return types.InlineKeyboardButton("💳 Kartla ödəniş", url=CARD_PAYMENT_URL)
     return types.InlineKeyboardButton(
         "💳 Kartla ödəniş (tezliklə)", callback_data=f"cardpay|{plan_key}"
     )
-
 
 def build_payment_action_markup(
     plan_key: str, plan: dict, payment_code: str, include_card_button: bool = True
@@ -6130,14 +5855,12 @@ def build_payment_action_markup(
     mk.add(types.InlineKeyboardButton("✅ Ödəniş etdim", callback_data=f"paydone|{plan_key}"))
     return mk
 
-
 def build_payment_plan_markup(
     plan_key: str, plan: dict, payment_code: str
 ) -> types.InlineKeyboardMarkup:
     mk = build_payment_action_markup(plan_key, plan, payment_code)
     mk.add(types.InlineKeyboardButton("🔙 Geri", callback_data="ui_back"))
     return mk
-
 
 def build_payment_menu_markup(chat_id: int):
     mk = types.InlineKeyboardMarkup(row_width=2)
@@ -6158,7 +5881,6 @@ def build_payment_menu_markup(chat_id: int):
         mk.add(types.InlineKeyboardButton("ℹ️ Haqqında", callback_data="payinfo"))
     return mk
 
-
 def send_payment_menu(chat_id: int):
     if not is_feature_enabled("payment", chat_id):
         send_or_edit_ui_message(chat_id, FEATURE_DISABLED_MESSAGE, None)
@@ -6171,11 +5893,9 @@ def send_payment_menu(chat_id: int):
         mk,
     )
 
-
 def is_support_session_open_for_user(user_id: int) -> bool:
     thread = get_support_thread_by_user(user_id)
     return bool(thread and thread.get("status") != SUPPORT_THREAD_STATUS_CLOSED)
-
 
 def is_user_support_active(user_id: int) -> bool:
     record = get_user_record(user_id)
@@ -6184,27 +5904,22 @@ def is_user_support_active(user_id: int) -> bool:
     state = get_support_session_state(user_id)
     return bool(state.get("active"))
 
-
 def has_closed_support_session_for_user(user_id: int) -> bool:
     thread = get_support_thread_by_user(user_id)
     return bool(thread and thread.get("status") == SUPPORT_THREAD_STATUS_CLOSED)
-
 
 def get_support_admin_active_thread_user_id(admin_id: int) -> Optional[int]:
     user_id = support_admin_state.get(admin_id, {}).get("active_thread_user_id")
     return int(user_id) if user_id else None
 
-
 def get_support_admin_reply_user_id(admin_id: int) -> Optional[int]:
     user_id = support_admin_state.get(admin_id, {}).get("reply_to_user_id")
     return int(user_id) if user_id else None
-
 
 def _set_support_admin_state(admin_id: int, **updates: Optional[Union[str, int]]):
     state = support_admin_state.get(admin_id, {})
     state.update(updates)
     support_admin_state[admin_id] = state
-
 
 def _should_notify_admin_for_user(user_id: int) -> bool:
     now_ts = time.time()
@@ -6213,7 +5928,6 @@ def _should_notify_admin_for_user(user_id: int) -> bool:
         return False
     support_last_admin_notify_ts[user_id] = now_ts
     return True
-
 
 def notify_admins_support_incoming(user_id: int) -> None:
     if not _should_notify_admin_for_user(user_id):
@@ -6230,7 +5944,6 @@ def notify_admins_support_incoming(user_id: int) -> None:
             bot.send_message(int(admin_id), text, reply_markup=mk)
         except Exception:
             logger.exception("Failed to notify admin about support message")
-
 
 def update_admin_support_ui_on_incoming(user_id: int) -> None:
     for admin_id in ADMIN_IDS:
@@ -6250,16 +5963,13 @@ def update_admin_support_ui_on_incoming(user_id: int) -> None:
         if active_thread_user_id is None:
             show_support_inbox(admin_chat_id)
 
-
 def send_support_message_to_user_from_admin(
     admin_message: types.Message, session: dict
 ) -> None:
     return
 
-
 def send_blocked_prompt(chat_id: int):
     bot.send_message(chat_id, BLOCKED_MESSAGE_TEXT)
-
 
 def check_subscription(
     chat_id: int, silent: bool = False, allow_blocked: bool = False
@@ -6282,20 +5992,16 @@ def check_subscription(
         send_payment_menu(chat_id)
     return False
 
-
 def is_user_allowed(chat_id: int) -> bool:
     return has_access(chat_id)
-
 
 def ensure_allowed(message, allow_blocked: bool = False) -> bool:
     chat_id = message.chat.id
     return check_subscription(chat_id, allow_blocked=allow_blocked)
 
-
 def ensure_allowed_cb(c, allow_blocked: bool = False) -> bool:
     chat_id = c.message.chat.id
     return check_subscription(chat_id, allow_blocked=allow_blocked)
-
 
 def check_limit(chat_id: int, key_type: str, daily_limit: int) -> bool:
     if daily_limit <= 0:
@@ -6312,7 +6018,6 @@ def check_limit(chat_id: int, key_type: str, daily_limit: int) -> bool:
     used = row[0] if row else 0
     return used < daily_limit
 
-
 def inc_limit(chat_id: int, key_type: str, inc: int = 1):
     today = date.today().isoformat()
     conn = get_local_conn()
@@ -6328,7 +6033,6 @@ def inc_limit(chat_id: int, key_type: str, inc: int = 1):
     )
     conn.commit()
     conn.close()
-
 
 def reset_user_state(chat_id: int):
     user_state.pop(chat_id, None)
@@ -6349,7 +6053,6 @@ def reset_user_state(chat_id: int):
     admin_message_state.pop(chat_id, None)
     admin_update_state.pop(chat_id, None)
 
-
 def reset_search_state(chat_id: int):
     state = search_state.get(chat_id)
     if (
@@ -6360,10 +6063,8 @@ def reset_search_state(chat_id: int):
         pass
     search_state.pop(chat_id, None)
 
-
 def compute_total_pages(total_count: int) -> int:
     return max(1, math.ceil(total_count / PAGE_SIZE))
-
 
 def get_last_24h_window():
     now = datetime.now()
@@ -6371,19 +6072,16 @@ def get_last_24h_window():
     logger.info("Last 24h stats computed using rolling window (now-24h)")
     return start, now
 
-
 def get_today_range():
     start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     end = datetime.now()
     return start, end
-
 
 def get_today_bounds():
     now = datetime.now()
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     end = start.replace(hour=23, minute=59, second=59, microsecond=999999)
     return start, end
-
 
 def _count_today_added_in_table(cur, table: str) -> int:
     cols = get_table_columns(cur, table)
@@ -6405,7 +6103,6 @@ def _count_today_added_in_table(cur, table: str) -> int:
         row = cur.fetchone()
         return int(row[0]) if row and row[0] is not None else 0
     return 0
-
 
 def get_today_added_count() -> int:
     total = 0
@@ -6444,16 +6141,13 @@ def get_today_added_count() -> int:
     logger.info("[STATS] today_added=%s", total)
     return total
 
-
 def format_sqlite_datetime(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S")
-
 
 def build_time_filter(days: Optional[int]) -> str:
     if days is None:
         return ""
     return f"WHERE date_read >= NOW() - INTERVAL '{days} days'"
-
 
 def build_time_clause(scope: str) -> str:
     if scope == "24h":
@@ -6466,7 +6160,6 @@ def build_time_clause(scope: str) -> str:
         return ""
     raise ValueError("Invalid stats scope")
 
-
 def get_table_columns(cur, table: str):
     try:
         cur.execute(f"PRAGMA table_info({table})")
@@ -6474,9 +6167,7 @@ def get_table_columns(cur, table: str):
     except Exception:
         return {}
 
-
 LISTINGS_TS_COLUMN: Optional[str] = None
-
 
 def get_listings_timestamp_column(cur) -> Optional[str]:
     global LISTINGS_TS_COLUMN
@@ -6489,7 +6180,6 @@ def get_listings_timestamp_column(cur) -> Optional[str]:
             return LISTINGS_TS_COLUMN
     logger.error("[STATS] No timestamp column found")
     return None
-
 
 def detect_user_listings_table(conn) -> Optional[str]:
     cur = conn.cursor()
@@ -6543,7 +6233,6 @@ def detect_user_listings_table(conn) -> Optional[str]:
     )
     return None
 
-
 def detect_table_date_column(cur, table: str) -> Optional[str]:
     cols = get_table_columns(cur, table)
     for key in (
@@ -6558,7 +6247,6 @@ def detect_table_date_column(cur, table: str) -> Optional[str]:
             return cols[key]
     return None
 
-
 def detect_created_at_column(cur, table: str) -> Optional[str]:
     cols = get_table_columns(cur, table)
     for key in ("created_at",):
@@ -6566,11 +6254,9 @@ def detect_created_at_column(cur, table: str) -> Optional[str]:
             return cols[key]
     return None
 
-
 def detect_added_at_column(cur, table: str) -> Optional[str]:
     cols = get_table_columns(cur, table)
     return cols.get("added_at")
-
 
 def _detect_ts_kind(cur, table: str, col: str) -> Optional[str]:
     try:
@@ -6595,7 +6281,6 @@ def _detect_ts_kind(cur, table: str, col: str) -> Optional[str]:
     if len(value_str) >= 10:
         return "iso"
     return None
-
 
 def is_auto_update_sender(message: Optional[types.Message]) -> bool:
     if not message:
@@ -6628,7 +6313,6 @@ def is_auto_update_sender(message: Optional[types.Message]) -> bool:
         return True
     return False
 
-
 def format_auto_link_datetime(dt_text: str) -> str:
     dt = parse_dt_safe(dt_text)
     if not dt:
@@ -6639,7 +6323,6 @@ def format_auto_link_datetime(dt_text: str) -> str:
         dt = dt.astimezone(timezone.utc)
     dt = dt + timedelta(hours=4)
     return dt.strftime("%Y-%m-%d %H:%M")
-
 
 def _select_first_existing_table(cur, candidates: Tuple[str, ...]) -> Optional[str]:
     for name in candidates:
@@ -6653,7 +6336,6 @@ def _select_first_existing_table(cur, candidates: Tuple[str, ...]) -> Optional[s
         except Exception:
             continue
     return None
-
 
 def detect_stats_source(cur, stat_context: str) -> Dict[str, Any]:
     table = None
@@ -6733,7 +6415,6 @@ def detect_stats_source(cur, stat_context: str) -> Dict[str, Any]:
     )
     return meta
 
-
 def ensure_created_at_column(
     conn, table: str, fallback_cols: Optional[Tuple[str, ...]] = None
 ):
@@ -6764,7 +6445,6 @@ def ensure_created_at_column(
             (format_sqlite_datetime(datetime.now()),),
         )
 
-
 def build_last_24h_clause(
     column: Optional[str],
     window: Optional[Tuple[datetime, datetime]] = None,
@@ -6780,7 +6460,6 @@ def build_last_24h_clause(
     ).format(col=column)
     return clause, [start_ts, start_str]
 
-
 def build_since_clause(column: Optional[str], since: datetime):
     if not column:
         return "", []
@@ -6791,7 +6470,6 @@ def build_since_clause(column: Optional[str], since: datetime):
         "OR (datetime({col}) >= datetime(?)))"
     ).format(col=column)
     return clause, [start_ts, start_str]
-
 
 def build_listing_date_expr(
     cur: sqlite3.Cursor,
@@ -6810,7 +6488,6 @@ def build_listing_date_expr(
             created_expr = f"{prefix}{created_col}"
             return f"COALESCE(date({date_expr}), date({created_expr}))"
     return f"date({date_expr})"
-
 
 def build_listing_order_parts(
     cur: sqlite3.Cursor,
@@ -6833,7 +6510,6 @@ def build_listing_order_parts(
         parts.append(f"{prefix}{id_col} DESC")
     return parts
 
-
 def build_today_clause(
     date_expr: Optional[str],
     window: Optional[Tuple[datetime, datetime]] = None,
@@ -6842,7 +6518,6 @@ def build_today_clause(
         return "", []
     start = (window or (None, None))[0] or get_today_range()[0]
     return f" AND {date_expr} = date(?)", [start.date().isoformat()]
-
 
 def build_date_range_clause(
     date_expr: Optional[str], date_days: Optional[Union[int, str]]
@@ -6863,14 +6538,12 @@ def build_date_range_clause(
         [f"-{days_int} day"],
     )
 
-
 def attach_local_db(conn) -> bool:
     try:
         conn.execute("ATTACH DATABASE ? AS local_db", (LOCAL_DB,))
         return True
     except Exception:
         return False
-
 
 def detach_local_db(conn, attached: bool):
     if not attached:
@@ -6879,7 +6552,6 @@ def detach_local_db(conn, attached: bool):
         conn.execute("DETACH DATABASE local_db")
     except Exception:
         pass
-
 
 def build_rayon_filter_sql(cur, table: str, rayon: Optional[str], prefix: str):
     if not rayon or rayon == "all":
@@ -6895,7 +6567,6 @@ def build_rayon_filter_sql(cur, table: str, rayon: Optional[str], prefix: str):
     conds = [f"LOWER(COALESCE({col},'')) LIKE ?" for col in targets]
     params = [f"%{rayon.lower()}%"] * len(targets)
     return " AND (" + " OR ".join(conds) + ")", params
-
 
 def count_main_active_listings(
     op_code: str = "all",
@@ -6939,7 +6610,6 @@ def count_main_active_listings(
         else:
             close_main_conn(conn)
 
-
 def count_local_active_listings(
     op_code: str = "all",
     prop_code: str = "all",
@@ -6969,18 +6639,16 @@ def count_local_active_listings(
     finally:
         conn.close()
 
-
 def count_today_listings(
-    filters: dict, op_override: Optional[str] = None, *, include_hidden: bool = False
+    filters: dict, op_override: Optional[str] = None
 ) -> int:
     filters = dict(filters or {})
     if op_override is not None:
         filters["op"] = op_override
     _, total = query_today_results(
-        filters, offset=0, limit=None, include_hidden=include_hidden
+        filters, offset=0, limit=None
     )
     return total
-
 
 def build_pagination_keyboard(page: int, total_pages: int):
     mk = types.InlineKeyboardMarkup()
@@ -6995,7 +6663,6 @@ def build_pagination_keyboard(page: int, total_pages: int):
     )
     return mk
 
-
 def set_pagination_state(
     chat_id: int, mode: str, params: dict, page: int, total_pages: int
 ):
@@ -7006,7 +6673,6 @@ def set_pagination_state(
         "total_pages": total_pages,
     }
 
-
 def build_listings_page_keyboard() -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup()
     mk.row(
@@ -7015,7 +6681,6 @@ def build_listings_page_keyboard() -> types.InlineKeyboardMarkup:
     )
     mk.add(types.InlineKeyboardButton("🔙 Geri", callback_data="listings_back"))
     return mk
-
 
 def clear_listings_page_messages(chat_id: int, keep_ids: Optional[Set[int]] = None):
     keep_ids = keep_ids or set()
@@ -7027,7 +6692,6 @@ def clear_listings_page_messages(chat_id: int, keep_ids: Optional[Set[int]] = No
             bot.delete_message(chat_id, msg_id)
         except Exception:
             continue
-
 
 def show_listings_page(
     user_id: int,
@@ -7089,13 +6753,11 @@ def show_listings_page(
         "message_ids": message_ids,
     }
 
-
 def cleanup_listing_sessions():
     now = time.time()
     for chat_id, sess in list(listing_sessions.items()):
         if now - sess.get("timestamp", 0) > LISTING_SESSION_TTL_SECONDS:
             listing_sessions.pop(chat_id, None)
-
 
 def get_active_listing_session(chat_id: int):
     cleanup_listing_sessions()
@@ -7107,10 +6769,8 @@ def get_active_listing_session(chat_id: int):
         return None
     return session
 
-
 def make_listing_ref(source: str, listing_id: int) -> str:
     return f"{source}:{listing_id}"
-
 
 def normalize_listing_item(item: dict):
     ev = item.get("data") if isinstance(item, dict) and "data" in item else item
@@ -7132,7 +6792,6 @@ def normalize_listing_item(item: dict):
         "id": listing_id,
         "data": ev,
     }
-
 
 def build_listing_action_keyboard(
     favorite_label: Optional[str],
@@ -7159,53 +6818,14 @@ def build_listing_action_keyboard(
 
     return mk
 
-
-def build_listing_visibility_button(
-    listing: dict,
-    *,
-    admin_mode: Optional[str],
-    chat_id: int,
-) -> Optional[types.InlineKeyboardButton]:
-    if not is_admin(chat_id):
-        return None
-    if listing.get("__source") != "main":
-        return None
-    listing_id = listing.get("id")
-    if listing_id is None:
-        return None
-    if listing.get("is_hidden") is None:
-        return None
-    is_hidden = bool(int(listing.get("is_hidden") or 0))
-    if is_hidden:
-        label = (
-            "👁‍🗨 Hamıya göstər"
-            if admin_mode == "admin_hidden"
-            else "👁‍🗨 Yenidən göstər"
-        )
-        action = "show"
-    else:
-        label = "🚫 Elanı gizlət"
-        action = "hide"
-    return types.InlineKeyboardButton(
-        label, callback_data=f"listing_vis:{action}:{listing_id}"
-    )
-
-
 def build_listing_navigation_keyboard(
     is_favorite: bool,
     listing_link: Optional[str] = None,
     whatsapp_url: Optional[str] = None,
-    *,
-    show_hide_button: bool = False,
-    visibility_button: Optional[types.InlineKeyboardButton] = None,
 ) -> types.InlineKeyboardMarkup:
     fav_label = "💔 Favori" if is_favorite else "❤️ Favori"
     mk = types.InlineKeyboardMarkup()
     row1 = [types.InlineKeyboardButton(fav_label, callback_data="fav:toggle")]
-    if show_hide_button:
-        row1.append(
-            types.InlineKeyboardButton("🙈 Gizlət", callback_data="listing_hide")
-        )
     mk.row(*row1)
     mk.row(
         types.InlineKeyboardButton("⬅️ Əvvəlki", callback_data="nav:prev"),
@@ -7218,15 +6838,11 @@ def build_listing_navigation_keyboard(
         row3.append(types.InlineKeyboardButton("💬 WhatsApp", url=whatsapp_url))
     if row3:
         mk.row(*row3)
-    if visibility_button:
-        mk.row(visibility_button)
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="nav:back"))
     return mk
 
-
 def offer_save_search(chat_id: int, params: dict):
     return
-
 
 def build_saved_search_from_structured(filters: dict):
     op_code = filters.get("op")
@@ -7270,7 +6886,6 @@ def build_saved_search_from_structured(filters: dict):
         "prop_type": prop_type,
     }
 
-
 def build_saved_search_from_keyword(operation: str):
     op_norm = normalize_operation_value(operation) if operation else None
     return {
@@ -7282,7 +6897,6 @@ def build_saved_search_from_keyword(operation: str):
         "prop_type": None,
     }
 
-
 def build_saved_search_from_smart(criteria: dict):
     op_norm = normalize_operation_value(criteria.get("operation"))
     return {
@@ -7293,7 +6907,6 @@ def build_saved_search_from_smart(criteria: dict):
         "rayon": criteria.get("rayon"),
         "prop_type": criteria.get("prop_type"),
     }
-
 
 def save_search(chat_id: int, params: dict):
     if not params:
@@ -7320,7 +6933,6 @@ def save_search(chat_id: int, params: dict):
     conn.commit()
     conn.close()
     return True
-
 
 def ensure_notification_records(
     chat_id: int, criteria_id: Optional[int], listing_ids: List[int]
@@ -7351,7 +6963,6 @@ def ensure_notification_records(
     conn.close()
     return inserted
 
-
 def fetch_listing_for_notification(listing_id: int):
     try:
         lid = int(listing_id)
@@ -7361,12 +6972,7 @@ def fetch_listing_for_notification(listing_id: int):
     if os.path.exists(MAIN_DB):
         conn_main = get_main_conn()
         cur_main = conn_main.cursor()
-        visibility_sql = build_listing_visibility_sql(
-            cur_main, "listings", include_hidden=False
-        )
-        cur_main.execute(
-            f"SELECT * FROM listings WHERE id=?{visibility_sql}", (lid,)
-        )
+        visibility_sql = ""
         row_main = cur_main.fetchone()
         if row_main:
             d_main = dict(row_main)
@@ -7386,7 +6992,6 @@ def fetch_listing_for_notification(listing_id: int):
         return d
     return None
 
-
 def get_saved_searches(chat_id: int):
     conn = get_local_conn()
     cur = conn.cursor()
@@ -7394,7 +6999,6 @@ def get_saved_searches(chat_id: int):
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return rows
-
 
 OPERATION_VARIANTS = {
     "sale": {"sale", "satılır", "satilir", "satış"},
@@ -7408,7 +7012,6 @@ OPERATION_DB_MAP = {
 
 _operation_cache = {}
 
-
 def normalize_operation_value(val: str):
     if not val:
         return None
@@ -7417,7 +7020,6 @@ def normalize_operation_value(val: str):
         if v == norm or v in variants:
             return norm
     return None
-
 
 def detect_db_operation_value(op_norm: str, source: str):
     if not op_norm:
@@ -7461,7 +7063,6 @@ def detect_db_operation_value(op_norm: str, source: str):
     _operation_cache[key] = fallback
     return fallback
 
-
 def show_loading_message(chat_id: int, edit_target=None):
     text = "🔎 Elanlar axtarılır... zəhmət olmasa gözləyin."
     if edit_target:
@@ -7482,7 +7083,6 @@ def show_loading_message(chat_id: int, edit_target=None):
     except Exception:
         return None
 
-
 def replace_loading_message(ref, text):
     if not ref:
         return False
@@ -7492,7 +7092,6 @@ def replace_loading_message(ref, text):
         return bool(msg_id)
     except Exception:
         return False
-
 
 def log_search_event(
     chat_id: int, search_type: str, operation=None, rayon=None, query_text=None
@@ -7530,14 +7129,12 @@ def log_search_event(
 
     record_agent_activity(chat_id, metric="searches")
 
-
 AGENT_METRIC_FIELDS = {
     "searches": "searches",
     "views": "views",
     "whatsapp": "whatsapp",
     "favorites": "favorites",
 }
-
 
 def is_agent_user(chat_id: Optional[int]) -> bool:
     if not chat_id:
@@ -7579,7 +7176,6 @@ def is_agent_user(chat_id: Optional[int]) -> bool:
         pass
     return False
 
-
 def record_agent_activity(chat_id: Optional[int], metric: Optional[str] = None):
     if not chat_id or not is_agent_user(chat_id):
         return
@@ -7613,23 +7209,14 @@ def record_agent_activity(chat_id: Optional[int], metric: Optional[str] = None):
         if conn:
             conn.close()
 
-
 def fetch_listing_by_source(
     source: str,
     listing_id: int,
-    *,
-    include_hidden: bool = True,
 ):
     if source == "main" and os.path.exists(MAIN_DB):
         conn = get_main_conn()
         cur = conn.cursor()
-        visibility_sql = build_listing_visibility_sql(
-            cur, "listings", include_hidden=include_hidden
-        )
-        cur.execute(
-            f"SELECT * FROM listings WHERE id=?{visibility_sql}",
-            (listing_id,),
-        )
+        cur.execute("SELECT * FROM listings WHERE id=?", (listing_id,))
         row = cur.fetchone()
         close_main_conn(conn)
         if row:
@@ -7658,145 +7245,12 @@ def fetch_listing_by_source(
             return d
     return None
 
-
-def fetch_listing_by_any(listing_id: int, *, include_hidden: bool = True):
+def fetch_listing_by_any(listing_id: int):
     for src in ("main", "local", "agents"):
-        ev = fetch_listing_by_source(src, listing_id, include_hidden=include_hidden)
+        ev = fetch_listing_by_source(src, listing_id)
         if ev:
             return ev
     return None
-
-
-def set_listing_hidden_state(listing_id: int, is_hidden: int) -> bool:
-    if not os.path.exists(MAIN_DB):
-        return False
-    conn = get_main_conn()
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            "UPDATE listings SET is_hidden=? WHERE id=?",
-            (int(is_hidden), int(listing_id)),
-        )
-        conn.commit()
-        return cur.rowcount > 0
-    except sqlite3.OperationalError:
-        return False
-    finally:
-        close_main_conn(conn)
-
-
-def add_favorite_entry(chat_id: int, source: str, listing_id: int) -> bool:
-    source = source or "main"
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT OR IGNORE INTO favorites (chat_id, listing_id, source, added_at)
-        VALUES (?, ?, ?, ?)
-        """,
-        (chat_id, listing_id, source, datetime.utcnow().isoformat()),
-    )
-    inserted = cur.rowcount > 0
-    conn.commit()
-    conn.close()
-    if inserted:
-        record_favorite_price(source, listing_id)
-        record_listing_stat(listing_id, "favorite", chat_id)
-        record_agent_activity(chat_id, metric="favorites")
-    return inserted
-
-
-def remove_favorite_entry(chat_id: int, source: str, listing_id: int) -> bool:
-    source = source or "main"
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "DELETE FROM favorites WHERE chat_id=? AND listing_id=? AND source=?",
-        (chat_id, listing_id, source),
-    )
-    removed = cur.rowcount > 0
-    conn.commit()
-    conn.close()
-    return removed
-
-
-def is_favorite_entry(chat_id: int, source: str, listing_id: int) -> bool:
-    source = source or "main"
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT 1 FROM favorites WHERE chat_id=? AND listing_id=? AND source=?",
-        (chat_id, listing_id, source),
-    )
-    row = cur.fetchone()
-    conn.close()
-    return bool(row)
-
-
-def hide_listing_for_user(chat_id: int, source: str, listing_id: int) -> bool:
-    if not chat_id or listing_id is None:
-        return False
-    source = source or "main"
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT OR IGNORE INTO hidden_listings (chat_id, listing_id, source, hidden_at)
-        VALUES (?, ?, ?, ?)
-        """,
-        (chat_id, listing_id, source, datetime.utcnow().isoformat()),
-    )
-    conn.commit()
-    changed = cur.rowcount and cur.rowcount > 0
-    conn.close()
-    return bool(changed)
-
-
-def is_listing_hidden_for_user(chat_id: int, source: str, listing_id: int) -> bool:
-    if not chat_id or listing_id is None:
-        return False
-    source = source or "main"
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT 1 FROM hidden_listings WHERE chat_id=? AND listing_id=? AND source=?",
-        (chat_id, listing_id, source),
-    )
-    row = cur.fetchone()
-    conn.close()
-    return bool(row)
-
-
-def get_hidden_listing_refs(chat_id: int) -> Set[str]:
-    if not chat_id:
-        return set()
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT listing_id, source FROM hidden_listings WHERE chat_id=?",
-        (chat_id,),
-    )
-    rows = cur.fetchall()
-    conn.close()
-    return {make_listing_ref(row["source"], row["listing_id"]) for row in rows}
-
-
-def filter_hidden_listings(chat_id: int, items: List[dict]) -> List[dict]:
-    hidden_refs = get_hidden_listing_refs(chat_id)
-    if not hidden_refs:
-        return items
-    filtered = []
-    for item in items:
-        norm = normalize_listing_item(item)
-        if not norm:
-            filtered.append(item)
-            continue
-        ref_key = make_listing_ref(norm["source"], norm["id"])
-        if ref_key in hidden_refs:
-            continue
-        filtered.append(item)
-    return filtered
-
 
 def should_track_interaction(
     chat_id: Optional[int], listing_id: int, action: str
@@ -7809,7 +7263,6 @@ def should_track_interaction(
         return False
     cache.add(key)
     return True
-
 
 def record_listing_stat(
     listing_id: Optional[int], action: str, chat_id: Optional[int] = None
@@ -7856,7 +7309,6 @@ def record_listing_stat(
         if conn:
             conn.close()
 
-
 def record_listing_view(
     source: str, listing_id: Optional[int], chat_id: Optional[int] = None
 ):
@@ -7895,13 +7347,10 @@ def record_listing_view(
             conn.close()
     record_listing_stat(listing_id, "view", chat_id)
 
-
 def query_top_viewed_listings(
     days: int = 7,
     offset: int = 0,
     limit: int = None,
-    *,
-    include_hidden: bool = False,
 ):
     conn = get_local_conn()
     cur = conn.cursor()
@@ -7922,7 +7371,7 @@ def query_top_viewed_listings(
 
     enriched = []
     for r in rows:
-        ev = fetch_listing_by_any(r["listing_id"], include_hidden=include_hidden)
+        ev = fetch_listing_by_any(r["listing_id"])
         if not ev:
             continue
         ev["__views"] = r["views"]
@@ -7934,10 +7383,8 @@ def query_top_viewed_listings(
 
     return enriched, total
 
-
 def get_listing_price(ev: dict) -> Optional[int]:
     return parse_price_value(ev.get("price") or ev.get("Qiymet"))
-
 
 def upsert_favorite_price(source: str, listing_id: int, price_val: Optional[int]):
     if price_val is None:
@@ -7957,14 +7404,12 @@ def upsert_favorite_price(source: str, listing_id: int, price_val: Optional[int]
     conn.commit()
     conn.close()
 
-
 def record_favorite_price(source: str, listing_id: int):
-    ev = fetch_listing_by_source(source, listing_id, include_hidden=False)
+    ev = fetch_listing_by_source(source, listing_id)
     if not ev:
         return
     price_val = get_listing_price(ev)
     upsert_favorite_price(source, listing_id, price_val)
-
 
 def send_logo_if_exists(chat_id: int):
     try:
@@ -7973,7 +7418,6 @@ def send_logo_if_exists(chat_id: int):
                 bot.send_photo(chat_id, f)
     except:
         pass
-
 
 MENU_REFRESH_BUTTON = "🔄 Botu yenilə"
 MAIN_MENU_BUTTONS = [
@@ -7993,12 +7437,10 @@ market_pulse_cache: Dict[str, Dict[str, Any]] = {}
 STAT_CONTEXT_USER = "user"
 STAT_CONTEXT_ADMIN = "admin"
 
-
 def send_refresh_button(chat_id: int):
     mk = types.InlineKeyboardMarkup()
     mk.add(types.InlineKeyboardButton(MENU_REFRESH_BUTTON, callback_data="bot_refresh"))
     bot.send_message(chat_id, MENU_REFRESH_BUTTON, reply_markup=mk)
-
 
 def recover_main_menu(
     chat_id: Optional[int],
@@ -8021,7 +7463,6 @@ def recover_main_menu(
     except Exception:
         logger.exception("Failed to send main menu chat_id=%s", chat_id)
 
-
 def send_with_reply_keyboard(
     chat_id: int,
     text: str,
@@ -8038,7 +7479,6 @@ def send_with_reply_keyboard(
         disable_web_page_preview=disable_preview,
     )
 
-
 def delete_user_command_message(message: types.Message) -> None:
     try:
         bot.delete_message(message.chat.id, message.message_id)
@@ -8049,12 +7489,10 @@ def delete_user_command_message(message: types.Message) -> None:
             message.message_id,
         )
 
-
 def _is_inline_keyboard(
     keyboard: Optional[Union[types.InlineKeyboardMarkup, types.ReplyKeyboardMarkup]],
 ) -> bool:
     return isinstance(keyboard, types.InlineKeyboardMarkup)
-
 
 def _clear_last_message_record(user_id: int) -> None:
     last_ui_message_id[user_id] = None
@@ -8062,13 +7500,11 @@ def _clear_last_message_record(user_id: int) -> None:
     user_last_message.pop(user_id, None)
     set_support_session_last_ui_message_id(user_id, None)
 
-
 def _store_last_message_record(user_id: int, message_id: int, editable: bool) -> None:
     last_ui_message_id[user_id] = message_id
     user_last_message_id[user_id] = message_id
     user_last_message[user_id] = {"message_id": message_id, "editable": editable}
     set_support_session_last_ui_message_id(user_id, message_id)
-
 
 def render_ui(
     user_id: int,
@@ -8123,7 +7559,6 @@ def render_ui(
     _store_last_message_record(user_id, msg.message_id, editable=editable)
     return msg.message_id
 
-
 def edit_or_send_message(
     user_id: int,
     text: str,
@@ -8146,7 +7581,6 @@ def edit_or_send_message(
     if msg_id:
         state[user_id] = msg_id
     return msg_id
-
 
 def update_ui_message(
     user_id: int,
@@ -8191,7 +7625,6 @@ def update_ui_message(
         chat_id=chat_id,
     )
 
-
 def send_or_edit_ui_message(
     user_id: int,
     text: str,
@@ -8209,22 +7642,17 @@ def send_or_edit_ui_message(
         disable_preview=disable_preview,
     )
 
-
 def set_navigation_state(chat_id: int, state: str) -> None:
     navigation_state[chat_id] = state
-
 
 def get_navigation_state(chat_id: int) -> str:
     return navigation_state.get(chat_id, STATE_MAIN_MENU)
 
-
 def set_search_menu_active(chat_id: int, active: bool) -> None:
     search_menu_active[chat_id] = active
 
-
 def is_search_menu_active(chat_id: int) -> bool:
     return search_menu_active.get(chat_id, False)
-
 
 def return_to_previous_menu(chat_id: int) -> None:
     nav_state = get_navigation_state(chat_id)
@@ -8241,7 +7669,6 @@ def return_to_previous_menu(chat_id: int) -> None:
         send_admin_panel(chat_id, page=admin_panel_page_state.get(chat_id, 1))
         return
     return_to_main_menu(chat_id)
-
 
 def build_main_menu(
     chat_id: int,
@@ -8290,17 +7717,14 @@ def build_main_menu(
 
     return kb
 
-
 def build_main_menu_inline_markup() -> Optional[types.InlineKeyboardMarkup]:
     return None
-
 
 def should_show_bonus_button(chat_id: int) -> bool:
     record = get_user_record(chat_id)
     if record and (record.get("blocked") or record.get("is_blocked")):
         return False
     return True
-
 
 def send_main_menu(
     chat_id: int,
@@ -8341,11 +7765,9 @@ def send_main_menu(
         disable_preview=disable_preview,
     )
 
-
 def restore_reply_keyboard(chat_id: int, text: Optional[str] = None):
     send_main_menu(chat_id, text or "Əsas menyu", force=True)
     logger.info("[UI] reply_keyboard_restored chat_id=%s", chat_id)
-
 
 def build_search_menu_inline_markup(chat_id: int) -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup()
@@ -8382,16 +7804,13 @@ def build_search_menu_inline_markup(chat_id: int) -> types.InlineKeyboardMarkup:
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="search_menu:back"))
     return mk
 
-
 def send_search_menu(chat_id: int):
     mk = build_search_menu_inline_markup(chat_id)
     set_navigation_state(chat_id, STATE_SEARCH_MENU)
     set_search_menu_active(chat_id, True)
     send_or_edit_ui_message(chat_id, "🔎 Axtarış menyusu:", mk)
 
-
 # =============== ELAN KARTI (WhatsApp ilə) ===============
-
 
 def make_whatsapp_url(
     phone: str, text: str = "Salam, elanınız haqqında maraqlanmaq istəyirəm."
@@ -8408,7 +7827,6 @@ def make_whatsapp_url(
         return None
     return f"https://wa.me/{p}?text={quote(text, safe='')}"
 
-
 def get_listing_region_value(ev: dict, source: Optional[str] = None) -> str:
     region = ev.get("region_name") or ev.get("Region_Name") or ev.get("region")
     if not region:
@@ -8417,17 +7835,14 @@ def get_listing_region_value(ev: dict, source: Optional[str] = None) -> str:
             region = ev.get("rayon") or ev.get("Rayon_Qesebe") or ev.get("Rayon")
     return str(region or "").strip()
 
-
 def get_listing_region_display(ev: dict, source: Optional[str] = None) -> str:
     region = get_listing_region_value(ev, source)
     return region if region else "Region not specified"
-
 
 def get_listing_address_display(ev: dict) -> str:
     address = ev.get("address") or ev.get("Unvan") or ""
     address = str(address or "").strip()
     return address if address else "-"
-
 
 def build_whatsapp_message(ev: dict) -> str:
     op_raw = (ev.get("operation") or ev.get("Emeliyyat") or "").lower()
@@ -8463,7 +7878,6 @@ def build_whatsapp_message(ev: dict) -> str:
         message_lines.extend(["", "Elan linki:", link])
     return "\n".join(message_lines)
 
-
 def _strip_contact_details(text: str, ev: dict) -> str:
     phone_raw = ev.get("phone") or ev.get("Elaqe_nomresi")
     owner_name = (
@@ -8494,7 +7908,6 @@ def _strip_contact_details(text: str, ev: dict) -> str:
 
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
-
 
 def build_listing_text(ev: dict, source: str, progress_text: Optional[str] = None) -> str:
     date_val = (
@@ -8609,7 +8022,6 @@ def build_listing_text(ev: dict, source: str, progress_text: Optional[str] = Non
         return "ℹ️ Elan məlumatı mövcud deyil"
     return text
 
-
 def send_listing_card(
     chat_id: int,
     ev: dict,
@@ -8643,21 +8055,12 @@ def send_listing_card(
     mk = build_listing_action_keyboard(
         favorite_label, favorite_callback, link, wa_url
     )
-    listing_payload = dict(ev) if isinstance(ev, dict) else {}
-    listing_payload["__source"] = source
-    visibility_button = build_listing_visibility_button(
-        listing_payload, admin_mode=None, chat_id=chat_id
-    )
-    if visibility_button:
-        mk.row(visibility_button)
-
     if extra_buttons:
         for btn in extra_buttons:
             mk.add(btn)
 
     text = build_listing_text(ev, source)
     return bot.send_message(chat_id, text, reply_markup=mk)
-
 
 def register_or_update_user_if_needed(message, start_arg: str) -> bool:
     chat_id = message.chat.id
@@ -8857,7 +8260,6 @@ def register_or_update_user_if_needed(message, start_arg: str) -> bool:
     logger.info("/start executed successfully for user %s", chat_id)
     return is_first_time
 
-
 @bot.message_handler(func=lambda m: m.text == "🤝 Dostunu dəvət et")
 def share_referral(message):
     if message.text and message.text.startswith('/'):
@@ -8888,9 +8290,7 @@ def share_referral(message):
     )
     update_ui_message(chat_id, chat_id, text, None)
 
-
 # =============== 📝 MÜŞTƏRİ SORĞULARI ===============
-
 
 REQUEST_RAYONS = [
     "Binəqədi",
@@ -8911,7 +8311,6 @@ REQUEST_RAYONS = [
     "Digər",
 ]
 
-
 def build_request_rayon_keyboard(
     include_back: bool = True,
 ) -> types.ReplyKeyboardMarkup:
@@ -8928,7 +8327,6 @@ def build_request_rayon_keyboard(
         kb.row("⬅️ Geri (Əsas menyu)")
     return kb
 
-
 def build_request_rooms_keyboard() -> types.ReplyKeyboardMarkup:
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("1", "2")
@@ -8936,14 +8334,11 @@ def build_request_rooms_keyboard() -> types.ReplyKeyboardMarkup:
     kb.row("⬅️ Geri (Əsas menyu)")
     return kb
 
-
 def reset_customer_request(chat_id: int):
     customer_request_state.pop(chat_id, None)
 
-
 def get_customer_request_step(chat_id: int) -> Optional[str]:
     return customer_request_state.get(chat_id, {}).get("step")
-
 
 def handle_customer_request_nav(message) -> bool:
     chat_id = message.chat.id
@@ -8954,7 +8349,6 @@ def handle_customer_request_nav(message) -> bool:
         return True
     return False
 
-
 def validate_phone_number(phone: str) -> bool:
     if not phone:
         return False
@@ -8963,7 +8357,6 @@ def validate_phone_number(phone: str) -> bool:
         return False
     pattern = r"^\+?\d[\d\s\-()]{7,}$"
     return bool(re.match(pattern, phone.strip()))
-
 
 def check_request_rate_limit(chat_id: int) -> Optional[int]:
     conn = get_local_conn()
@@ -8986,7 +8379,6 @@ def check_request_rate_limit(chat_id: int) -> Optional[int]:
     if remaining > 0:
         return int(remaining)
     return None
-
 
 def persist_customer_request(chat_id: int, data: dict) -> Optional[int]:
     conn = get_local_conn()
@@ -9042,7 +8434,6 @@ def persist_customer_request(chat_id: int, data: dict) -> Optional[int]:
     conn.close()
     return req_id
 
-
 def format_customer_request_card(row: dict) -> str:
     req_type = _row_value_safe(row, "request_type")
     req_txt = "Alış" if req_type == "buy" else "Kirayə"
@@ -9065,7 +8456,6 @@ def format_customer_request_card(row: dict) -> str:
     ]
     return "\n".join(lines)
 
-
 def is_customer_request_favorited(user_id: int, request_id: int) -> bool:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -9079,7 +8469,6 @@ def is_customer_request_favorited(user_id: int, request_id: int) -> bool:
     row = cur.fetchone()
     conn.close()
     return bool(row)
-
 
 def add_customer_request_favorite(user_id: int, request_id: int) -> bool:
     conn = get_local_conn()
@@ -9096,7 +8485,6 @@ def add_customer_request_favorite(user_id: int, request_id: int) -> bool:
     conn.close()
     return inserted
 
-
 def is_customer_request_archived(user_id: int, request_id: int) -> bool:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -9110,7 +8498,6 @@ def is_customer_request_archived(user_id: int, request_id: int) -> bool:
     row = cur.fetchone()
     conn.close()
     return bool(row)
-
 
 def add_customer_request_archive(user_id: int, request_id: int) -> bool:
     conn = get_local_conn()
@@ -9127,7 +8514,6 @@ def add_customer_request_archive(user_id: int, request_id: int) -> bool:
     conn.close()
     return inserted
 
-
 def remove_customer_request_archive(user_id: int, request_id: int) -> bool:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -9142,7 +8528,6 @@ def remove_customer_request_archive(user_id: int, request_id: int) -> bool:
     conn.commit()
     conn.close()
     return deleted
-
 
 def fetch_active_requests_by_rayon(
     rayon: str,
@@ -9166,7 +8551,6 @@ def fetch_active_requests_by_rayon(
     conn.close()
     return [dict(r) for r in rows]
 
-
 def fetch_customer_request_by_id(req_id: Optional[int]) -> Optional[dict]:
     if not req_id:
         return None
@@ -9176,7 +8560,6 @@ def fetch_customer_request_by_id(req_id: Optional[int]) -> Optional[dict]:
     row = cur.fetchone()
     conn.close()
     return dict(row) if row else None
-
 
 def ensure_customer_request_action_allowed(admin_chat_id: int, req_id: str) -> bool:
     try:
@@ -9192,7 +8575,6 @@ def ensure_customer_request_action_allowed(admin_chat_id: int, req_id: str) -> b
         bot.send_message(admin_chat_id, "⚠️ Sorğu artıq silinib.")
         return False
     return True
-
 
 def format_agent_request_card(row: dict) -> str:
     req_type = _row_value_safe(row, "request_type")
@@ -9215,7 +8597,6 @@ def format_agent_request_card(row: dict) -> str:
         f"📅 Tarix: {date_txt}",
     ]
     return "\n".join(lines)
-
 
 def fetch_agent_requests_page(
     rayon: str,
@@ -9254,7 +8635,6 @@ def fetch_agent_requests_page(
     conn.close()
     return rows, total, total_pages, page
 
-
 def fetch_customer_request_type_counts(user_id: Optional[int]) -> dict:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -9275,7 +8655,6 @@ def fetch_customer_request_type_counts(user_id: Optional[int]) -> dict:
     counts = {row["request_type"]: row["cnt"] for row in cur.fetchall()}
     conn.close()
     return counts
-
 
 def fetch_customer_request_district_counts(
     request_type: str, user_id: Optional[int]
@@ -9300,7 +8679,6 @@ def fetch_customer_request_district_counts(
     rows = [(row["rayon"], row["cnt"]) for row in cur.fetchall()]
     conn.close()
     return rows
-
 
 def build_customer_requests_operation_menu(
     chat_id: int, message: Optional[types.Message] = None
@@ -9334,7 +8712,6 @@ def build_customer_requests_operation_menu(
         return
     render_ui(chat_id, text, mk)
 
-
 def show_customer_request_district_menu(
     chat_id: int, request_type: str, message: Optional[types.Message] = None
 ):
@@ -9365,7 +8742,6 @@ def show_customer_request_district_menu(
         return
     render_ui(chat_id, text, mk)
 
-
 def agent_has_interest(agent_chat_id: int, request_id: int) -> bool:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -9376,7 +8752,6 @@ def agent_has_interest(agent_chat_id: int, request_id: int) -> bool:
     row = cur.fetchone()
     conn.close()
     return bool(row)
-
 
 def store_agent_interest(agent_chat_id: int, request_id: int) -> bool:
     conn = get_local_conn()
@@ -9393,7 +8768,6 @@ def store_agent_interest(agent_chat_id: int, request_id: int) -> bool:
     conn.close()
     return inserted
 
-
 def add_agent_notification(agent_chat_id: int, request_id: int) -> bool:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -9408,7 +8782,6 @@ def add_agent_notification(agent_chat_id: int, request_id: int) -> bool:
     conn.commit()
     conn.close()
     return inserted
-
 
 def notify_agents_for_request(req_row: Optional[dict]):
     if not req_row:
@@ -9442,7 +8815,6 @@ def notify_agents_for_request(req_row: Optional[dict]):
             except Exception:
                 pass
 
-
 def parse_int_from_text(value: Optional[str]) -> Optional[int]:
     if value is None:
         return None
@@ -9454,10 +8826,8 @@ def parse_int_from_text(value: Optional[str]) -> Optional[int]:
     except Exception:
         return None
 
-
 def parse_request_price(value: Optional[str]) -> Optional[int]:
     return parse_int_from_text(value)
-
 
 def fetch_active_customer_request_rules() -> List[dict]:
     conn = get_local_conn()
@@ -9471,7 +8841,6 @@ def fetch_active_customer_request_rules() -> List[dict]:
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return rows
-
 
 def customer_request_matches_rule(req_row: dict, rule: dict) -> bool:
     if not req_row or not rule:
@@ -9525,7 +8894,6 @@ def customer_request_matches_rule(req_row: dict, rule: dict) -> bool:
 
     return True
 
-
 def add_customer_request_alert(user_id: int, rule_id: int, request_id: int) -> bool:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -9541,7 +8909,6 @@ def add_customer_request_alert(user_id: int, rule_id: int, request_id: int) -> b
     conn.close()
     return inserted
 
-
 def format_customer_request_alert_text(req_row: dict) -> str:
     req_type = format_request_rule_type(_row_value_safe(req_row, "request_type"))
     rayon = _row_value_safe(req_row, "rayon") or "-"
@@ -9553,7 +8920,6 @@ def format_customer_request_alert_text(req_row: dict) -> str:
         f"💰 {budget}\n"
         f"🛏 {rooms} otaq"
     )
-
 
 def notify_users_for_customer_request(req_row: Optional[dict]):
     if not req_row:
@@ -9595,7 +8961,6 @@ def notify_users_for_customer_request(req_row: Optional[dict]):
         except Exception:
             pass
 
-
 def fetch_active_keyword_alerts() -> List[dict]:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -9608,7 +8973,6 @@ def fetch_active_keyword_alerts() -> List[dict]:
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return rows
-
 
 def get_keyword_alert_last_checked(key: str) -> Optional[datetime]:
     conn = get_local_conn()
@@ -9629,7 +8993,6 @@ def get_keyword_alert_last_checked(key: str) -> Optional[datetime]:
     except Exception:
         return None
 
-
 def set_keyword_alert_last_checked(key: str, value: datetime):
     conn = get_local_conn()
     cur = conn.cursor()
@@ -9644,10 +9007,8 @@ def set_keyword_alert_last_checked(key: str, value: datetime):
     conn.commit()
     conn.close()
 
-
 def parse_keyword_regions(regions_raw: Optional[str]) -> List[str]:
     return [normalize_text(r) for r in (regions_raw or "").split(",") if r.strip()]
-
 
 def keyword_region_matches(rayon_raw: str, regions_raw: str) -> bool:
     regions = parse_keyword_regions(regions_raw)
@@ -9657,7 +9018,6 @@ def keyword_region_matches(rayon_raw: str, regions_raw: str) -> bool:
     if not rayon_norm:
         return False
     return any(region in rayon_norm for region in regions)
-
 
 def build_listing_text_blob(ev: dict) -> str:
     title = ev.get("title") or ev.get("prop_type") or ev.get("Emlakin_novu") or ""
@@ -9682,7 +9042,6 @@ def build_listing_text_blob(ev: dict) -> str:
     ]
     return normalize_text(" ".join([str(p) for p in parts if p]))
 
-
 def build_keyword_match_fields(ev: dict) -> Dict[str, str]:
     return {
         "title": str(
@@ -9696,7 +9055,6 @@ def build_keyword_match_fields(ev: dict) -> Dict[str, str]:
         "operation": str(ev.get("operation") or ev.get("Emeliyyat_novu") or ""),
         "property_type": str(ev.get("prop_type") or ev.get("Emlakin_novu") or ""),
     }
-
 
 def build_listing_unique_key(ev: dict, source: str) -> Optional[str]:
     listing_id = ev.get("id") or ev.get("ID") or ev.get("Elan_kodu")
@@ -9717,7 +9075,6 @@ def build_listing_unique_key(ev: dict, source: str) -> Optional[str]:
     fallback = ":".join([source] + [c for c in components if c])
     return fallback if fallback else None
 
-
 def build_request_text_blob(req_row: dict) -> str:
     parts = [
         _row_value_safe(req_row, "request_type"),
@@ -9727,7 +9084,6 @@ def build_request_text_blob(req_row: dict) -> str:
         _row_value_safe(req_row, "notes"),
     ]
     return normalize_text(" ".join([str(p) for p in parts if p]))
-
 
 def keyword_matches_text(keyword_raw: str, text_blob: str) -> bool:
     if not keyword_raw or not text_blob:
@@ -9740,7 +9096,6 @@ def keyword_matches_text(keyword_raw: str, text_blob: str) -> bool:
         return False
     return keyword_norm in text_norm
 
-
 def keyword_matches_listing_fields(keyword_raw: str, ev: dict) -> bool:
     keyword_norm = normalize_text(keyword_raw or "")
     if not keyword_norm:
@@ -9750,7 +9105,6 @@ def keyword_matches_listing_fields(keyword_raw: str, ev: dict) -> bool:
         if field_norm and keyword_norm in field_norm:
             return True
     return False
-
 
 def listing_phrase_matches(ev: dict, phrase_raw: str) -> bool:
     phrase_norm = normalize_text(phrase_raw or "")
@@ -9769,7 +9123,6 @@ def listing_phrase_matches(ev: dict, phrase_raw: str) -> bool:
             return True
     return False
 
-
 def listing_tokens_match(ev: dict, tokens: List[str]) -> bool:
     if not tokens:
         return False
@@ -9778,14 +9131,11 @@ def listing_tokens_match(ev: dict, tokens: List[str]) -> bool:
         return False
     return all(token in listing_text for token in tokens)
 
-
 def _matches_phrase(ev: dict, phrase: str) -> bool:
     return listing_phrase_matches(ev, phrase)
 
-
 def _matches_tokens(ev: dict, tokens: List[str]) -> bool:
     return listing_tokens_match(ev, tokens)
-
 
 def record_keyword_alert_hit(
     alert_id: int,
@@ -9815,7 +9165,6 @@ def record_keyword_alert_hit(
     conn.commit()
     conn.close()
     return inserted
-
 
 def store_keyword_notification_match(
     user_id: int,
@@ -9862,7 +9211,6 @@ def store_keyword_notification_match(
     if listing_id_key:
         ctx["id_index"][listing_id_key] = listing_copy
 
-
 def notify_on_keyword_match(matches: List[dict], user_id: int) -> None:
     if not matches:
         return
@@ -9906,7 +9254,6 @@ def notify_on_keyword_match(matches: List[dict], user_id: int) -> None:
         )
     except Exception:
         logger.exception("Failed to send keyword summary chat_id=%s", user_id)
-
 
 def notify_on_new_listing(
     ev: dict,
@@ -9990,7 +9337,6 @@ def notify_on_new_listing(
 
     return len(matches_by_user)
 
-
 def process_keyword_alerts_for_listing(
     ev: dict, source: str = "main", alerts: Optional[List[dict]] = None, scan_state=None
 ):
@@ -10038,7 +9384,6 @@ def process_keyword_alerts_for_listing(
         return
     notify_on_new_listing(ev, source=source, alerts=alerts)
 
-
 def send_keyword_notification_summaries(scan_state: Dict[int, Dict[str, Any]]):
     global keyword_notification_state
     keyword_notification_state = {}
@@ -10054,14 +9399,11 @@ def send_keyword_notification_summaries(scan_state: Dict[int, Dict[str, Any]]):
         }
         notify_on_keyword_match(items, user_id)
 
-
 def process_keyword_alerts_for_request(req_row: dict):
     return
 
-
 def process_keyword_alerts_for_existing_requests(alert_id: int):
     return
-
 
 def process_keyword_alerts_for_new_listings(
     added_listing_ids: Optional[Set[Any]] = None,
@@ -10100,7 +9442,6 @@ def process_keyword_alerts_for_new_listings(
     send_keyword_notification_summaries(scan_state)
     close_main_conn(conn)
 
-
 def show_request_type_menu(chat_id: int):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("🏠 Almaq istəyirəm")
@@ -10111,7 +9452,6 @@ def show_request_type_menu(chat_id: int):
         "📝 Nə üçün sorğu yaratmaq istəyirsiniz?",
         kb,
     )
-
 
 @bot.message_handler(func=lambda m: m.text == "📝 Ev axtarıram")
 def start_customer_request_flow(message):
@@ -10128,7 +9468,6 @@ def start_customer_request_flow(message):
     reset_customer_request(chat_id)
     show_request_type_menu(chat_id)
 
-
 @bot.message_handler(func=lambda m: m.text == "⬅️ Geri (Əsas menyu)")
 def customer_request_back(message):
     if message.text and message.text.startswith('/'):
@@ -10138,7 +9477,6 @@ def customer_request_back(message):
         return
     reset_customer_request(message.chat.id)
     return_to_main_menu(message.chat.id)
-
 
 @bot.message_handler(
     func=lambda m: m.text in ["🏠 Almaq istəyirəm", "🏢 Kirayə götürmək istəyirəm"]
@@ -10171,7 +9509,6 @@ def handle_request_type_selection(message):
         reply_markup=build_request_rayon_keyboard(),
     )
 
-
 @bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "rayon")
 def handle_request_rayon(message):
     if message.text and message.text.startswith('/'):
@@ -10195,7 +9532,6 @@ def handle_request_rayon(message):
         reply_markup=build_request_rooms_keyboard(),
     )
 
-
 @bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "rooms")
 def handle_request_rooms(message):
     if message.text and message.text.startswith('/'):
@@ -10216,7 +9552,6 @@ def handle_request_rooms(message):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("⬅️ Geri (Əsas menyu)")
     send_with_reply_keyboard(chat_id, "💰 Büdcəni yazın (məs: 800 AZN):", kb)
-
 
 @bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "budget")
 def handle_request_budget(message):
@@ -10244,7 +9579,6 @@ def handle_request_budget(message):
         kb,
     )
 
-
 @bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "notes")
 def handle_request_notes(message):
     if message.text and message.text.startswith('/'):
@@ -10262,7 +9596,6 @@ def handle_request_notes(message):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("⬅️ Geri (Əsas menyu)")
     send_with_reply_keyboard(chat_id, "📞 Əlaqə nömrəsini yazın:", kb)
-
 
 @bot.message_handler(func=lambda m: get_customer_request_step(m.chat.id) == "phone")
 def handle_request_phone(message):
@@ -10297,9 +9630,7 @@ def handle_request_phone(message):
         pass
     return_to_main_menu(chat_id)
 
-
 # =============== 👤 Hesabım ===============
-
 
 @bot.message_handler(func=lambda m: m.text == "👤 Hesabım")
 def show_account_status(message):
@@ -10315,7 +9646,6 @@ def show_account_status(message):
     text = build_account_status_text(chat_id)
     send_or_edit_ui_message(chat_id, text, None, parse_mode="HTML")
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "ui_account")
 @callback_guard
 def cb_ui_account(c):
@@ -10327,9 +9657,7 @@ def cb_ui_account(c):
     text = build_account_status_text(chat_id)
     send_or_edit_ui_message(chat_id, text, None, parse_mode="HTML")
 
-
 # =============== 📊 Statistika ===============
-
 
 STATS_FILTER_LABELS = {
     "24h": "24 saat",
@@ -10378,7 +9706,6 @@ PROP_TYPE_EMOJI_MAP = {
     "Torpaq": "🌱",
 }
 
-
 def build_user_stats_keyboard(selected: str) -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup()
     buttons = []
@@ -10390,7 +9717,6 @@ def build_user_stats_keyboard(selected: str) -> types.InlineKeyboardMarkup:
         )
     mk.row(*buttons)
     return mk
-
 
 def format_market_pulse_text(records: List[Dict[str, Any]]) -> str:
     if not records:
@@ -10406,12 +9732,10 @@ def format_market_pulse_text(records: List[Dict[str, Any]]) -> str:
         lines.append("")
     return "\n".join(lines).rstrip()
 
-
 STATS_PROP_TYPE_LABEL_REPLACEMENTS = {
     "fərdi yaşayış evi": "Həyət evi",
     "qeyri yaşayış sahəsi": "Ofis/Obyekt",
 }
-
 
 def _format_stats_prop_type_label(value: Any) -> str:
     label = str(value or "").strip()
@@ -10420,10 +9744,8 @@ def _format_stats_prop_type_label(value: Any) -> str:
     replacement = STATS_PROP_TYPE_LABEL_REPLACEMENTS.get(label.lower())
     return replacement or label
 
-
 def resolve_stats_period_title(period_key: str) -> str:
     return STATS_PERIOD_TITLES.get(period_key, STATS_PERIOD_TITLES["all"])
-
 
 def format_stats_text(stats: dict, period_key: str, is_admin: bool = False) -> str:
     title = resolve_stats_period_title(period_key)
@@ -10454,7 +9776,6 @@ def format_stats_text(stats: dict, period_key: str, is_admin: bool = False) -> s
         lines.append(f"(dbg: table=listings ts=date_read scope={scope} op_norm=enabled)")
     return "\n".join(lines)
 
-
 def send_user_statistics(chat_id: int, period_key: str, message_id: Optional[int] = None):
     try:
         selected = period_key if period_key in STATS_FILTER_LABELS else "24h"
@@ -10480,12 +9801,10 @@ def send_user_statistics(chat_id: int, period_key: str, message_id: Optional[int
             None,
         )
 
-
 def send_market_pulse_overview(chat_id: int):
     records = compute_market_pulse()
     text = format_market_pulse_text(records)
     bot.send_message(chat_id, text)
-
 
 @bot.message_handler(func=lambda m: m.text == "📊 Statistika")
 def show_global_statistics(message):
@@ -10501,7 +9820,6 @@ def show_global_statistics(message):
     default_period = user_stats_filter.get(chat_id, "24h")
     send_user_statistics(chat_id, default_period)
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "ui_stats")
 @callback_guard
 def cb_ui_stats(c):
@@ -10512,7 +9830,6 @@ def cb_ui_stats(c):
     chat_id = c.message.chat.id if c.message else c.from_user.id
     default_period = user_stats_filter.get(chat_id, "24h")
     send_user_statistics(chat_id, default_period)
-
 
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("stats:"))
 @callback_guard
@@ -10531,9 +9848,7 @@ def handle_user_stats_callback(c):
     if c.message:
         send_user_statistics(chat_id, period)
 
-
 # =============== ℹ️ Haqqında ===============
-
 
 def build_about_text() -> str:
     return (
@@ -10551,7 +9866,6 @@ def build_about_text() -> str:
         "Admin: @esedovesed"
     )
 
-
 @bot.message_handler(func=lambda m: m.text == "ℹ️ Haqqında")
 def about(message):
     if message.text and message.text.startswith('/'):
@@ -10568,7 +9882,6 @@ def about(message):
         parse_mode="Markdown",
     )
 
-
 @bot.message_handler(func=lambda m: m.text == "💳 Ödəniş")
 def payment_menu_entry(message):
     if message.text and message.text.startswith('/'):
@@ -10579,7 +9892,6 @@ def payment_menu_entry(message):
         return
     send_payment_menu(message.chat.id)
 
-
 @bot.message_handler(func=lambda m: m.text == "💬 Adminlə əlaqə")
 def open_support_chat_from_menu(message):
     if message.text and message.text.startswith("/"):
@@ -10588,7 +9900,6 @@ def open_support_chat_from_menu(message):
         return
     delete_user_command_message(message)
     toggle_support_inbox(message.chat.id, message.from_user)
-
 
 def close_support_chat_for_user(chat_id: int, *, keep_ui: bool = False) -> None:
     now_ts = now_utc().isoformat()
@@ -10607,11 +9918,9 @@ def close_support_chat_for_user(chat_id: int, *, keep_ui: bool = False) -> None:
         set_support_session_last_ui_message_id(chat_id, None)
         delete_last_support_ui(chat_id)
 
-
 def open_support_inbox(chat_id: int, user: types.User) -> None:
     start_support_chat_for_user(chat_id, user)
     show_user_support_inbox(chat_id)
-
 
 def close_support_session(chat_id: int) -> None:
     close_support_chat_for_user(chat_id, keep_ui=True)
@@ -10619,7 +9928,6 @@ def close_support_session(chat_id: int) -> None:
         chat_id,
         "🔴 Dəstək bağlandı.",
     )
-
 
 def toggle_support_inbox(chat_id: int, user: types.User) -> None:
     if not is_user_support_active(chat_id):
@@ -10636,14 +9944,12 @@ def toggle_support_inbox(chat_id: int, user: types.User) -> None:
         "🔴 Dəstək bağlandı.",
     )
 
-
 def end_support_session_from_admin(chat_id: int) -> None:
     close_support_chat_for_user(chat_id, keep_ui=True)
     render_support_status(
         chat_id,
         "🔴 Dəstək bağlandı.",
     )
-
 
 def is_main_menu_button_text(text: Optional[str]) -> bool:
     if not text:
@@ -10655,25 +9961,20 @@ def is_main_menu_button_text(text: Optional[str]) -> bool:
         return stripped.split(" ", 1)[1] in MAIN_MENU_BUTTONS
     return False
 
-
 def is_menu_action(message: Union[types.Message, types.CallbackQuery]) -> bool:
     if isinstance(message, types.CallbackQuery) or getattr(message, "callback_query", None):
         return True
     return is_main_menu_button_text(getattr(message, "text", None))
 
-
 def is_support_callback(call: types.CallbackQuery) -> bool:
     data = getattr(call, "data", None) or ""
     return data.startswith("supportuser:") or data.startswith("supportinbox:")
 
-
 def exit_support_mode_for_navigation(chat_id: int) -> None:
     clear_support_ui(chat_id)
 
-
 def delete_last_ui_message_for_support(chat_id: int) -> None:
     delete_last_support_ui(chat_id)
-
 
 def start_support_chat_for_user(chat_id: int, user: types.User):
     existing_thread = get_support_thread_by_user(chat_id)
@@ -10702,10 +10003,8 @@ def start_support_chat_for_user(chat_id: int, user: types.User):
         now_ts,
     )
 
-
 def send_support_sent_toast(chat_id: int) -> None:
     return
-
 
 def send_support_reply_notification(chat_id: int) -> None:
     mk = types.InlineKeyboardMarkup()
@@ -10720,7 +10019,6 @@ def send_support_reply_notification(chat_id: int) -> None:
     except Exception:
         logger.exception("Failed to send support reply notification chat_id=%s", chat_id)
 
-
 def format_support_timestamp(dt_raw: Optional[str]) -> str:
     if not dt_raw:
         return "-"
@@ -10729,7 +10027,6 @@ def format_support_timestamp(dt_raw: Optional[str]) -> str:
         return (parsed + timedelta(hours=4)).strftime("%Y-%m-%d %H:%M")
     except Exception:
         return str(dt_raw)
-
 
 def delete_last_support_ui(chat_id: int, fallback_message_id: Optional[int] = None) -> None:
     message_id = None
@@ -10753,7 +10050,6 @@ def delete_last_support_ui(chat_id: int, fallback_message_id: Optional[int] = No
         _set_support_admin_state(chat_id, message_id=None)
     else:
         set_support_session_last_ui_message_id(chat_id, None)
-
 
 def render_support_ui(
     chat_id: int,
@@ -10802,18 +10098,14 @@ def render_support_ui(
             set_support_session_last_ui_message_id(chat_id, msg_id)
     return msg_id
 
-
 def clear_support_ui(chat_id: int, fallback_message_id: Optional[int] = None) -> None:
     delete_last_support_ui(chat_id, fallback_message_id=fallback_message_id)
-
 
 def render_support_status(chat_id: int, text: str) -> None:
     render_support_ui(chat_id, text, None)
 
-
 def update_inbox_ui(chat_id: int) -> None:
     show_user_support_inbox(chat_id)
-
 
 def format_user_support_inbox_text(messages: List[dict]) -> str:
     header = "📩 Support Inbox"
@@ -10828,7 +10120,6 @@ def format_user_support_inbox_text(messages: List[dict]) -> str:
         lines.append(f"[{timestamp}]\n{prefix}:\n{text}")
     return f"{header}\n\n" + "\n".join(lines)
 
-
 def build_user_support_inbox_markup(is_active: bool) -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup()
     if is_active:
@@ -10842,7 +10133,6 @@ def build_user_support_inbox_markup(is_active: bool) -> types.InlineKeyboardMark
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="supportuser:back"))
     return mk
 
-
 def show_user_support_inbox(chat_id: int, *, fallback_message_id: Optional[int] = None) -> None:
     thread = get_support_thread_by_user(chat_id)
     messages = list_support_messages(thread["id"], limit=30) if thread else []
@@ -10852,7 +10142,6 @@ def show_user_support_inbox(chat_id: int, *, fallback_message_id: Optional[int] 
     set_ui_context(chat_id, UI_CONTEXT_MAIN)
     render_support_ui(chat_id, text, mk, fallback_message_id=fallback_message_id)
 
-
 @bot.callback_query_handler(func=lambda c: c.data in ("open_pay_menu", "ui_payment_menu"))
 @callback_guard
 def cb_open_pay_menu(c):
@@ -10860,7 +10149,6 @@ def cb_open_pay_menu(c):
     if not ensure_feature_available_cb(c, "payment"):
         return
     send_payment_menu(chat_id)
-
 
 @bot.callback_query_handler(func=lambda c: c.data == "paytype:card")
 @callback_guard
@@ -10874,14 +10162,12 @@ def cb_paytype_card(c):
         logger.warning("Admin notification for card placeholder failed chat_id=%s", chat_id)
     send_payment_menu(chat_id)
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "paytype:manual")
 @callback_guard
 def cb_paytype_manual(c):
     if not ensure_feature_available_cb(c, "payment"):
         return
     chat_id = c.message.chat.id
-
 
 @bot.callback_query_handler(func=lambda c: c.data == "SUPPORT_TOGGLE")
 @callback_guard
@@ -10892,7 +10178,6 @@ def cb_support_toggle(c):
     chat_id = c.message.chat.id
     toggle_support_inbox(chat_id, c.from_user)
     safe_answer_callback_query(c.id)
-
 
 @bot.callback_query_handler(func=lambda c: c.data == "payinfo")
 @callback_guard
@@ -10908,7 +10193,6 @@ def cb_payinfo(c):
         parse_mode="Markdown",
     )
 
-
 def send_active_promo_info(chat_id: int):
     status = get_user_promo_status(chat_id)
     exp_text = format_promo_date(status.get("expires_at"), include_year=True)
@@ -10918,7 +10202,6 @@ def send_active_promo_info(chat_id: int):
         f"📅 Bitmə tarixi: {exp_text}\n"
         "⏳ Yeni promo yalnız bu tarixdən sonra aktiv edilə bilər.",
     )
-
 
 @bot.callback_query_handler(func=lambda c: c.data in ("promoenter", "promo_enter"))
 @callback_guard
@@ -10941,7 +10224,6 @@ def cb_promo_enter(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "promo_active_info")
 @callback_guard
 def cb_promo_active_info(c):
@@ -10952,7 +10234,6 @@ def cb_promo_active_info(c):
     except Exception:
         pass
 
-
 def promo_code_entry_step(message):
     chat_id = message.chat.id
     success, response, _ = apply_promo_code(chat_id, message.text)
@@ -10960,7 +10241,6 @@ def promo_code_entry_step(message):
     reset_user_state(chat_id)
     if success:
         main_menu(chat_id)
-
 
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("ui_payment_plan_"))
 @callback_guard
@@ -10996,14 +10276,12 @@ def cb_payplan(c):
     )
     send_or_edit_ui_message(chat_id, pay_text, mk, parse_mode="Markdown")
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "ui_back")
 @callback_guard
 def cb_ui_back(c):
     if not ensure_feature_available_cb(c, "payment"):
         return
     send_payment_menu(c.message.chat.id)
-
 
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("cardpay|"))
 @callback_guard
@@ -11039,7 +10317,6 @@ def cb_card_payment_info(c):
         subscription_payment_code(chat_id),
     )
     send_or_edit_ui_message(chat_id, info_text, mk)
-
 
 @bot.callback_query_handler(func=lambda c: c.data == "demo3")
 @callback_guard
@@ -11122,7 +10399,6 @@ def cb_demo_activate(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("paydone|"))
 @callback_guard
 def cb_paydone(c):
@@ -11167,7 +10443,6 @@ def cb_paydone(c):
     except Exception:
         pass
 
-
 def approve_manual_payment(chat_id: int, plan_key: str, request_id: Optional[int] = None):
     plan = SUBSCRIPTION_PLANS.get(plan_key)
     if not plan:
@@ -11207,7 +10482,6 @@ def approve_manual_payment(chat_id: int, plan_key: str, request_id: Optional[int
         update_manual_payment_status(request_id, MANUAL_PAYMENT_APPROVED)
     return True
 
-
 def reject_manual_payment(chat_id: int, request_id: Optional[int] = None):
     if request_id:
         update_manual_payment_status(request_id, MANUAL_PAYMENT_REJECTED)
@@ -11219,7 +10493,6 @@ def reject_manual_payment(chat_id: int, request_id: Optional[int] = None):
     except Exception:
         pass
     return True
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("payadm|"))
 @callback_guard
@@ -11250,7 +10523,6 @@ def cb_pay_admin(c):
     elif action == "rej":
         reject_manual_payment(uid, request_id=request_id)
         bot.answer_callback_query(c.id, "?mtina edildi")
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("manualpay|"))
 @callback_guard
@@ -11300,7 +10572,6 @@ def cb_manual_payment_admin(c):
     if page:
         show_manual_payment_requests(c.message.chat.id, page=page)
 
-
 def new_listing_keyboard(extra=None):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("❌ Ləğv et", "🏠 Əsas menyu")
@@ -11308,7 +10579,6 @@ def new_listing_keyboard(extra=None):
         for row in extra:
             kb.row(*row)
     return kb
-
 
 def handle_common_nav(message):
     chat_id = message.chat.id
@@ -11328,7 +10598,6 @@ def handle_common_nav(message):
         )
         return True
     return False
-
 
 @bot.message_handler(func=lambda m: m.text == "📝 Yeni elan əlavə et")
 def start_new_listing(message):
@@ -11355,7 +10624,6 @@ def start_new_listing(message):
     user_state[chat_id] = {"step": "role", "chat_id": chat_id}
     bot.send_message(chat_id, "👤 Rolunuzu seçin:", reply_markup=kb)
 
-
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "role")
 def step_role(message):
     if message.text and message.text.startswith('/'):
@@ -11379,7 +10647,6 @@ def step_role(message):
     st["step"] = "operation"
     bot.send_message(chat_id, "💸 Əməliyyat növünü seçin:", reply_markup=kb)
 
-
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "operation")
 def step_operation(message):
     if message.text and message.text.startswith('/'):
@@ -11401,7 +10668,6 @@ def step_operation(message):
     kb = new_listing_keyboard(extra=extra)
     st["step"] = "prop_type"
     bot.send_message(chat_id, "🏠 Əmlak tipini seçin:", reply_markup=kb)
-
 
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "prop_type")
 def step_prop_type(message):
@@ -11432,7 +10698,6 @@ def step_prop_type(message):
     )
     st["step"] = "rooms"
     bot.send_message(chat_id, "🔢 Otaq sayını seçin:", reply_markup=kb)
-
 
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "rooms")
 def step_rooms(message):
@@ -11477,7 +10742,6 @@ def step_rooms(message):
     kb = new_listing_keyboard(extra=rows)
     st["step"] = "rayon"
     bot.send_message(chat_id, "📍 Rayon / ərazi seçin:", reply_markup=kb)
-
 
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "rayon")
 def step_rayon(message):
@@ -11530,7 +10794,6 @@ def step_rayon(message):
         chat_id, "🚇 Metro seçin (yoxdursa 'Metro yoxdur'):", reply_markup=kb
     )
 
-
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "metro")
 def step_metro(message):
     if message.text and message.text.startswith('/'):
@@ -11546,7 +10809,6 @@ def step_metro(message):
     st["step"] = "area"
     kb = new_listing_keyboard()
     bot.send_message(chat_id, "📏 Sahə (m²) yazın:", reply_markup=kb)
-
 
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "area")
 def step_area(message):
@@ -11564,7 +10826,6 @@ def step_area(message):
     kb = new_listing_keyboard()
     bot.send_message(chat_id, "💰 Qiyməti yazın:", reply_markup=kb)
 
-
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "price")
 def step_price(message):
     if message.text and message.text.startswith('/'):
@@ -11580,7 +10841,6 @@ def step_price(message):
     st["step"] = "currency"
     kb = new_listing_keyboard(extra=[["AZN", "USD"]])
     bot.send_message(chat_id, "💱 Valyuta seçin:", reply_markup=kb)
-
 
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "currency")
 def step_currency(message):
@@ -11602,7 +10862,6 @@ def step_currency(message):
     kb = new_listing_keyboard()
     bot.send_message(chat_id, "📞 Əlaqə nömrəsini yazın:", reply_markup=kb)
 
-
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "phone")
 def step_phone(message):
     if message.text and message.text.startswith('/'):
@@ -11619,7 +10878,6 @@ def step_phone(message):
     kb = new_listing_keyboard()
     bot.send_message(chat_id, "👤 Əlaqədar şəxsin adını yazın:", reply_markup=kb)
 
-
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "contact_name")
 def step_contact_name(message):
     if message.text and message.text.startswith('/'):
@@ -11635,7 +10893,6 @@ def step_contact_name(message):
     st["step"] = "summary"
     kb = new_listing_keyboard()
     bot.send_message(chat_id, "🧾 Elan haqqında qısa təsvir yazın:", reply_markup=kb)
-
 
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "summary")
 def step_summary(message):
@@ -11657,7 +10914,6 @@ def step_summary(message):
         "Yoxdursa 'Link yoxdur, elanı göndər ✅' seçin.",
         reply_markup=kb,
     )
-
 
 def save_agent_if_needed(data: dict):
     if data.get("role") != "Vasitəçi":
@@ -11681,7 +10937,6 @@ def save_agent_if_needed(data: dict):
         conn.close()
     except:
         pass
-
 
 def add_listing_new(data: dict) -> int:
     conn = get_local_conn()
@@ -11725,7 +10980,6 @@ def add_listing_new(data: dict) -> int:
         return 0  # və ya raise Exception, amma 0 normaldır
 
     return new_id
-
 
 @bot.message_handler(func=lambda m: get_user_step(m.chat.id) == "link")
 def step_link(message):
@@ -11783,9 +11037,7 @@ def step_link(message):
     )
     reset_user_state(chat_id)
 
-
 # =============== 📋 ELANLARIM ===============
-
 
 @bot.message_handler(func=lambda m: m.text in ["📋 Elanlarım", "📂 Elanlarım"])
 def my_listings(message):
@@ -11828,9 +11080,7 @@ def my_listings(message):
             txt += f"\n🔗 {ev['link']}"
         bot.send_message(chat_id, txt)
 
-
 # =============== ⭐ FAVORİLƏRİM ===============
-
 
 @bot.message_handler(func=lambda m: m.text == "⭐ Favorilərim")
 def show_favorites(message):
@@ -11839,7 +11089,6 @@ def show_favorites(message):
 
     delete_user_command_message(message)
     handle_favorites_menu(message.chat.id)
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("fav|"))
 @callback_guard
@@ -11851,7 +11100,6 @@ def cb_add_favorite(c):
     lid = int(sid)
     add_favorite_entry(chat_id, src, lid)
     bot.answer_callback_query(c.id, "⭐ Favoriyə əlavə olundu.")
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("wa|"))
 @callback_guard
@@ -11866,11 +11114,7 @@ def cb_whatsapp_click(c):
         lid = int(sid)
     except Exception:
         lid = None
-    ev = (
-        fetch_listing_by_source(src, lid, include_hidden=is_admin(c.message.chat.id))
-        if lid
-        else None
-    )
+    ev = fetch_listing_by_source(src, lid) if lid else None
     if not ev:
         bot.answer_callback_query(c.id, "❌ Elan tapılmadı.")
         return
@@ -11886,7 +11130,6 @@ def cb_whatsapp_click(c):
             pass
     else:
         bot.answer_callback_query(c.id, "📞 Nömrə tapılmadı.")
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("favdel|"))
 @callback_guard
@@ -11921,7 +11164,6 @@ def cb_remove_favorite(c):
             show_summary=False,
         )
 
-
 @bot.message_handler(func=lambda m: m.text == "🔥 Ən çox baxılan elanlar")
 def show_top_viewed(message):
     if message.text and message.text.startswith('/'):
@@ -11936,9 +11178,7 @@ def show_top_viewed(message):
     set_navigation_state(chat_id, STATE_ADMIN_ACTION)
     send_paginated_results(chat_id, "topviews", params={"days": 7}, page=1)
 
-
 # =============== 🔎 AXTARIŞ SİSTEMİ ===============
-
 
 @bot.message_handler(func=lambda m: m.text == "🔎 Axtarış sistemi")
 def search_system_menu(message):
@@ -11951,7 +11191,6 @@ def search_system_menu(message):
     if not ensure_allowed(message):
         return
     send_search_menu(message.chat.id)
-
 
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("search_menu:"))
 @callback_guard
@@ -11978,7 +11217,6 @@ def cb_search_menu(c):
     elif action == "notifs":
         handle_notifications_menu(chat_id)
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "search_flow:back")
 @callback_guard
 def cb_search_flow_back(c):
@@ -11999,7 +11237,6 @@ def cb_search_flow_back(c):
     except Exception:
         pass
 
-
 @bot.message_handler(func=lambda m: m.text == "🎁 Şansını sına")
 def handle_bonus_spin_request(message):
     if message.text and message.text.startswith('/'):
@@ -12008,7 +11245,6 @@ def handle_bonus_spin_request(message):
     if not ensure_feature_available(message.chat.id, "try_your_luck"):
         return
     handle_chance_request(message.from_user.id)
-
 
 @bot.message_handler(func=lambda m: m.text == "⬅️ Geri")
 def return_to_main_menu(message):
@@ -12029,7 +11265,6 @@ def return_to_main_menu(message):
     set_ui_context(chat_id, UI_CONTEXT_MAIN)
     return_to_previous_menu(chat_id)
 
-
 def prompt_today_operation(chat_id: int):
     mk = types.InlineKeyboardMarkup()
     mk.add(
@@ -12038,7 +11273,6 @@ def prompt_today_operation(chat_id: int):
     )
     mk.add(types.InlineKeyboardButton("🌐 Hamısı", callback_data="td|op|all"))
     bot.send_message(chat_id, "Əməliyyat növünü seç:", reply_markup=mk)
-
 
 def prompt_today_property(chat_id: int):
     mk = types.InlineKeyboardMarkup()
@@ -12057,7 +11291,6 @@ def prompt_today_property(chat_id: int):
     mk.add(types.InlineKeyboardButton("Hamısı", callback_data="td|tp|all"))
     bot.send_message(chat_id, "🏠 Əmlak tipini seç:", reply_markup=mk)
 
-
 def get_today_rayon_counts(listings: List[dict]) -> Dict[str, int]:
     region_counter = Counter(
         normalize_region(get_listing_region_value(item))
@@ -12070,7 +11303,6 @@ def get_today_rayon_counts(listings: List[dict]) -> Dict[str, int]:
         dict(region_counter),
     )
     return dict(region_counter)
-
 
 def build_today_rayon_keyboard(
     filtered_listings: List[dict], rayons: List[str]
@@ -12101,7 +11333,6 @@ def build_today_rayon_keyboard(
         mk.row(*row)
     return mk
 
-
 def prompt_today_rayon(chat_id: int):
     rayons = get_region_filter_options("all")
     if not rayons:
@@ -12129,7 +11360,6 @@ def prompt_today_rayon(chat_id: int):
     mk = build_today_rayon_keyboard(filtered_listings, rayons)
     bot.send_message(chat_id, "📍 Rayon seçin:", reply_markup=mk)
 
-
 def compute_today_stats(filters: dict) -> dict:
     op = filters.get("op", "all")
     if op == "sat":
@@ -12146,7 +11376,6 @@ def compute_today_stats(filters: dict) -> dict:
         total = sale + rent
     return {"total": total, "sale": sale, "rent": rent}
 
-
 def send_today_stats_message(chat_id: int, filters: dict):
     stats = compute_today_stats(filters)
     text = (
@@ -12156,7 +11385,6 @@ def send_today_stats_message(chat_id: int, filters: dict):
         f"2⃣ Kirayə: {stats['rent']}"
     )
     bot.send_message(chat_id, text)
-
 
 def send_today_results(chat_id: int, filters: dict, message=None):
     loading_ref = show_loading_message(chat_id, message)
@@ -12174,7 +11402,6 @@ def send_today_results(chat_id: int, filters: dict, message=None):
         loading_ref=loading_ref,
     )
 
-
 def start_today_flow(chat_id: int):
     reset_search_state(chat_id)
     today_results_cache.pop(chat_id, None)
@@ -12183,7 +11410,6 @@ def start_today_flow(chat_id: int):
     send_today_stats_message(chat_id, today_flow_state[chat_id])
     prompt_today_operation(chat_id)
 
-
 @bot.message_handler(func=lambda m: m.text == "🕒 Son 24 saatda əlavə olunan elanlar")
 def handle_today_menu(message):
     if not ensure_feature_available(message.chat.id, "last_24_hours"):
@@ -12191,7 +11417,6 @@ def handle_today_menu(message):
     if not ensure_allowed(message):
         return
     start_today_flow(message.chat.id)
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("td|"))
 @callback_guard
@@ -12246,7 +11471,6 @@ def handle_today_callbacks(c):
     except Exception:
         pass
 
-
 def start_structured_search_from_menu(chat_id: int, op_code: str):
     reset_search_state(chat_id)
     search_state[chat_id] = {
@@ -12258,7 +11482,6 @@ def start_structured_search_from_menu(chat_id: int, op_code: str):
     }
     search_state[chat_id]["filters"]["op"] = op_code
     render_date_range_step(chat_id)
-
 
 def handle_structured_search_menu(chat_id: int, op_code: str):
     if not check_subscription(chat_id):
@@ -12274,7 +11497,6 @@ def handle_structured_search_menu(chat_id: int, op_code: str):
         )
         return
     start_structured_search_from_menu(chat_id, op_code)
-
 
 def handle_keyword_search_menu(chat_id: int):
     if not check_subscription(chat_id):
@@ -12298,7 +11520,6 @@ def handle_keyword_search_menu(chat_id: int):
     }
     send_keyword_operation_prompt(chat_id)
 
-
 def handle_phone_search_menu(chat_id: int):
     if not check_subscription(chat_id):
         return
@@ -12321,7 +11542,6 @@ def handle_phone_search_menu(chat_id: int):
         search_flow_back_keyboard(),
     )
 
-
 def handle_favorites_menu(chat_id: int):
     if not check_subscription(chat_id):
         return
@@ -12329,7 +11549,6 @@ def handle_favorites_menu(chat_id: int):
     set_search_menu_active(chat_id, True)
     reset_search_state(chat_id)
     send_paginated_results(chat_id, "favorites", params={}, page=1)
-
 
 def handle_notifications_menu(chat_id: int):
     if not ensure_feature_available(chat_id, "notifications"):
@@ -12340,7 +11559,6 @@ def handle_notifications_menu(chat_id: int):
     set_search_menu_active(chat_id, True)
     show_notifications_menu(chat_id)
 
-
 @bot.message_handler(func=lambda m: m.text in ["🏠 Satılır", "🏢 Kirayə verilir"])
 def structured_search_from_menu(message):
     if message.text and message.text.startswith('/'):
@@ -12350,7 +11568,6 @@ def structured_search_from_menu(message):
     op_code = "sat" if message.text == "🏠 Satılır" else "kir"
     handle_structured_search_menu(message.chat.id, op_code)
 
-
 @bot.message_handler(func=lambda m: m.text == "🔍 Açar sözlə axtar")
 def keyword_search_from_menu(message):
     if message.text and message.text.startswith('/'):
@@ -12359,7 +11576,6 @@ def keyword_search_from_menu(message):
     delete_user_command_message(message)
     handle_keyword_search_menu(message.chat.id)
 
-
 @bot.message_handler(func=lambda m: m.text == "📞 Nömrə ilə axtar")
 def phone_search_from_menu(message):
     if message.text and message.text.startswith('/'):
@@ -12367,7 +11583,6 @@ def phone_search_from_menu(message):
 
     delete_user_command_message(message)
     handle_phone_search_menu(message.chat.id)
-
 
 @bot.message_handler(func=lambda m: m.text == "📌 Müştəri istəkləri")
 def customer_requests_from_menu(message):
@@ -12385,7 +11600,6 @@ def customer_requests_from_menu(message):
         bot.send_message(chat_id, "❌ Bu funksiya sizin üçün aktiv deyil.")
         return
     build_customer_requests_operation_menu(chat_id)
-
 
 @bot.message_handler(
     func=lambda m: customer_request_rule_state.get(m.chat.id, {}).get("step") == "type"
@@ -12414,7 +11628,6 @@ def handle_customer_request_rule_type(message):
     }
     send_customer_request_rule_rayon_prompt(chat_id)
 
-
 @bot.message_handler(
     func=lambda m: customer_request_rule_state.get(m.chat.id, {}).get("step")
     == "min_price"
@@ -12442,7 +11655,6 @@ def handle_customer_request_rule_min_price(message):
         "💰 Maksimum qiymət yazın (istəyə görə):",
         reply_markup=build_optional_input_keyboard(),
     )
-
 
 @bot.message_handler(
     func=lambda m: customer_request_rule_state.get(m.chat.id, {}).get("step")
@@ -12476,7 +11688,6 @@ def handle_customer_request_rule_max_price(message):
         reply_markup=build_optional_input_keyboard(),
     )
 
-
 @bot.message_handler(
     func=lambda m: customer_request_rule_state.get(m.chat.id, {}).get("step") == "rooms"
 )
@@ -12503,7 +11714,6 @@ def handle_customer_request_rule_rooms(message):
         "🔎 Açar söz yazın (istəyə görə):",
         reply_markup=build_optional_input_keyboard(),
     )
-
 
 @bot.message_handler(
     func=lambda m: customer_request_rule_state.get(m.chat.id, {}).get("step")
@@ -12532,7 +11742,6 @@ def handle_customer_request_rule_keyword(message):
     bot.send_message(chat_id, f"✅ Qayda yaradıldı (ID: {rule_id}).")
     show_customer_request_rules(chat_id)
 
-
 def return_to_main_menu(chat_id: int):
     search_state.pop(chat_id, None)
     admin_panel_page_state.pop(chat_id, None)
@@ -12547,7 +11756,6 @@ def return_to_main_menu(chat_id: int):
         send_main_menu(chat_id, force=True)
     else:
         main_menu(chat_id)
-
 
 def format_saved_search_entry(row: dict) -> str:
     op = _row_value_safe(row, "operation")
@@ -12598,7 +11806,6 @@ def format_saved_search_entry(row: dict) -> str:
 
     return " | ".join(parts)
 
-
 def show_notifications_menu(chat_id: int, message=None):
     if not is_feature_enabled("notifications", chat_id):
         update_ui_message(chat_id, chat_id, FEATURE_DISABLED_MESSAGE, None)
@@ -12622,7 +11829,6 @@ def show_notifications_menu(chat_id: int, message=None):
         last_ui_message_id[chat_id] = message.message_id
     update_ui_message(chat_id, chat_id, text, mk)
 
-
 def format_notification_listing_line(idx: int, listing: dict) -> str:
     listing_id = (
         listing.get("id") or listing.get("ID") or listing.get("Elan_kodu") or "-"
@@ -12635,7 +11841,6 @@ def format_notification_listing_line(idx: int, listing: dict) -> str:
     return (
         f"{idx}. 🆔 Elan kodu: #{listing_id} | {title} | {rooms} | {op} | {price} | {rayon}"
     )
-
 
 def fetch_notification_listings_page(
     chat_id: int, period: str, page: int = 1
@@ -12667,7 +11872,6 @@ def fetch_notification_listings_page(
     conn.close()
     return rows, total, total_pages, page
 
-
 def fetch_notification_listings(chat_id: int, period: str) -> List[dict]:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -12687,7 +11891,6 @@ def fetch_notification_listings(chat_id: int, period: str) -> List[dict]:
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return rows
-
 
 def fetch_notification_listings_page(
     chat_id: int, period: str, page: int = 1
@@ -12726,7 +11929,6 @@ def fetch_notification_listings_page(
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return rows, total, total_pages, page
-
 
 def show_notifications_inbox(chat_id: int, period: str, page: int = 1, message=None):
     rows = fetch_notification_listings(chat_id, period)
@@ -12797,7 +11999,6 @@ def show_notifications_inbox(chat_id: int, period: str, page: int = 1, message=N
         loading_ref=loading_ref,
         track_view=False,
     )
-
 
 def show_agent_notifications_inbox(chat_id: int, page: int = 1, message=None):
     bot.send_message(chat_id, "🔔 Sorğu bildirişləri deaktiv edilib.")
@@ -12910,7 +12111,6 @@ def show_agent_notifications_inbox(chat_id: int, page: int = 1, message=None):
         except Exception:
             continue
 
-
 def send_criteria_list(chat_id: int, message=None):
     rows = get_saved_searches(chat_id)
     mk = types.InlineKeyboardMarkup()
@@ -12948,7 +12148,6 @@ def send_criteria_list(chat_id: int, message=None):
     else:
         render_ui(chat_id, text, mk)
 
-
 def build_notification_rule_operation_markup() -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup()
     mk.row(
@@ -12957,7 +12156,6 @@ def build_notification_rule_operation_markup() -> types.InlineKeyboardMarkup:
     )
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="notif_rule_op:back"))
     return mk
-
 
 def build_notification_rayon_markup(
     selected: List[str],
@@ -12983,7 +12181,6 @@ def build_notification_rayon_markup(
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="notif_rule_rayon_back"))
     return mk
 
-
 def send_notification_rayon_prompt(chat_id: int, message=None):
     selected = notification_rule_state.get(chat_id, {}).get("rayons", [])
     mk = build_notification_rayon_markup(selected)
@@ -12992,7 +12189,6 @@ def send_notification_rayon_prompt(chat_id: int, message=None):
         render_ui(message.chat.id, text, mk)
         return
     render_ui(chat_id, text, mk)
-
 
 def build_notification_property_type_markup() -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup()
@@ -13011,7 +12207,6 @@ def build_notification_property_type_markup() -> types.InlineKeyboardMarkup:
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="notif_rule_prop:back"))
     return mk
 
-
 def send_notification_property_type_prompt(chat_id: int, message=None):
     text = "🏠 Əmlak növü seçin:"
     mk = build_notification_property_type_markup()
@@ -13020,13 +12215,11 @@ def send_notification_property_type_prompt(chat_id: int, message=None):
         return
     render_ui(chat_id, text, mk)
 
-
 def build_notification_rule_confirm_markup() -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup()
     mk.add(types.InlineKeyboardButton("✅ Yadda saxla", callback_data="notif_rule_confirm:save"))
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="notif_rule_confirm:back"))
     return mk
-
 
 def send_notification_rule_confirm_prompt(chat_id: int, message=None):
     text = "✅ Kriteriyanı yadda saxlamaq üçün təsdiqləyin:"
@@ -13036,12 +12229,10 @@ def send_notification_rule_confirm_prompt(chat_id: int, message=None):
         return
     render_ui(chat_id, text, mk)
 
-
 def start_notification_rule_flow(chat_id: int):
     # Notification rules have their own flow and do not reuse search filters.
     notification_rule_state[chat_id] = {"step": "operation"}
     send_notification_operation_prompt(chat_id)
-
 
 def send_notification_operation_prompt(chat_id: int, message=None):
     text = "🔔 Kriteriya üçün əməliyyat növünü seçin:"
@@ -13050,7 +12241,6 @@ def send_notification_operation_prompt(chat_id: int, message=None):
         render_ui(message.chat.id, text, mk)
         return
     render_ui(chat_id, text, mk)
-
 
 def save_notification_rule(user_id: int, data: dict) -> Optional[int]:
     conn = get_local_conn()
@@ -13082,7 +12272,6 @@ def save_notification_rule(user_id: int, data: dict) -> Optional[int]:
     conn.close()
     return rule_id
 
-
 def show_keyword_alert_menu(chat_id: int, message=None):
     mk = types.InlineKeyboardMarkup()
     mk.add(
@@ -13101,7 +12290,6 @@ def show_keyword_alert_menu(chat_id: int, message=None):
     else:
         render_ui(chat_id, text, mk)
 
-
 def show_criteria_alert_menu(chat_id: int, message=None):
     mk = types.InlineKeyboardMarkup()
     mk.add(
@@ -13116,7 +12304,6 @@ def show_criteria_alert_menu(chat_id: int, message=None):
         render_ui(message.chat.id, text, mk)
     else:
         render_ui(chat_id, text, mk)
-
 
 def save_keyword_alert(user_id: int, keyword: str, regions: List[str]) -> int:
     conn = get_local_conn()
@@ -13137,7 +12324,6 @@ def save_keyword_alert(user_id: int, keyword: str, regions: List[str]) -> int:
     conn.commit()
     conn.close()
     return alert_id
-
 
 def fetch_keyword_alerts_page(user_id: int, page: int = 1):
     page = max(1, int(page or 1))
@@ -13162,7 +12348,6 @@ def fetch_keyword_alerts_page(user_id: int, page: int = 1):
     conn.close()
     return rows, total, total_pages, page
 
-
 def toggle_keyword_alert(user_id: int, alert_id: int) -> bool:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -13184,7 +12369,6 @@ def toggle_keyword_alert(user_id: int, alert_id: int) -> bool:
     conn.close()
     return True
 
-
 def delete_keyword_alert(user_id: int, alert_id: int) -> bool:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -13197,7 +12381,6 @@ def delete_keyword_alert(user_id: int, alert_id: int) -> bool:
     conn.close()
     return deleted
 
-
 def format_keyword_alert_entry(row: dict) -> str:
     keyword = _row_value_safe(row, "keywords") or "-"
     regions = _row_value_safe(row, "regions") or "Hamısı"
@@ -13207,7 +12390,6 @@ def format_keyword_alert_entry(row: dict) -> str:
         else "⚪️ Deaktiv"
     )
     return f"{status_txt} | 🔎 {keyword} | 📍 {regions}"
-
 
 def show_keyword_alert_list(chat_id: int, page: int = 1, message=None):
     rows, total, total_pages, current_page = fetch_keyword_alerts_page(chat_id, page)
@@ -13272,7 +12454,6 @@ def show_keyword_alert_list(chat_id: int, page: int = 1, message=None):
         except Exception:
             continue
 
-
 def build_keyword_alert_rayon_markup(selected: List[str]):
     mk = types.InlineKeyboardMarkup()
     row = []
@@ -13294,7 +12475,6 @@ def build_keyword_alert_rayon_markup(selected: List[str]):
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="kw_alert_rayon_back"))
     return mk
 
-
 def send_keyword_alert_rayon_prompt(chat_id: int, message=None):
     selected = keyword_alert_state.get(chat_id, {}).get("regions", [])
     text = "📍 Açar söz üçün rayonları seçin (çoxlu seçim mümkündür):"
@@ -13303,7 +12483,6 @@ def send_keyword_alert_rayon_prompt(chat_id: int, message=None):
         render_ui(message.chat.id, text, mk)
     else:
         render_ui(chat_id, text, mk)
-
 
 def period_start(period: str) -> Optional[datetime]:
     now = datetime.now()
@@ -13318,7 +12497,6 @@ def period_start(period: str) -> Optional[datetime]:
         return datetime(now.year, now.month, 1)
     return None
 
-
 def build_period_filter(period: Optional[str], column: str, allow_older: bool = False):
     period = period or "today"
     start_dt = period_start(period)
@@ -13327,7 +12505,6 @@ def build_period_filter(period: Optional[str], column: str, allow_older: bool = 
     if allow_older and period == "older":
         return f" AND datetime({column}) < datetime(?)", [start_dt.isoformat()]
     return f" AND datetime({column}) >= datetime(?)", [start_dt.isoformat()]
-
 
 def fetch_keyword_alert_hits_page(user_id: int, period: str, page: int = 1):
     period = period or "today"
@@ -13381,7 +12558,6 @@ def fetch_keyword_alert_hits_page(user_id: int, period: str, page: int = 1):
     conn.close()
     return rows, total, total_pages, page
 
-
 def fetch_keyword_alert_hits(user_id: int, period: str) -> List[dict]:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -13423,7 +12599,6 @@ def fetch_keyword_alert_hits(user_id: int, period: str) -> List[dict]:
         conn.close()
     return rows, total
 
-
 def load_notification_listings(chat_id: int, notif_type: str, period: str) -> List[dict]:
     listings: List[dict] = []
     if notif_type == "keyword":
@@ -13438,8 +12613,7 @@ def load_notification_listings(chat_id: int, notif_type: str, period: str) -> Li
             except Exception:
                 continue
             listing = fetch_listing_by_source(
-                source, target_id_int, include_hidden=False
-            )
+                source, target_id_int)
             if listing:
                 listing["__source"] = source
                 listings.append(listing)
@@ -13451,7 +12625,6 @@ def load_notification_listings(chat_id: int, notif_type: str, period: str) -> Li
                 listings.append(listing)
 
     return listings
-
 
 def render_notification_listing(
     chat_id: int,
@@ -13514,7 +12687,6 @@ def render_notification_listing(
     else:
         render_ui(chat_id, text, mk)
 
-
 def show_keyword_alert_hits(chat_id: int, period: str, index: int = 0, message=None):
     rows, total = fetch_keyword_alert_hits(chat_id, period)
     period_labels = {
@@ -13554,7 +12726,6 @@ def show_keyword_alert_hits(chat_id: int, period: str, index: int = 0, message=N
         loading_ref=(message.chat.id, message.message_id) if message else None,
     )
 
-
 def show_keyword_hits_filter_menu(chat_id: int, message=None):
     mk = types.InlineKeyboardMarkup()
     mk.add(types.InlineKeyboardButton("Bu gün", callback_data="kw_hits:today:0"))
@@ -13567,7 +12738,6 @@ def show_keyword_hits_filter_menu(chat_id: int, message=None):
     else:
         render_ui(chat_id, text, mk)
 
-
 def show_criteria_hits_filter_menu(chat_id: int, message=None):
     mk = types.InlineKeyboardMarkup()
     mk.add(types.InlineKeyboardButton("Bu gün", callback_data="crit_hits:today:0"))
@@ -13579,7 +12749,6 @@ def show_criteria_hits_filter_menu(chat_id: int, message=None):
         render_ui(message.chat.id, text, mk)
     else:
         render_ui(chat_id, text, mk)
-
 
 def show_criteria_alert_hits(chat_id: int, period: str, index: int = 0, message=None):
     rows = fetch_notification_listings(chat_id, period)
@@ -13622,7 +12791,6 @@ def show_criteria_alert_hits(chat_id: int, period: str, index: int = 0, message=
         loading_ref=(message.chat.id, message.message_id) if message else None,
     )
 
-
 def set_saved_search_active(chat_id: int, criteria_id: int, active: bool):
     conn = get_local_conn()
     cur = conn.cursor()
@@ -13633,7 +12801,6 @@ def set_saved_search_active(chat_id: int, criteria_id: int, active: bool):
     conn.commit()
     conn.close()
 
-
 def delete_saved_search_for_user(chat_id: int, criteria_id: int):
     conn = get_local_conn()
     cur = conn.cursor()
@@ -13642,7 +12809,6 @@ def delete_saved_search_for_user(chat_id: int, criteria_id: int):
     )
     conn.commit()
     conn.close()
-
 
 @bot.message_handler(
     func=lambda m: not is_admin(m.chat.id) and m.text == ADMIN_PANEL_BACK_MAIN
@@ -13655,7 +12821,6 @@ def public_back_to_main(message):
         return
     return_to_main_menu(message.chat.id)
 
-
 @bot.message_handler(
     func=lambda m: m.text in {"🔔 Bildirişlər", "🔔 Bildirişlərim"}
 )
@@ -13664,7 +12829,6 @@ def show_saved_notifications(message):
         return
 
     handle_notifications_menu(message.chat.id)
-
 
 @bot.callback_query_handler(func=lambda c: c.data == "kw_alert_menu")
 @callback_guard
@@ -13677,7 +12841,6 @@ def cb_keyword_alert_menu(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "crit_alert_menu")
 @callback_guard
 def cb_criteria_alert_menu(c):
@@ -13688,7 +12851,6 @@ def cb_criteria_alert_menu(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data == "crit_alert_list")
 @callback_guard
@@ -13701,7 +12863,6 @@ def cb_criteria_alert_list(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "kw_alert_back")
 @callback_guard
 def cb_keyword_alert_back(c):
@@ -13712,7 +12873,6 @@ def cb_keyword_alert_back(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data == "kw_alert_add")
 @callback_guard
@@ -13728,7 +12888,6 @@ def cb_keyword_alert_add(c):
     except Exception:
         pass
 
-
 def handle_keyword_alert_keyword(message):
     if not ensure_allowed(message):
         return
@@ -13743,7 +12902,6 @@ def handle_keyword_alert_keyword(message):
     state["step"] = "regions"
     keyword_alert_state[chat_id] = state
     send_keyword_alert_rayon_prompt(chat_id)
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("kw_alert_rayon_"))
 @callback_guard
@@ -13789,7 +12947,6 @@ def cb_keyword_alert_rayon(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("kw_alert_list:"))
 @callback_guard
 def cb_keyword_alert_list(c):
@@ -13804,7 +12961,6 @@ def cb_keyword_alert_list(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("kw_alert_toggle:"))
 @callback_guard
@@ -13821,7 +12977,6 @@ def cb_keyword_alert_toggle(c):
         bot.answer_callback_query(c.id, "✅ Yeniləndi")
     except Exception:
         pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("kw_alert_delete:"))
 @callback_guard
@@ -13840,7 +12995,6 @@ def cb_keyword_alert_delete(c):
             pass
     show_keyword_alert_list(c.message.chat.id, page=1, message=c.message)
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "kw_hits_menu")
 @callback_guard
 def cb_keyword_hits_menu(c):
@@ -13853,7 +13007,6 @@ def cb_keyword_hits_menu(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "crit_hits_menu")
 @callback_guard
 def cb_criteria_hits_menu(c):
@@ -13864,7 +13017,6 @@ def cb_criteria_hits_menu(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("kw_hits:"))
 @callback_guard
@@ -13887,7 +13039,6 @@ def cb_keyword_hits(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("crit_hits:"))
 @callback_guard
 def cb_criteria_hits(c):
@@ -13908,7 +13059,6 @@ def cb_criteria_hits(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ss|"))
 @callback_guard
@@ -13969,7 +13119,6 @@ def cb_search_select(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("save_search|"))
 @callback_guard
 def cb_save_search(c):
@@ -13993,7 +13142,6 @@ def cb_save_search(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_open:"))
 @callback_guard
@@ -14026,7 +13174,6 @@ def cb_open_notifications(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data == "kw_notif_view")
 @callback_guard
@@ -14061,7 +13208,6 @@ def cb_keyword_notification_view(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "notif_menu")
 @callback_guard
 def cb_notifications_menu(c):
@@ -14075,7 +13221,6 @@ def cb_notifications_menu(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "notif_back")
 @callback_guard
 def cb_notifications_back(c):
@@ -14088,7 +13233,6 @@ def cb_notifications_back(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_period:"))
 @callback_guard
@@ -14107,7 +13251,6 @@ def cb_notifications_period(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "notif_kw_hits")
 @callback_guard
 def cb_notifications_keyword_hits(c):
@@ -14120,7 +13263,6 @@ def cb_notifications_keyword_hits(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data == "notif_cust_req")
 @callback_guard
@@ -14147,7 +13289,6 @@ def cb_notifications_customer_requests(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_view:"))
 @callback_guard
@@ -14179,7 +13320,6 @@ def cb_notifications_view_listing(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "notif_noop")
 @callback_guard
 def cb_notification_noop(c):
@@ -14189,7 +13329,6 @@ def cb_notification_noop(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("agent_notif:"))
 @callback_guard
@@ -14204,7 +13343,6 @@ def cb_agent_notifications(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "notif_crit")
 @callback_guard
 def cb_notif_criteria(c):
@@ -14218,7 +13356,6 @@ def cb_notif_criteria(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "notif_rule_new")
 @callback_guard
 def cb_notif_rule_new(c):
@@ -14231,7 +13368,6 @@ def cb_notif_rule_new(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_rule_op:"))
 @callback_guard
@@ -14263,7 +13399,6 @@ def cb_notification_rule_operation(c):
     except Exception:
         pass
 
-
 @bot.message_handler(
     func=lambda m: notification_rule_state.get(m.chat.id, {}).get("step") == "operation"
 )
@@ -14288,7 +13423,6 @@ def handle_notification_rule_operation_message(message):
         "rayons": [],
     }
     send_notification_rayon_prompt(chat_id)
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_rule_rayon_"))
 @callback_guard
@@ -14332,7 +13466,6 @@ def cb_notification_rule_rayon(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_rule_prop"))
 @callback_guard
 def cb_notification_rule_property_type(c):
@@ -14371,7 +13504,6 @@ def cb_notification_rule_property_type(c):
     except Exception:
         pass
 
-
 @bot.message_handler(
     func=lambda m: notification_rule_state.get(m.chat.id, {}).get("step") == "min_price"
 )
@@ -14401,7 +13533,6 @@ def handle_notification_rule_min_price(message):
         "💰 Maksimum qiymət yazın (istəyə görə):",
         reply_markup=build_optional_input_keyboard(),
     )
-
 
 @bot.message_handler(
     func=lambda m: notification_rule_state.get(m.chat.id, {}).get("step") == "max_price"
@@ -14437,7 +13568,6 @@ def handle_notification_rule_max_price(message):
         reply_markup=build_optional_input_keyboard(),
     )
 
-
 @bot.message_handler(
     func=lambda m: notification_rule_state.get(m.chat.id, {}).get("step") == "rooms"
 )
@@ -14471,7 +13601,6 @@ def handle_notification_rule_rooms(message):
         "🏢 Mərtəbə yazın (istəyə görə, məs: 3 və ya 1-3):",
         reply_markup=build_optional_input_keyboard(),
     )
-
 
 @bot.message_handler(
     func=lambda m: notification_rule_state.get(m.chat.id, {}).get("step") == "floor"
@@ -14525,7 +13654,6 @@ def handle_notification_rule_floor(message):
     notification_rule_state[chat_id] = state
     send_notification_rule_confirm_prompt(chat_id)
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_rule_confirm:"))
 @callback_guard
 def cb_notification_rule_confirm(c):
@@ -14553,7 +13681,6 @@ def cb_notification_rule_confirm(c):
     except Exception:
         pass
 
-
 def finalize_notification_rule(chat_id: int):
     state = notification_rule_state.pop(chat_id, {})
     if not state:
@@ -14571,7 +13698,6 @@ def finalize_notification_rule(chat_id: int):
     rule_id = save_notification_rule(chat_id, data)
     if rule_id:
         finish_criteria_flow(chat_id)
-
 
 def finish_criteria_flow(chat_id: int) -> None:
     notification_rule_state.pop(chat_id, None)
@@ -14606,7 +13732,6 @@ def finish_criteria_flow(chat_id: int) -> None:
     )
     send_with_reply_keyboard(chat_id, "🏠 Əsas menyu:", kb)
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("notif_stopcrit:"))
 @callback_guard
 def cb_stop_criteria(c):
@@ -14627,7 +13752,6 @@ def cb_stop_criteria(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("crit_toggle:"))
 @callback_guard
@@ -14657,7 +13781,6 @@ def cb_toggle_criteria(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("crit_del:"))
 @callback_guard
 def cb_delete_criteria(c):
@@ -14676,7 +13799,6 @@ def cb_delete_criteria(c):
     except Exception:
         pass
 
-
 def send_keyword_operation_prompt(chat_id: int):
     set_navigation_state(chat_id, STATE_KEYWORD_MODE)
     set_search_menu_active(chat_id, True)
@@ -14692,7 +13814,6 @@ def send_keyword_operation_prompt(chat_id: int):
         "Açar sözü daxil edin…",
         mk,
     )
-
 
 def send_keyword_date_prompt(chat_id: int, message=None):
     st = search_state.setdefault(chat_id, {})
@@ -14712,7 +13833,6 @@ def send_keyword_date_prompt(chat_id: int, message=None):
     if message:
         last_ui_message_id[chat_id] = message.message_id
     update_ui_message(chat_id, chat_id, text, mk)
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("kwop|"))
 @callback_guard
@@ -14753,7 +13873,6 @@ def cb_keyword_operation(c):
     search_state[chat_id] = st
     send_keyword_date_prompt(chat_id, c.message)
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("kwdr|"))
 @callback_guard
 def cb_keyword_date_range(c):
@@ -14789,7 +13908,6 @@ def cb_keyword_date_range(c):
         mk,
         parse_mode="Markdown",
     )
-
 
 # ===== FİLTRLİ AXTARIŞ (STRUCTURED) =====
 
@@ -14844,7 +13962,6 @@ PROP_TYPES = {
     "d": "Digər",
 }
 
-
 def normalize_property_type_ui_value(raw_value: Optional[str]) -> Optional[str]:
     if raw_value is None:
         return None
@@ -14854,14 +13971,12 @@ def normalize_property_type_ui_value(raw_value: Optional[str]) -> Optional[str]:
     normalized = PROPERTY_TYPE_NORMALIZATION_MAP.get(cleaned.lower())
     return normalized
 
-
 def resolve_property_type_from_code(prop_code: Optional[str]) -> Optional[str]:
     if not prop_code or prop_code == "all":
         return None
     mapped = PROP_TYPES.get(prop_code)
     normalized = normalize_property_type_ui_value(mapped or prop_code)
     return normalized
-
 
 def get_property_type_filter_values(
     prop_code: Optional[str] = None, ui_value: Optional[str] = None
@@ -14946,7 +14061,6 @@ RAYON_GROUPS = {
     ],
 }
 
-
 def decode_price_range(code: str):
     # Kirayə
     if code == "k1":
@@ -14972,7 +14086,6 @@ def decode_price_range(code: str):
         return 200000, None
     return None, None
 
-
 def resolve_operation_filter(op_code: Optional[str], mode: str) -> Optional[str]:
     if not op_code or op_code == "all":
         return None
@@ -14986,7 +14099,6 @@ def resolve_operation_filter(op_code: Optional[str], mode: str) -> Optional[str]
 
     source = "main" if mode == "main" else "local"
     return detect_db_operation_value(op_norm, source)
-
 
 def build_filters_sql(
     op_code, prop_code, rayon_group, min_price=None, max_price=None, mode="main"
@@ -15030,26 +14142,6 @@ def build_filters_sql(
 
     return sql, params
 
-
-def build_listing_visibility_sql(
-    cur: sqlite3.Cursor,
-    table: str,
-    alias: str = "",
-    *,
-    include_hidden: bool = False,
-) -> str:
-    if include_hidden:
-        return ""
-    cols = get_table_columns(cur, table)
-    hidden_col = cols.get("is_hidden")
-    if not hidden_col:
-        return ""
-    prefix = alias
-    if prefix and not prefix.endswith("."):
-        prefix = f"{prefix}."
-    return f" AND {prefix}{hidden_col} = 0"
-
-
 BAKU_RAYONS = [
     "Binəqədi",
     "Qaradağ",
@@ -15084,7 +14176,6 @@ ROOM_CODES = [
 FLOOR_PRESETS = {"f13": (1, 3), "f49": (4, 9), "f10": (10, None), "fall": None}
 DATE_RANGE_DAYS = {"d7": 7, "d30": 30, "d60": 60, "d90": 90, "all": None}
 
-
 def fetch_distinct_region_names() -> List[str]:
     if not os.path.exists(MAIN_DB):
         return []
@@ -15106,7 +14197,6 @@ def fetch_distinct_region_names() -> List[str]:
     finally:
         close_main_conn(conn)
 
-
 def get_region_filter_options(region_code: str) -> List[str]:
     regions = fetch_distinct_region_names()
     if not regions:
@@ -15120,18 +14210,15 @@ def get_region_filter_options(region_code: str) -> List[str]:
     filtered = [name for name in regions if normalize_region(name) in group_norm]
     return filtered or group
 
-
 def structured_send(chat_id, message, text, markup):
     if message:
         last_ui_message_id[chat_id] = message.message_id
     update_ui_message(chat_id, chat_id, text, markup)
 
-
 def structured_push_history(chat_id):
     st = search_state.setdefault(chat_id, {})
     hist = st.setdefault("history", [])
     hist.append({"step": st.get("step"), "filters": dict(st.get("filters", {}))})
-
 
 def parse_number(val):
     try:
@@ -15143,14 +14230,12 @@ def parse_number(val):
     nums = _re.findall(r"\d+", str(val or ""))
     return int(nums[0]) if nums else None
 
-
 def normalize_date_range_op(op_code: Optional[str]) -> str:
     if op_code in {"kir", "rent"}:
         return "kir"
     if op_code in {"sat", "sale"}:
         return "sat"
     return "sat"
-
 
 def get_date_range_options(op_code: Optional[str]):
     op = normalize_date_range_op(op_code)
@@ -15167,7 +14252,6 @@ def get_date_range_options(op_code: Optional[str]):
         ("📦 Hamısı", "all"),
     ]
 
-
 def is_within_date_range(ev: dict, date_days: Optional[Union[int, str]]) -> bool:
     ev_dt = extract_listing_datetime(ev)
     if date_days == "today":
@@ -15182,22 +14266,18 @@ def is_within_date_range(ev: dict, date_days: Optional[Union[int, str]]) -> bool
     cutoff = datetime.utcnow() - timedelta(days=date_days)
     return ev_dt >= cutoff
 
-
 def build_back_reply_keyboard() -> types.ReplyKeyboardMarkup:
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("⬅️ Geri")
     return kb
-
 
 def search_flow_back_keyboard() -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup()
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="search_flow:back"))
     return mk
 
-
 def price_input_keyboard() -> types.InlineKeyboardMarkup:
     return search_flow_back_keyboard()
-
 
 def parse_floor_value(ev: dict):
     for k in ("floor", "Floor", "Mertebe", "mertebe"):
@@ -15208,7 +14288,6 @@ def parse_floor_value(ev: dict):
     text = ev.get("summary") or ev.get("Umumi_melumat") or ""
     num = parse_number(text)
     return num
-
 
 def matches_region_rayon(ev: dict, filters: dict) -> bool:
     region = filters.get("region") or "all"
@@ -15223,10 +14302,8 @@ def matches_region_rayon(ev: dict, filters: dict) -> bool:
         return any(r.lower() in listing_region for r in region_rayons)
     return True
 
-
 def normalize_rayon_name(value: Optional[str]) -> str:
     return str(value or "").strip().lower()
-
 
 def normalize_region(value: str) -> str:
     if not value:
@@ -15246,14 +14323,11 @@ def normalize_region(value: str) -> str:
     v = re.sub(r"\s+", " ", v)
     return v.strip()
 
-
 def normalize_rayon(value: str) -> str:
     return normalize_region(value)
 
-
 def normalize_today_rayon(value: Optional[str]) -> str:
     return normalize_rayon(value or "")
-
 
 def extract_today_rayon_candidates(ev: dict) -> List[str]:
     region_raw = get_listing_region_value(ev)
@@ -15262,14 +14336,12 @@ def extract_today_rayon_candidates(ev: dict) -> List[str]:
     ]
     return [normalize_today_rayon(c) for c in candidates if normalize_today_rayon(c)]
 
-
 def matches_today_rayon(ev: dict, filters: dict) -> bool:
     rayon = normalize_today_rayon(filters.get("rayon"))
     if not rayon or rayon in {"all", "hamısı"}:
         return True
     candidates = extract_today_rayon_candidates(ev)
     return any(candidate == rayon or rayon in candidate for candidate in candidates)
-
 
 def matches_rooms(ev: dict, room_code: str) -> bool:
     if not room_code or room_code == "r0":
@@ -15285,7 +14357,6 @@ def matches_rooms(ev: dict, room_code: str) -> bool:
     except Exception:
         return True
 
-
 def matches_floor(ev: dict, floor_range):
     if not floor_range:
         return True
@@ -15298,7 +14369,6 @@ def matches_floor(ev: dict, floor_range):
     if mx is not None and floor_val > mx:
         return False
     return True
-
 
 def compute_stats(
     conn: sqlite3.Connection,
@@ -15418,37 +14488,7 @@ def compute_stats(
             where_clauses.append(time_filter.replace("WHERE ", "", 1))
 
     if stat_context == STAT_CONTEXT_USER and source_table == "listings":
-        visibility_sql = build_listing_visibility_sql(
-            cur, "listings", alias="l", include_hidden=False
-        )
-        if visibility_sql:
-            where_clauses.append(visibility_sql.replace(" AND ", "", 1))
-
-    order_col = None
-    for candidate in ("id", "listing_id"):
-        if candidate in cols:
-            order_col = cols[candidate]
-            break
-    if not order_col:
-        order_col = "ROWID"
-
-    from_clause = f"{source_table} l"
-
-    where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
-    query = f"SELECT {', '.join(select_parts)} FROM {from_clause}{where_sql}"
-
-    cur.execute(query, params)
-    row = cur.fetchone() or {}
-    stats.update(
-        {
-            "total": _row_value_safe(row, "total", 0) or 0,
-            "sale_count": _row_value_safe(row, "sale_count", 0) or 0,
-            "rent_count": _row_value_safe(row, "rent_count", 0) or 0,
-            "apartment_count": _row_value_safe(row, "apartment_count", 0) or 0,
-            "house_count": _row_value_safe(row, "house_count", 0) or 0,
-            "land_count": _row_value_safe(row, "land_count", 0) or 0,
-        }
-    )
+        visibility_sql = ""
     op_sum = stats["sale_count"] + stats["rent_count"]
     prop_sum = stats["apartment_count"] + stats["house_count"] + stats["land_count"]
     if stats["total"] != op_sum or stats["total"] != prop_sum:
@@ -15460,7 +14500,6 @@ def compute_stats(
             prop_sum,
         )
     return stats
-
 
 def compute_user_statistics(period: str) -> dict:
     key_base = period if period in {"24h", "7d", "30d", "all"} else "all"
@@ -15546,24 +14585,7 @@ def compute_user_statistics(period: str) -> dict:
         if time_clause:
             where_clauses.append(time_clause.replace("WHERE ", "", 1))
 
-        visibility_sql = build_listing_visibility_sql(
-            cur, "listings", alias="l", include_hidden=False
-        )
-        if visibility_sql:
-            where_clauses.append(visibility_sql.replace(" AND ", "", 1))
-
-        where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
-        from_clause = f"FROM listings l{where_sql}"
-
-        cur.execute(f"SELECT COUNT(*) AS total {from_clause}", where_params)
-        row = cur.fetchone() or {}
-        stats.update(
-            {
-                "total": _row_value_safe(row, "total", 0) or 0,
-                "sale_count": 0,
-                "rent_count": 0,
-            }
-        )
+        visibility_sql = ""
 
         if op_col:
             op_expr_raw = f"TRIM(COALESCE(l.\"{op_col}\", ''))"
@@ -15633,7 +14655,6 @@ def compute_user_statistics(period: str) -> dict:
     _log_user_stats_consistency()
     return stats
 
-
 def _log_user_stats_consistency():
     required = ["24h", "7d", "30d", "all"]
     available = {}
@@ -15655,7 +14676,6 @@ def _log_user_stats_consistency():
                 d24,
             )
 
-
 def _build_market_ts_clause(ts_col: Optional[str], ts_kind: str, days: int):
     if not ts_col or days <= 0:
         return "", []
@@ -15671,7 +14691,6 @@ def _build_market_ts_clause(ts_col: Optional[str], ts_kind: str, days: int):
         )
     return "", []
 
-
 def _market_dom_expr(ts_col: Optional[str], ts_kind: str) -> Optional[str]:
     if not ts_col:
         return None
@@ -15682,7 +14701,6 @@ def _market_dom_expr(ts_col: Optional[str], ts_kind: str) -> Optional[str]:
     if ts_kind == "iso":
         return f"(julianday('now') - julianday(l.\"{ts_col}\"))"
     return None
-
 
 def compute_market_pulse() -> List[Dict[str, Any]]:
     now_ts = time.time()
@@ -15746,14 +14764,7 @@ def compute_market_pulse() -> List[Dict[str, Any]]:
                     type_filter = f" AND COALESCE(l.\"{type_col}\", '') != ''" if type_col else ""
                     visibility_sql = ""
                     if table == "listings":
-                        visibility_sql = build_listing_visibility_sql(
-                            cur, table, alias="l", include_hidden=False
-                        )
-
-                    rayon_base_where = (
-                        f"WHERE l.\"{rayon_col}\" IS NOT NULL AND l.\"{rayon_col}\" != ''"
-                        f"{visibility_sql}{thirty_clause}{op_filter}{type_filter}"
-                    )
+                        visibility_sql = ""
                     cur.execute(
                         f"SELECT DISTINCT l.\"{rayon_col}\" AS rayon FROM {table} l {rayon_base_where} ORDER BY rayon",
                         thirty_params,
@@ -15857,7 +14868,6 @@ def compute_market_pulse() -> List[Dict[str, Any]]:
     market_pulse_cache["data"] = results
     return results
 
-
 def fetch_global_statistics(period: str = "all", stat_context: str = STAT_CONTEXT_USER) -> dict:
     key_base = period if period in {"24h", "7d", "30d", "all"} else "all"
     cache_key = f"{stat_context}:{key_base}"
@@ -15921,10 +14931,8 @@ def fetch_global_statistics(period: str = "all", stat_context: str = STAT_CONTEX
         _log_user_stats_consistency()
     return stats
 
-
 def _listing_price_value(ev: dict):
     return parse_number(ev.get("price") or ev.get("Qiymet"))
-
 
 def matches_saved_search(ev: dict, saved: dict) -> bool:
     # Notification matching uses its own rules (not search query parsing).
@@ -15973,7 +14981,6 @@ def matches_saved_search(ev: dict, saved: dict) -> bool:
 
     return True
 
-
 def load_recent_listings(since_dt: datetime):
     results = []
     since_dt = since_dt or datetime.min
@@ -15984,12 +14991,7 @@ def load_recent_listings(since_dt: datetime):
         date_col = detect_table_date_column(cur, "listings")
         order_parts = build_listing_order_parts(cur, "listings", date_col)
         order_clause = f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
-        visibility_sql = build_listing_visibility_sql(
-            cur, "listings", include_hidden=False
-        )
-        cur.execute(
-            f"SELECT * FROM listings WHERE 1=1{visibility_sql}{order_clause} LIMIT 800"
-        )
+        visibility_sql = ""
         for r in cur.fetchall():
             d = dict(r)
             d["__source"] = "main"
@@ -16010,7 +15012,6 @@ def load_recent_listings(since_dt: datetime):
     conn.close()
 
     return results
-
 
 def process_saved_search_notifications():
     conn = get_local_conn()
@@ -16140,7 +15141,6 @@ def process_saved_search_notifications():
     if state_updated:
         _save_saved_search_notify_state(notify_state)
 
-
 def saved_search_worker():
     while True:
         try:
@@ -16148,7 +15148,6 @@ def saved_search_worker():
         except Exception as e:
             print("⚠️ Saved search worker error:", e)
         time.sleep(3600)
-
 
 def check_favorite_price_drops():
     conn = get_local_conn()
@@ -16173,7 +15172,7 @@ def check_favorite_price_drops():
         chat_id = row["chat_id"]
         last_price = row["last_price"]
 
-        ev = fetch_listing_by_source(src, lid, include_hidden=False)
+        ev = fetch_listing_by_source(src, lid)
         if not ev:
             continue
 
@@ -16208,7 +15207,6 @@ def check_favorite_price_drops():
         if last_price != current_price:
             upsert_favorite_price(src, lid, current_price)
 
-
 def favorite_price_worker():
     while True:
         try:
@@ -16217,13 +15215,10 @@ def favorite_price_worker():
             print("⚠️ Favorite price worker error:", e)
         time.sleep(3600)
 
-
 def query_structured_results(
     filters: dict,
     offset: int = 0,
     limit: int = None,
-    *,
-    include_hidden: bool = False,
 ):
     op_code = filters.get("op", "all")
     prop_code = filters.get("prop", "all")
@@ -16247,9 +15242,7 @@ def query_structured_results(
         date_sql, date_params = build_date_range_clause(date_expr, date_days)
         order_parts = build_listing_order_parts(cur, "listings", date_col)
         order_clause = f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
-        visibility_sql = build_listing_visibility_sql(
-            cur, "listings", include_hidden=include_hidden
-        )
+        visibility_sql = ""
         cur.execute(
             base + flt + visibility_sql + date_sql + order_clause,
             params + date_params,
@@ -16296,13 +15289,10 @@ def query_structured_results(
         filtered = filtered[offset : offset + limit]
     return filtered, total
 
-
 def query_today_results(
     filters: dict,
     offset: int = 0,
     limit: int = None,
-    *,
-    include_hidden: bool = False,
 ):
     op_code = filters.get("op", "all")
     prop_code = filters.get("prop", "all")
@@ -16331,9 +15321,7 @@ def query_today_results(
             order_clause = (
                 " ORDER BY " + ", ".join(order_parts) if order_parts else ""
             )
-            visibility_sql = build_listing_visibility_sql(
-                cur, "listings", include_hidden=include_hidden
-            )
+            visibility_sql = ""
             where_sql = flt + visibility_sql + date_sql + rayon_sql
             logger.debug(
                 "today query main where=%s params=%s",
@@ -16402,11 +15390,9 @@ def query_today_results(
         filtered = filtered[offset : offset + limit]
     return filtered, total
 
-
 def count_today_filtered(filters: dict) -> int:
-    _, total = query_today_results(filters, offset=0, limit=None, include_hidden=False)
+    _, total = query_today_results(filters, offset=0, limit=None)
     return total
-
 
 def is_fts_ready(conn, table_name: str) -> bool:
     try:
@@ -16422,10 +15408,8 @@ def is_fts_ready(conn, table_name: str) -> bool:
     except Exception:
         return False
 
-
 def build_smart_fts_queries(search_text: str) -> Tuple[Optional[str], Optional[str]]:
     return build_fts_queries(search_text)
-
 
 def build_fts_queries(q: str) -> Tuple[Optional[str], Optional[str]]:
     normalized = normalize_text((q or "").strip())
@@ -16437,7 +15421,6 @@ def build_fts_queries(q: str) -> Tuple[Optional[str], Optional[str]]:
     phrase = f'"{normalized}"'
     and_query = " AND ".join([f"{t}*" for t in tokens])
     return phrase, and_query
-
 
 def execute_ranked_fts(
     cur: sqlite3.Cursor,
@@ -16505,7 +15488,6 @@ def execute_ranked_fts(
         )
     return results
 
-
 def query_keyword_results(
     selected_op: str,
     words: list,
@@ -16513,7 +15495,6 @@ def query_keyword_results(
     offset: int = 0,
     limit: int = None,
     *,
-    include_hidden: bool = False,
     phrase: Optional[str] = None,
     phrase_mode: bool = False,
 ):
@@ -16629,9 +15610,7 @@ def query_keyword_results(
             base_where += " AND operation = ?"
             params.append(operation_value)
         if table == "listings":
-            base_where += build_listing_visibility_sql(
-                cur, table, include_hidden=include_hidden
-            )
+            base_where += ""
         rows = []
         if search_mode == "phrase" and phrase_enabled:
             if phrase_query:
@@ -16773,7 +15752,6 @@ def query_keyword_results(
         "fallback_used": fallback_used,
     }
 
-
 def parse_smart_query(text: str) -> dict:
     res = {
         "operation": None,
@@ -16853,13 +15831,10 @@ def parse_smart_query(text: str) -> dict:
     res["keywords"] = keywords
     return res
 
-
 def query_smart_results(
     criteria: dict,
     offset: int = 0,
     limit: int = None,
-    *,
-    include_hidden: bool = False,
 ):
     keywords = [w.lower() for w in criteria.get("keywords", []) if w]
     op_norm = normalize_operation_value(criteria.get("operation"))
@@ -16926,9 +15901,7 @@ def query_smart_results(
         conn = get_main_conn()
         cur = conn.cursor()
         where_clause, base_params = build_filters(op_main)
-        where_clause += build_listing_visibility_sql(
-            cur, "listings", include_hidden=include_hidden
-        )
+        where_clause += ""
         date_col = detect_table_date_column(cur, "listings")
         order_suffix = ""
         order_parts = build_listing_order_parts(
@@ -17062,13 +16035,10 @@ def query_smart_results(
     )
     return filtered, total
 
-
 def query_phone_results(
     raw: str,
     offset: int = 0,
     limit: int = None,
-    *,
-    include_hidden: bool = False,
 ):
     like = f"%{raw}%"
     results = []
@@ -17079,9 +16049,7 @@ def query_phone_results(
         date_col = detect_table_date_column(cur, "listings")
         order_parts = build_listing_order_parts(cur, "listings", date_col)
         order_clause = f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
-        visibility_sql = build_listing_visibility_sql(
-            cur, "listings", include_hidden=include_hidden
-        )
+        visibility_sql = ""
         cur.execute(
             """
             SELECT * FROM listings
@@ -17123,36 +16091,6 @@ def query_phone_results(
         results = results[offset : offset + limit]
     return results, total
 
-
-def query_hidden_listings(offset: int = 0, limit: int = None):
-    if not os.path.exists(MAIN_DB):
-        return [], 0
-    conn = get_main_conn()
-    cur = conn.cursor()
-    cols = get_table_columns(cur, "listings")
-    if "is_hidden" not in cols:
-        close_main_conn(conn)
-        return [], 0
-    cur.execute("SELECT COUNT(*) FROM listings WHERE is_hidden = 1")
-    total = cur.fetchone()[0] or 0
-    date_col = detect_table_date_column(cur, "listings")
-    order_parts = build_listing_order_parts(cur, "listings", date_col)
-    order_clause = f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
-    sql = f"SELECT * FROM listings WHERE is_hidden = 1{order_clause}"
-    params: List[Any] = []
-    if limit is not None:
-        sql += " LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
-    cur.execute(sql, params)
-    items = []
-    for r in cur.fetchall():
-        d = dict(r)
-        d["__source"] = "main"
-        items.append(d)
-    close_main_conn(conn)
-    return items, total
-
-
 def query_favorites_page(chat_id: int, offset: int = 0, limit: int = None):
     conn = get_local_conn()
     cur = conn.cursor()
@@ -17171,23 +16109,20 @@ def query_favorites_page(chat_id: int, offset: int = 0, limit: int = None):
     conn.close()
 
     items = []
-    include_hidden = is_admin(chat_id)
     for r in rows:
         ev = fetch_listing_by_source(
-            r["source"], r["listing_id"], include_hidden=include_hidden
+            r["source"], r["listing_id"]
         )
         if ev:
             items.append({"data": ev, "source": r["source"]})
     return items, total
 
-
 def fetch_page_results(chat_id: int, mode: str, params: dict, page: int):
     offset = (page - 1) * PAGE_SIZE
-    include_hidden = is_admin(chat_id)
     if mode == "filter":
         filters = params.get("filters") or params
         return query_structured_results(
-            filters, offset=offset, limit=PAGE_SIZE, include_hidden=include_hidden
+            filters, offset=offset, limit=PAGE_SIZE
         )
     if mode == "keyword":
         return query_keyword_results(
@@ -17196,21 +16131,18 @@ def fetch_page_results(chat_id: int, mode: str, params: dict, page: int):
             params.get("date_days"),
             offset=offset,
             limit=PAGE_SIZE,
-            include_hidden=include_hidden,
         )
     if mode == "smart":
         return query_smart_results(
             params.get("criteria", {}),
             offset=offset,
             limit=PAGE_SIZE,
-            include_hidden=include_hidden,
         )
     if mode == "phone":
         return query_phone_results(
             params.get("digits", ""),
             offset=offset,
             limit=PAGE_SIZE,
-            include_hidden=include_hidden,
         )
     if mode == "favorites":
         return query_favorites_page(chat_id, offset=offset, limit=PAGE_SIZE)
@@ -17219,17 +16151,13 @@ def fetch_page_results(chat_id: int, mode: str, params: dict, page: int):
             days=params.get("days", 7),
             offset=offset,
             limit=PAGE_SIZE,
-            include_hidden=include_hidden,
         )
     if mode == "today":
         return query_today_results(
             params.get("filters", {}),
             offset=offset,
             limit=PAGE_SIZE,
-            include_hidden=include_hidden,
         )
-    if mode == "admin_hidden":
-        return query_hidden_listings(offset=offset, limit=PAGE_SIZE)
     if mode == "keyword_notif":
         items = keyword_notification_state.get(chat_id, {}).get("items", [])
         seen_ids: Set[str] = set()
@@ -17248,15 +16176,12 @@ def fetch_page_results(chat_id: int, mode: str, params: dict, page: int):
         return deduped[offset : offset + PAGE_SIZE], total
     return [], 0
 
-
 def fetch_all_results(chat_id: int, mode: str, params: dict):
-    include_hidden = is_admin(chat_id)
     if mode == "filter":
         filters = params.get("filters") or params
         items, total = query_structured_results(
-            filters, offset=0, limit=None, include_hidden=include_hidden
+            filters, offset=0, limit=None
         )
-        items = filter_hidden_listings(chat_id, items)
         return items, len(items), None
     if mode == "keyword":
         items, total, meta = query_keyword_results(
@@ -17265,39 +16190,31 @@ def fetch_all_results(chat_id: int, mode: str, params: dict):
             params.get("date_days"),
             offset=0,
             limit=None,
-            include_hidden=include_hidden,
             phrase=params.get("phrase"),
             phrase_mode=bool(params.get("phrase_mode")),
         )
-        items = filter_hidden_listings(chat_id, items)
         return items, len(items), meta
     if mode == "smart":
         items, total = query_smart_results(
             params.get("criteria", {}),
             offset=0,
             limit=None,
-            include_hidden=include_hidden,
         )
-        items = filter_hidden_listings(chat_id, items)
         return items, len(items), None
     if mode == "phone":
         items, total = query_phone_results(
-            params.get("digits", ""), offset=0, limit=None, include_hidden=include_hidden
+            params.get("digits", ""), offset=0, limit=None
         )
-        items = filter_hidden_listings(chat_id, items)
         return items, len(items), None
     if mode == "favorites":
         items, total = query_favorites_page(chat_id, offset=0, limit=None)
-        items = filter_hidden_listings(chat_id, items)
         return items, len(items), None
     if mode == "topviews":
         items, total = query_top_viewed_listings(
             days=params.get("days", 7),
             offset=0,
             limit=None,
-            include_hidden=include_hidden,
         )
-        items = filter_hidden_listings(chat_id, items)
         return items, len(items), None
     if mode == "today":
         filters = params.get("filters", {})
@@ -17305,17 +16222,11 @@ def fetch_all_results(chat_id: int, mode: str, params: dict):
         cached = today_results_cache.get(chat_id, {})
         if cached.get("filters") == filters_copy:
             items = cached.get("items") or []
-            items = filter_hidden_listings(chat_id, items)
             return items, len(items), None
         items, total = query_today_results(
-            filters_copy, offset=0, limit=None, include_hidden=include_hidden
+            filters_copy, offset=0, limit=None
         )
-        items = filter_hidden_listings(chat_id, items)
         today_results_cache[chat_id] = {"filters": filters_copy, "items": items}
-        return items, len(items), None
-    if mode == "admin_hidden":
-        items, total = query_hidden_listings(offset=0, limit=None)
-        items = filter_hidden_listings(chat_id, items)
         return items, len(items), None
     if mode == "keyword_notif":
         items = keyword_notification_state.get(chat_id, {}).get("items", [])
@@ -17331,16 +16242,13 @@ def fetch_all_results(chat_id: int, mode: str, params: dict):
                 continue
             seen_ids.add(key)
             deduped.append(item)
-        deduped = filter_hidden_listings(chat_id, deduped)
         total = len(deduped)
         return deduped, total, None
     return [], 0, None
 
-
 def _fetch_all_results_legacy(chat_id: int, mode: str, params: dict):
     items, total, _ = fetch_all_results(chat_id, mode, params)
     return items, total
-
 
 def prepare_listing_session_items(items: List[dict]):
     refs: List[Dict[str, Any]] = []
@@ -17355,7 +16263,6 @@ def prepare_listing_session_items(items: List[dict]):
         cache.setdefault(cache_key, norm.get("data", {}))
     return refs, cache
 
-
 def render_listing_view(
     chat_id: int,
     listings: List[dict],
@@ -17366,7 +16273,6 @@ def render_listing_view(
     loading_ref=None,
     track_view: Optional[bool] = None,
 ):
-    listings = filter_hidden_listings(chat_id, listings)
     refs, cache = prepare_listing_session_items(listings)
     if not refs:
         if not replace_loading_message(loading_ref, "Siyahı boşdur."):
@@ -17394,7 +16300,6 @@ def render_listing_view(
     }
     render_listing_for_user(chat_id, session_id, target_message=loading_ref)
 
-
 def render_listing_for_user(
     chat_id: int, session_id: Optional[str] = None, target_message=None
 ):
@@ -17413,17 +16318,10 @@ def render_listing_for_user(
     cache_key = make_listing_ref(ref["source"], ref["id"])
     listing = session.get("cache", {}).get(cache_key)
     if not listing:
-        listing = fetch_listing_by_source(
-            ref["source"], ref["id"], include_hidden=is_admin(chat_id)
-        )
+        listing = fetch_listing_by_source(ref["source"], ref["id"])
         if listing:
             listing["__source"] = ref["source"]
             session.setdefault("cache", {})[cache_key] = listing
-
-    if listing and not is_admin(chat_id) and int(listing.get("is_hidden") or 0) == 1:
-        listing = None
-    if listing and is_listing_hidden_for_user(chat_id, ref["source"], ref["id"]):
-        listing = None
 
     if not listing:
         if len(refs) > 1:
@@ -17452,16 +16350,7 @@ def render_listing_for_user(
     wa_message = build_whatsapp_message(listing)
     wa_phone = listing.get("phone") or listing.get("Elaqe_nomresi")
     wa_url = make_whatsapp_url(wa_phone, wa_message)
-    visibility_button = build_listing_visibility_button(
-        listing, admin_mode=session.get("mode"), chat_id=chat_id
-    )
-    markup = build_listing_navigation_keyboard(
-        is_fav,
-        listing_link,
-        wa_url,
-        show_hide_button=is_admin(chat_id),
-        visibility_button=visibility_button,
-    )
+    markup = build_listing_navigation_keyboard(is_fav, listing_link, wa_url)
     try:
         markup_signature = json.dumps(markup.to_dic(), sort_keys=True)
     except Exception:
@@ -17530,7 +16419,6 @@ def render_listing_for_user(
     except Exception:
         session.pop("message_id", None)
 
-
 def start_listing_session(
     chat_id: int,
     mode: str,
@@ -17551,7 +16439,6 @@ def start_listing_session(
         track_view=track_view,
     )
 
-
 def send_paginated_results(
     chat_id: int,
     mode: str,
@@ -17570,15 +16457,8 @@ def send_paginated_results(
         "favorites",
         "topviews",
         "keyword_notif",
-        "admin_hidden",
     }:
         set_ui_context(chat_id, UI_CONTEXT_SEARCH)
-    if mode == "admin_hidden" and not is_admin(chat_id):
-        reset_user_state(chat_id)
-        if loading_ref:
-            replace_loading_message(loading_ref, "🏠 Əsas menyu")
-        return_to_main_menu(chat_id)
-        return
     if mode == "topviews" and not is_admin(chat_id):
         reset_user_state(chat_id)
         if loading_ref:
@@ -17610,7 +16490,6 @@ def send_paginated_results(
         loading_ref=loading_ref,
         track_view=track_view,
     )
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("pg:"))
 @callback_guard
@@ -17653,7 +16532,6 @@ def cb_pagination(c):
             chat_id, mode=mode, params=params, page=target, show_summary=False
         )
 
-
 @bot.callback_query_handler(func=lambda c: c.data in {"listings_prev", "listings_next", "listings_back"})
 @callback_guard
 def cb_listings_page_nav(c):
@@ -17691,7 +16569,6 @@ def cb_listings_page_nav(c):
             params={},
         )
     safe_answer_callback_query(c.id)
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("nav:"))
 @callback_guard
@@ -17749,58 +16626,6 @@ def cb_listing_nav(c):
     except Exception:
         pass
 
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("listing_vis:"))
-@callback_guard
-def cb_listing_visibility(c):
-    if not ensure_allowed_cb(c):
-        return
-    chat_id = c.message.chat.id
-    if not is_admin(chat_id):
-        return
-    parts = c.data.split(":")
-    if len(parts) != 3:
-        return
-    action = parts[1]
-    if action not in {"hide", "show"}:
-        return
-    try:
-        listing_id = int(parts[2])
-    except Exception:
-        return
-    is_hidden = 1 if action == "hide" else 0
-    updated = set_listing_hidden_state(listing_id, is_hidden)
-    session = get_active_listing_session(chat_id)
-    if session:
-        cache = session.get("cache", {})
-        for key, listing in list(cache.items()):
-            if listing.get("id") == listing_id:
-                listing["is_hidden"] = is_hidden
-                cache[key] = listing
-        if action == "show" and session.get("mode") == "admin_hidden":
-            refs = session.get("result_ids") or []
-            session["result_ids"] = [
-                ref
-                for ref in refs
-                if not (ref.get("source") == "main" and ref.get("id") == listing_id)
-            ]
-            session["current_index"] = min(
-                session.get("current_index", 0),
-                max(len(session["result_ids"]) - 1, 0),
-            )
-            if not session.get("result_ids"):
-                listing_sessions.pop(chat_id, None)
-                update_ui_message(chat_id, chat_id, "Siyahı boşdur.", None)
-                safe_answer_callback_query(
-                    c.id, "✅ Yeniləndi." if updated else "⚠️ Yenilənmə alınmadı."
-                )
-                return
-        render_listing_for_user(chat_id, session.get("session_id"))
-    safe_answer_callback_query(
-        c.id, "✅ Yeniləndi." if updated else "⚠️ Yenilənmə alınmadı."
-    )
-
-
 @bot.callback_query_handler(func=lambda c: c.data == "fav:toggle")
 @callback_guard
 def cb_listing_favorite_toggle(c):
@@ -17835,64 +16660,6 @@ def cb_listing_favorite_toggle(c):
     except Exception:
         pass
 
-
-@bot.callback_query_handler(func=lambda c: c.data == "listing_hide")
-@callback_guard
-def cb_listing_hide(c):
-    if not ensure_allowed_cb(c):
-        return
-    chat_id = c.message.chat.id
-    if not is_admin(chat_id):
-        try:
-            bot.answer_callback_query(c.id, "Bu əməliyyat yalnız admin üçündür.")
-        except Exception:
-            pass
-        return
-    session = get_active_listing_session(chat_id)
-    if not session or not session.get("result_ids"):
-        try:
-            bot.answer_callback_query(c.id, "Siyahı bitib.")
-        except Exception:
-            pass
-        return
-    idx = session.get("current_index", 0)
-    ref = session["result_ids"][idx]
-    hide_listing_for_user(chat_id, ref["source"], ref["id"])
-    session["result_ids"].pop(idx)
-    if session.get("listings"):
-        updated = []
-        for item in session["listings"]:
-            norm = normalize_listing_item(item)
-            if not norm:
-                updated.append(item)
-                continue
-            if norm["source"] == ref["source"] and norm["id"] == ref["id"]:
-                continue
-            updated.append(item)
-        session["listings"] = updated
-    if not session["result_ids"]:
-        listing_sessions.pop(chat_id, None)
-        update_ui_message(chat_id, chat_id, "Siyahı boşdur.", None)
-        try:
-            bot.answer_callback_query(c.id, "Elan gizlədildi.")
-        except Exception:
-            pass
-        return
-    session["current_index"] = min(idx, len(session["result_ids"]) - 1)
-    render_listing_view(
-        chat_id,
-        session.get("listings") or [],
-        session.get("current_index", 0),
-        mode=session.get("mode"),
-        params=session.get("params", {}),
-        track_view=session.get("track_view", False),
-    )
-    try:
-        bot.answer_callback_query(c.id, "Elan gizlədildi.")
-    except Exception:
-        pass
-
-
 def render_op_step(chat_id, message=None):
     st = search_state.setdefault(chat_id, {})
     st["step"] = "op"
@@ -17904,7 +16671,6 @@ def render_op_step(chat_id, message=None):
     mk.add(types.InlineKeyboardButton("🌐 Hamısı", callback_data="fs|op|all"))
     mk.add(types.InlineKeyboardButton("❌ Bağla", callback_data="fs|cancel"))
     structured_send(chat_id, message, "🔍 Əməliyyat növünü seç:", mk)
-
 
 def render_date_range_step(chat_id, message=None):
     st = search_state.setdefault(chat_id, {})
@@ -17922,7 +16688,6 @@ def render_date_range_step(chat_id, message=None):
         mk.row(*row)
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="fs|bk"))
     structured_send(chat_id, message, "📆 Tarix aralığını seç:", mk)
-
 
 def render_prop_step(chat_id, message=None):
     st = search_state.setdefault(chat_id, {})
@@ -17942,7 +16707,6 @@ def render_prop_step(chat_id, message=None):
     )
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="fs|bk"))
     structured_send(chat_id, message, "🏠 Əmlak tipini seç:", mk)
-
 
 def render_region_step(chat_id, message=None):
     st = search_state.setdefault(chat_id, {})
@@ -17968,7 +16732,6 @@ def render_region_step(chat_id, message=None):
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="fs|bk"))
     structured_send(chat_id, message, "📍 Regionu seç:", mk)
 
-
 def render_rayon_step(chat_id, message=None):
     st = search_state.setdefault(chat_id, {})
     st["step"] = "rayon"
@@ -17987,7 +16750,6 @@ def render_rayon_step(chat_id, message=None):
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="fs|bk"))
     structured_send(chat_id, message, "📍 Rayon seçin:", mk)
 
-
 def render_price_step(chat_id, message=None):
     st = search_state.setdefault(chat_id, {})
     st["step"] = "price"
@@ -17996,7 +16758,6 @@ def render_price_step(chat_id, message=None):
     mk.add(types.InlineKeyboardButton("📦 Hamısı", callback_data="fs|pr|all"))
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="fs|bk"))
     structured_send(chat_id, message, "💰 Qiymət aralığını seç:", mk)
-
 
 def render_room_step(chat_id, message=None):
     st = search_state.setdefault(chat_id, {})
@@ -18013,7 +16774,6 @@ def render_room_step(chat_id, message=None):
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="fs|bk"))
     structured_send(chat_id, message, "🚪 Otaq sayını seç:", mk)
 
-
 def render_floor_step(chat_id, message=None):
     st = search_state.setdefault(chat_id, {})
     st["step"] = "floor"
@@ -18028,7 +16788,6 @@ def render_floor_step(chat_id, message=None):
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="fs|bk"))
     structured_send(chat_id, message, "🏢 Mərtəbə seçin:", mk)
 
-
 def send_structured_start(chat_id, message=None):
     reset_search_state(chat_id)
     search_state[chat_id] = {
@@ -18039,7 +16798,6 @@ def send_structured_start(chat_id, message=None):
         "step": "op",
     }
     render_op_step(chat_id, message)
-
 
 def structured_go_back(chat_id, message=None):
     st = search_state.get(chat_id, {})
@@ -18071,7 +16829,6 @@ def structured_go_back(chat_id, message=None):
         render_room_step(chat_id, message)
     else:
         render_floor_step(chat_id, message)
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("fs|"))
 @callback_guard
@@ -18219,7 +16976,6 @@ def cb_structured(c):
             chat_id, chat_id, "✏️ Mərtəbəni yazın (məs: 3 və ya 1-3):", None
         )
 
-
 @bot.message_handler(
     func=lambda m: search_state.get(m.chat.id, {}).get("awaiting_floor_range")
 )
@@ -18260,7 +17016,6 @@ def handle_floor_range_input(message):
     st["awaiting_floor_range"] = False
     perform_structured_search(chat_id, offset=0, edit_msg=None)
 
-
 def cancel_price_range_flow(chat_id: int) -> None:
     user_state[chat_id] = None
     user_temp.pop(chat_id, None)
@@ -18268,7 +17023,6 @@ def cancel_price_range_flow(chat_id: int) -> None:
     set_navigation_state(chat_id, STATE_SEARCH_MENU)
     set_search_menu_active(chat_id, True)
     send_search_menu(chat_id)
-
 
 def set_price_range_step(chat_id: int, *, step: int) -> None:
     set_search_menu_active(chat_id, True)
@@ -18293,14 +17047,12 @@ def set_price_range_step(chat_id: int, *, step: int) -> None:
         price_input_keyboard(),
     )
 
-
 def handle_price_range_back(chat_id: int) -> None:
     nav_state = get_navigation_state(chat_id)
     if nav_state == STATE_PRICE_RANGE_STEP_2:
         set_price_range_step(chat_id, step=1)
         return
     cancel_price_range_flow(chat_id)
-
 
 def apply_price_filter(chat_id: int, min_p: int, max_p: int) -> None:
     st = search_state.get(chat_id, {})
@@ -18320,7 +17072,6 @@ def apply_price_filter(chat_id: int, min_p: int, max_p: int) -> None:
         perform_structured_search(chat_id, offset=0, edit_msg=None)
     else:
         render_room_step(chat_id)
-
 
 @bot.message_handler(func=lambda m: user_state.get(m.chat.id) == "WAIT_MIN_PRICE")
 def handle_price_min_input(message):
@@ -18346,7 +17097,6 @@ def handle_price_min_input(message):
         return
     user_temp[chat_id] = {"min_price": int(value)}
     set_price_range_step(chat_id, step=2)
-
 
 @bot.message_handler(func=lambda m: user_state.get(m.chat.id) == "WAIT_MAX_PRICE")
 def handle_price_max_input(message):
@@ -18394,7 +17144,6 @@ def handle_price_max_input(message):
     user_temp.pop(chat_id, None)
     apply_price_filter(chat_id, min_p, max_p)
 
-
 def perform_structured_search(chat_id, offset=0, edit_msg=None):
     st = search_state.get(chat_id)
     if not st or st.get("mode") != "structured":
@@ -18432,16 +17181,13 @@ def perform_structured_search(chat_id, offset=0, edit_msg=None):
     )
     offer_save_search(chat_id, build_saved_search_from_structured(filters))
 
-
 # ===== AÇAR SÖZLƏ AXTARIŞ (paging ilə) =====
-
 
 @bot.message_handler(
     func=lambda m: search_state.get(m.chat.id, {}).get("step") == "WAITING_FOR_KEYWORD"
 )
 def keyword_search_input(message):
     keyword_search_handler(message)
-
 
 def keyword_search_handler(message):
     if not ensure_allowed(message):
@@ -18502,13 +17248,11 @@ def keyword_search_handler(message):
     )
     offer_save_search(chat_id, build_saved_search_from_keyword(selected_op))
 
-
 @bot.message_handler(
     func=lambda m: search_state.get(m.chat.id, {}).get("step") == "WAITING_FOR_SMART"
 )
 def smart_search_input(message):
     smart_search_handler(message)
-
 
 def smart_search_handler(message):
     if not ensure_allowed(message):
@@ -18555,16 +17299,13 @@ def smart_search_handler(message):
     )
     offer_save_search(chat_id, build_saved_search_from_smart(criteria))
 
-
 # ===== NÖMRƏ İLƏ AXTARIŞ =====
-
 
 @bot.message_handler(
     func=lambda m: search_state.get(m.chat.id, {}).get("step") == "WAITING_FOR_PHONE"
 )
 def phone_search_input(message):
     phone_search_handler(message)
-
 
 def phone_search_handler(message):
     if not ensure_allowed(message):
@@ -18605,11 +17346,9 @@ def phone_search_handler(message):
         loading_ref=loading_ref,
     )
 
-
 # =====================================================
 #  🏢 VASITƏÇİ ELANLARI – FULL BLOK
 # =====================================================
-
 
 def build_agents_panel_markup():
     mk = types.InlineKeyboardMarkup()
@@ -18630,7 +17369,6 @@ def build_agents_panel_markup():
     )
     return mk
 
-
 def agents_panel(c):
     """Admin üçün vasitəçi elanları paneli."""
     chat_id = c.message.chat.id
@@ -18641,18 +17379,15 @@ def agents_panel(c):
     mk = build_agents_panel_markup()
     render_ui(chat_id, "🏢 Vasitəçi elanları axtarış sistemi:", mk)
 
-
 def send_agents_panel_message(chat_id: int):
     if not is_admin(chat_id):
         return
     mk = build_agents_panel_markup()
     render_ui(chat_id, "🏢 Vasitəçi elanları axtarış sistemi:", mk)
 
-
 # =======================
 # 🔍 FILTER MENYUSU
 # =======================
-
 
 @bot.callback_query_handler(func=lambda c: c.data == "agent_search|filter")
 @callback_guard
@@ -18674,11 +17409,9 @@ def cb_agent_filter(c):
     mk.add(types.InlineKeyboardButton("💰 Qiymət", callback_data="agent_filter|price"))
     render_ui(chat_id, "🔍 Vasitəçi elanları üçün filtr seç:", mk)
 
-
 # =============================
 # 📍 RAYON üzrə axtarış
 # =============================
-
 
 @bot.callback_query_handler(func=lambda c: c.data == "agent_filter|rayon")
 @callback_guard
@@ -18689,7 +17422,6 @@ def cb_agent_filter_rayon(c):
 
     msg = bot.send_message(chat_id, "📍 Rayon / qəsəbə adı yaz:")
     bot.register_next_step_handler(msg, agent_search_by_rayon)
-
 
 def agent_search_by_rayon(message):
     if not is_admin(message.chat.id):
@@ -18722,11 +17454,9 @@ def agent_search_by_rayon(message):
     for r in rows:
         send_agent_card(message.chat.id, dict(r))
 
-
 # =============================
 # 🔎 Açar sözlə Axtarış
 # =============================
-
 
 @bot.callback_query_handler(func=lambda c: c.data == "agent_search|keyword")
 @callback_guard
@@ -18737,7 +17467,6 @@ def cb_agent_keyword(c):
 
     msg = bot.send_message(chat_id, "🔎 Vasitəçi elanlarında açar söz yaz:")
     bot.register_next_step_handler(msg, agent_search_by_keyword)
-
 
 def agent_search_by_keyword(message):
     if not is_admin(message.chat.id):
@@ -18773,11 +17502,9 @@ def agent_search_by_keyword(message):
     for r in rows:
         send_agent_card(message.chat.id, dict(r))
 
-
 # =============================
 # 📞 Nömrə ilə Axtarış
 # =============================
-
 
 @bot.callback_query_handler(func=lambda c: c.data == "agent_search|phone")
 @callback_guard
@@ -18788,7 +17515,6 @@ def cb_agent_phone(c):
 
     msg = bot.send_message(chat_id, "📞 Nömrə daxil et:")
     bot.register_next_step_handler(msg, agent_search_by_phone)
-
 
 def agent_search_by_phone(message):
     if not is_admin(message.chat.id):
@@ -18822,11 +17548,9 @@ def agent_search_by_phone(message):
     for r in rows:
         send_agent_card(message.chat.id, dict(r))
 
-
 # =============================
 # 🎫 Elan kartı — Link + status
 # =============================
-
 
 def send_agent_card(chat_id, ev):
     txt = (
@@ -18851,9 +17575,7 @@ def send_agent_card(chat_id, ev):
 
     bot.send_message(chat_id, txt, parse_mode="HTML")
 
-
 # =============== 📊 ADMIN PANEL (MENYU + CALLBACK) ===============
-
 
 def show_admin_activity_stats_menu(
     chat_id: int, message: Optional[types.Message] = None
@@ -18873,7 +17595,6 @@ def show_admin_activity_stats_menu(
         render_ui(chat_id, text, mk)
     else:
         render_ui(chat_id, text, mk)
-
 
 def show_admin_stats_menu(chat_id: int, message: Optional[types.Message] = None):
     if not is_admin(chat_id):
@@ -18910,24 +17631,6 @@ def show_admin_stats_menu(chat_id: int, message: Optional[types.Message] = None)
     else:
         render_ui(chat_id, text, mk)
 
-
-def show_hidden_listings_admin(
-    chat_id: int, message: Optional[types.Message] = None
-):
-    if not is_admin(chat_id):
-        return
-    reset_search_state(chat_id)
-    loading_ref = (message.chat.id, message.message_id) if message else None
-    send_paginated_results(
-        chat_id,
-        mode="admin_hidden",
-        params={},
-        page=1,
-        loading_ref=loading_ref,
-        show_summary=False,
-    )
-
-
 def show_inactive_users_summary(
     chat_id: int, days: int = 10, message: Optional[types.Message] = None
 ):
@@ -18951,7 +17654,6 @@ def show_inactive_users_summary(
     else:
         render_ui(chat_id, text, mk)
 
-
 def _support_status_badge(thread: dict) -> str:
     if int(thread.get("unread_for_admin") or 0) == 1:
         return "🔴"
@@ -18963,20 +17665,17 @@ def _support_status_badge(thread: dict) -> str:
         return "⚪"
     return "⚪"
 
-
 def _support_status_label(thread: dict) -> str:
     status = thread.get("status") or SUPPORT_THREAD_STATUS_OPEN
     if int(thread.get("needs_reply") or 0) == 1:
         return f"{status} (cavab gözləyir)"
     return status
 
-
 def _format_support_thread_label(thread: dict) -> str:
     badge = _support_status_badge(thread)
     last_message_at = thread.get("last_message_at")
     last_display = format_support_timestamp(last_message_at) if last_message_at else "-"
     return f"{badge} {thread.get('user_id')} — {last_display}"
-
 
 def format_support_inbox_text(threads: List[dict]) -> str:
     open_count = sum(
@@ -18998,7 +17697,6 @@ def format_support_inbox_text(threads: List[dict]) -> str:
         return f"{header}\n\n❌ Heç bir sorğu yoxdur."
     return header
 
-
 def build_support_inbox_markup(threads: List[dict]) -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup(row_width=1)
     for thread in threads:
@@ -19011,7 +17709,6 @@ def build_support_inbox_markup(threads: List[dict]) -> types.InlineKeyboardMarku
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="ui_admin_menu"))
     return mk
 
-
 def _truncate_support_text(text: Optional[str], limit: int = 140) -> str:
     if not text:
         return "-"
@@ -19019,7 +17716,6 @@ def _truncate_support_text(text: Optional[str], limit: int = 140) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[: limit - 1] + "…"
-
 
 def _format_support_thread_header(thread: dict) -> str:
     last_message_at = thread.get("last_message_at")
@@ -19030,7 +17726,6 @@ def _format_support_thread_header(thread: dict) -> str:
         f"Status: {status}\n"
         f"Last: {last_display}"
     )
-
 
 def _format_support_thread_messages(messages: List[dict]) -> str:
     if not messages:
@@ -19043,7 +17738,6 @@ def _format_support_thread_messages(messages: List[dict]) -> str:
         text = _truncate_support_text(msg.get("text"))
         lines.append(f"[{timestamp}]\n{label}:\n{text}")
     return "\n".join(lines)
-
 
 def build_support_thread_view_markup(
     user_id: int, status: Optional[str]
@@ -19063,7 +17757,6 @@ def build_support_thread_view_markup(
     mk.add(types.InlineKeyboardButton("⬅️ Inbox", callback_data="supportinbox:list"))
     return mk
 
-
 def show_support_inbox(chat_id: int, message: Optional[types.Message] = None):
     threads = list_support_threads()
     text = format_support_inbox_text(threads)
@@ -19079,7 +17772,6 @@ def show_support_inbox(chat_id: int, message: Optional[types.Message] = None):
         active_thread_user_id=None,
         reply_to_user_id=None,
     )
-
 
 def show_support_thread_view(
     chat_id: int,
@@ -19128,7 +17820,6 @@ def show_support_thread_view(
         reply_to_user_id=None,
     )
 
-
 def show_support_reply_prompt(
     chat_id: int, user_id: int, message: Optional[types.Message] = None
 ):
@@ -19151,7 +17842,6 @@ def show_support_reply_prompt(
         reply_to_user_id=user_id,
     )
 
-
 def build_admin_panel_keyboard(chat_id: int, page: int = 1):
     buttons = ADMIN_PANEL_BUTTONS
     mk = types.InlineKeyboardMarkup()
@@ -19173,7 +17863,6 @@ def build_admin_panel_keyboard(chat_id: int, page: int = 1):
     admin_panel_page_state[chat_id] = 1
     return mk
 
-
 def send_admin_panel(
     chat_id: int,
     page: int = 1,
@@ -19187,7 +17876,6 @@ def send_admin_panel(
     if message:
         last_ui_message_id[chat_id] = message.message_id
     update_ui_message(chat_id, chat_id, text, mk)
-
 
 def send_feature_flags_menu(chat_id: int, message: Optional[types.Message] = None):
     if not is_admin(chat_id):
@@ -19220,7 +17908,6 @@ def send_feature_flags_menu(chat_id: int, message: Optional[types.Message] = Non
         last_ui_message_id[chat_id] = message.message_id
     update_ui_message(chat_id, chat_id, text, mk)
 
-
 @bot.message_handler(func=lambda m: m.text == TEXTS_AZ["admin_panel_button"])
 @bot.message_handler(commands=["admin"])
 def open_admin_panel(message):
@@ -19232,7 +17919,6 @@ def open_admin_panel(message):
 
     reset_user_state(message.chat.id)
     send_admin_panel(message.chat.id, page=1)
-
 
 def _handle_admin_panel_action(
     chat_id: int, action_text: str, message: Optional[types.Message] = None
@@ -19290,8 +17976,6 @@ def _handle_admin_panel_action(
     elif action_text == TEXTS_AZ["admin_panel_topviews"]:
         reset_search_state(chat_id)
         send_paginated_results(chat_id, "topviews", params={"days": 7}, page=1)
-    elif action_text == TEXTS_AZ["admin_panel_hidden_listings"]:
-        show_hidden_listings_admin(chat_id, message=message)
     elif action_text == TEXTS_AZ["admin_panel_direct_message"]:
         start_direct_user_message_flow(chat_id, message=message)
     elif action_text == TEXTS_AZ["admin_panel_support_chats"]:
@@ -19301,7 +17985,6 @@ def _handle_admin_panel_action(
     elif action_text == TEXTS_AZ["admin_panel_archived_requests"]:
         show_archived_requests(chat_id, page=1, message=message)
 
-
 def trigger_auto_update_db(admin_id: int, url: str) -> None:
     logger.info(
         "AUTO DB UPDATE triggered internally admin_id=%s url=%s",
@@ -19310,7 +17993,6 @@ def trigger_auto_update_db(admin_id: int, url: str) -> None:
     )
     safe_admin_step(admin_id, "⏳ Yenilənmə başladılır…")
     run_db_update_pipeline(admin_id, url)
-
 
 def handle_auto_update_db_link(
     admin_id: int,
@@ -19327,14 +18009,12 @@ def handle_auto_update_db_link(
     trigger_auto_update_db(admin_id, cleaned_url)
     return True
 
-
 def _update_success_message() -> str:
     return (
         "✅ Elanlar uğurla yeniləndi!\n"
         "📊 Yeni elanlar sistemə əlavə olundu\n"
         "⚡ Bot ən son məlumatlarla işləyir"
     )
-
 
 def _build_admin_update_refresh_markup() -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup(row_width=1)
@@ -19345,7 +18025,6 @@ def _build_admin_update_refresh_markup() -> types.InlineKeyboardMarkup:
         )
     )
     return mk
-
 
 def extract_dropbox_url_from_text(text: str) -> Optional[str]:
     if not text:
@@ -19364,7 +18043,6 @@ def extract_dropbox_url_from_text(text: str) -> Optional[str]:
         if parts.scheme.lower() in {"http", "https"}:
             return candidate
     return None
-
 
 @bot.message_handler(commands=['auto_update_db'])
 def auto_update_db_cmd(m):
@@ -19392,7 +18070,6 @@ def auto_update_db_cmd(m):
         dropbox_url,
         record_auto_link=True,
     )
-
 
 @bot.callback_query_handler(func=lambda c: c.data == "admin_update_from_last_link")
 @callback_guard
@@ -19432,7 +18109,6 @@ def cb_admin_panel(c):
         action_text = ADMIN_PANEL_ACTION_LOOKUP.get(action_key)
         if action_text:
             _handle_admin_panel_action(chat_id, action_text, message=c.message)
-
 
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("supportinbox:"))
 @callback_guard
@@ -19482,7 +18158,6 @@ def cb_support_inbox_admin(c):
         return
     safe_answer_callback_query(c.id)
 
-
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("supportuser:"))
 @callback_guard
 def cb_support_user_inbox(c):
@@ -19515,8 +18190,6 @@ def cb_support_user_inbox(c):
         return
     safe_answer_callback_query(c.id)
 
-
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("admin_stats_menu:"))
 @callback_guard
 def cb_admin_stats_menu(c):
@@ -19543,7 +18216,6 @@ def cb_admin_stats_menu(c):
     if action == "qr":
         send_qr_stats_menu(chat_id, message=c.message)
         return
-
 
 @bot.callback_query_handler(
     func=lambda c: c.data
@@ -19586,7 +18258,6 @@ def cb_admin_activity_stats(c):
         }
         bot.send_message(chat_id, "✍️ Göndərmək istədiyiniz mətni yazın:")
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("featflag:"))
 @callback_guard
 def cb_feature_flag_toggle(c):
@@ -19602,7 +18273,6 @@ def cb_feature_flag_toggle(c):
     current_state = get_feature_state_for_scope(key, scope_users)
     set_feature_flag_state(key, not current_state, user_ids=scope_users)
     send_feature_flags_menu(chat_id, message=c.message)
-
 
 @bot.message_handler(
     func=lambda m: admin_inactive_message_state.get(m.chat.id, {}).get("awaiting")
@@ -19630,7 +18300,6 @@ def admin_inactive_bulk_message_input(message):
             mark_user_delivery_failure(uid, str(exc))
     bot.send_message(chat_id, f"✅ Göndərildi: {sent}\n❌ Çatmadı: {failed}")
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("bonusprob:"))
 @callback_guard
 def cb_bonus_probability_controls(c):
@@ -19649,7 +18318,6 @@ def cb_bonus_probability_controls(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.message_handler(func=lambda m: bonus_probability_edit_state.get(m.chat.id))
 def handle_bonus_probability_edit(message):
@@ -19684,11 +18352,9 @@ def handle_bonus_probability_edit(message):
     bot.send_message(message.chat.id, "✅ Ehtimallar yeniləndi.")
     show_bonus_stats(message.chat.id)
 
-
 def format_qr_area_label(area_code: Optional[str]) -> str:
     fallback = str(area_code or "-")
     return QR_SOURCE_AREAS.get(str(area_code or "").strip().lower(), fallback)
-
 
 def get_qr_stats_start_time(range_key: str) -> Optional[datetime]:
     now = datetime.now(timezone.utc)
@@ -19699,7 +18365,6 @@ def get_qr_stats_start_time(range_key: str) -> Optional[datetime]:
     if range_key == "30d":
         return now - timedelta(days=30)
     return None
-
 
 def fetch_qr_stats(range_key: str):
     rows = []
@@ -19771,7 +18436,6 @@ def fetch_qr_stats(range_key: str):
             pass
     return rows, total, area_counts
 
-
 def fetch_qr_top_areas():
     rows = []
     conn = None
@@ -19796,7 +18460,6 @@ def fetch_qr_top_areas():
             pass
     return rows
 
-
 def build_qr_stats_menu() -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup()
     mk.row(
@@ -19817,7 +18480,6 @@ def build_qr_stats_menu() -> types.InlineKeyboardMarkup:
     mk.add(types.InlineKeyboardButton(ADMIN_PANEL_BACK_MAIN, callback_data="ui_admin_menu"))
     return mk
 
-
 def send_qr_stats_menu(chat_id: int, message: Optional[types.Message] = None):
     if not is_admin(chat_id):
         return
@@ -19825,7 +18487,6 @@ def send_qr_stats_menu(chat_id: int, message: Optional[types.Message] = None):
     if message:
         ui_message_state[chat_id] = message.message_id
     send_or_edit_ui_message(chat_id, "📊 QR Statistikası", mk)
-
 
 def send_qr_stats(
     chat_id: int, range_key: str, message: Optional[types.Message] = None
@@ -19879,7 +18540,6 @@ def send_qr_stats(
         ui_message_state[chat_id] = message.message_id
     send_or_edit_ui_message(chat_id, "\n".join(lines), mk)
 
-
 def send_qr_top_areas(chat_id: int, message: Optional[types.Message] = None):
     if not is_admin(chat_id):
         return
@@ -19904,7 +18564,6 @@ def send_qr_top_areas(chat_id: int, message: Optional[types.Message] = None):
         ui_message_state[chat_id] = message.message_id
     send_or_edit_ui_message(chat_id, "\n".join(lines), mk)
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("qr_stats:"))
 @callback_guard
 def cb_qr_stats(c):
@@ -19916,7 +18575,6 @@ def cb_qr_stats(c):
         send_qr_top_areas(chat_id, message=c.message)
     else:
         send_qr_stats(chat_id, action, message=c.message)
-
 
 def admin_customer_requests_access_step(message):
     if not is_admin(message.chat.id):
@@ -19934,7 +18592,6 @@ def admin_customer_requests_access_step(message):
     )
     show_customer_requests_access_admin(message.chat.id)
 
-
 def get_request_period_start(period: str) -> datetime:
     now = datetime.now()
     if period == "week":
@@ -19942,7 +18599,6 @@ def get_request_period_start(period: str) -> datetime:
     if period == "month":
         return datetime(now.year, now.month, 1)
     return datetime(now.year, now.month, now.day)
-
 
 def fetch_customer_request_stats(period: str):
     start_dt = get_request_period_start(period)
@@ -19983,7 +18639,6 @@ def fetch_customer_request_stats(period: str):
         "rayons": rayons,
     }
 
-
 def build_period_tabs(selected: str) -> List[types.InlineKeyboardButton]:
     mapping = {
         "day": TEXTS_AZ["admin_req_period_day"],
@@ -20000,14 +18655,12 @@ def build_period_tabs(selected: str) -> List[types.InlineKeyboardButton]:
         )
     return buttons
 
-
 def format_admin_request_type(req_type: str) -> str:
     if req_type == "buy":
         return "Satılır"
     if req_type == "rent":
         return "Kirayə verilir"
     return req_type or "-"
-
 
 def fetch_admin_request_type_counts() -> dict:
     conn = get_local_conn()
@@ -20029,7 +18682,6 @@ def fetch_admin_request_type_counts() -> dict:
         if req_type in counts:
             counts[req_type] = cnt or 0
     return counts
-
 
 def show_admin_customer_request_types(
     chat_id: int, message: Optional[types.Message] = None
@@ -20073,7 +18725,6 @@ def show_admin_customer_request_types(
         return
     render_ui(chat_id, text, mk)
 
-
 def fetch_admin_request_rayons(req_type: str) -> List[Tuple[str, int]]:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -20094,7 +18745,6 @@ def fetch_admin_request_rayons(req_type: str) -> List[Tuple[str, int]]:
     rows = [(r["rayon"], r["cnt"]) for r in cur.fetchall()]
     conn.close()
     return rows
-
 
 def show_admin_request_rayons(
     chat_id: int, req_type: str, message: Optional[types.Message] = None
@@ -20133,7 +18783,6 @@ def show_admin_request_rayons(
         return
     render_ui(chat_id, text, mk)
 
-
 def format_admin_request_list_item(req: dict) -> str:
     created_dt = parse_dt_safe(req.get("created_at"))
     display_time = created_dt + timedelta(hours=4) if created_dt else None
@@ -20151,7 +18800,6 @@ def format_admin_request_list_item(req: dict) -> str:
             f"🆔 Müştəri ID: {req.get('chat_id') or '-'}",
         ]
     )
-
 
 def fetch_admin_requests_by_rayon(
     req_type: str, rayon: str, page: int
@@ -20185,7 +18833,6 @@ def fetch_admin_requests_by_rayon(
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return rows, total, total_pages, page
-
 
 def build_admin_request_list_nav(
     req_type: str, rayon: str, page: int, total_pages: int
@@ -20232,7 +18879,6 @@ def build_admin_request_list_nav(
     )
     return mk
 
-
 def show_admin_requests_by_rayon(
     chat_id: int,
     req_type: str,
@@ -20270,7 +18916,6 @@ def show_admin_requests_by_rayon(
         render_ui(message.chat.id, footer, mk)
         return
     render_ui(chat_id, footer, mk)
-
 
 def show_customer_requests_overview(
     chat_id: int, period: str = "day", message: Optional[types.Message] = None
@@ -20315,7 +18960,6 @@ def show_customer_requests_overview(
         ui_message_state[chat_id] = message.message_id
     send_or_edit_ui_message(chat_id, "\n".join(text_lines), mk)
 
-
 def format_request_type(req_type: str) -> str:
     if req_type == "buy":
         return "Satınalma"
@@ -20323,14 +18967,12 @@ def format_request_type(req_type: str) -> str:
         return "Kirayə"
     return req_type or "-"
 
-
 def format_request_rule_type(req_type: str) -> str:
     if req_type == "buy":
         return "Satılır"
     if req_type == "rent":
         return "Kirayə"
     return req_type or "-"
-
 
 def build_whatsapp_link(req: dict) -> Optional[str]:
     phone_raw = req.get("phone") or ""
@@ -20356,12 +18998,10 @@ def build_whatsapp_link(req: dict) -> Optional[str]:
     )
     return f"https://wa.me/{target}?text={quote(msg)}"
 
-
 def build_telegram_user_link(user_id: Optional[int]) -> Optional[str]:
     if not user_id:
         return None
     return f"tg://user?id={int(user_id)}"
-
 
 def format_request_card(req: dict) -> str:
     created_dt = parse_dt_safe(req.get("created_at"))
@@ -20384,7 +19024,6 @@ def format_request_card(req: dict) -> str:
         ]
     )
 
-
 def format_public_request_card(req: dict) -> str:
     created_dt = parse_dt_safe(req.get("created_at"))
     display_time = created_dt + timedelta(hours=4) if created_dt else None
@@ -20404,7 +19043,6 @@ def format_public_request_card(req: dict) -> str:
             f"🆔 Müştəri ID: {req.get('chat_id') or '-'}",
         ]
     )
-
 
 def build_public_request_actions(
     user_id: int,
@@ -20438,7 +19076,6 @@ def build_public_request_actions(
             mk.add(btn)
     return mk
 
-
 def send_public_request_card(
     chat_id: int,
     req: dict,
@@ -20446,7 +19083,6 @@ def send_public_request_card(
 ):
     mk = build_public_request_actions(chat_id, req, extra_buttons=extra_buttons)
     bot.send_message(chat_id, format_public_request_card(req), reply_markup=mk)
-
 
 def send_request_card(chat_id: int, req: dict):
     mk = types.InlineKeyboardMarkup()
@@ -20486,7 +19122,6 @@ def send_request_card(chat_id: int, req: dict):
     )
     bot.send_message(chat_id, format_request_card(req), reply_markup=mk)
 
-
 def build_rayon_pagination(period: str, rayon: str, page: int, total_pages: int):
     mk = types.InlineKeyboardMarkup()
     encoded = quote(rayon, safe="")
@@ -20519,7 +19154,6 @@ def build_rayon_pagination(period: str, rayon: str, page: int, total_pages: int)
         )
     )
     return mk
-
 
 def show_customer_requests_by_rayon(
     chat_id: int, period: str, rayon: str, page: int = 1
@@ -20568,7 +19202,6 @@ def show_customer_requests_by_rayon(
         reply_markup=mk,
     )
 
-
 def fetch_flagged_requests(page: int = 1):
     conn = get_local_conn()
     cur = conn.cursor()
@@ -20592,7 +19225,6 @@ def fetch_flagged_requests(page: int = 1):
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return rows, total_pages
-
 
 def show_flagged_requests(chat_id: int, page: int = 1):
     rows, total_pages = fetch_flagged_requests(page)
@@ -20631,7 +19263,6 @@ def show_flagged_requests(chat_id: int, page: int = 1):
     )
     bot.send_message(chat_id, "⭐ İşarələnən sorğular:", reply_markup=mk)
 
-
 def format_archived_request_card(req: dict) -> str:
     created_dt = parse_dt_safe(req.get("created_at"))
     display_time = created_dt + timedelta(hours=4) if created_dt else None
@@ -20647,7 +19278,6 @@ def format_archived_request_card(req: dict) -> str:
             f"💰 Büdcə: {req.get('budget') or '-'}",
         ]
     )
-
 
 def fetch_archived_requests(page: int = 1):
     conn = get_local_conn()
@@ -20670,7 +19300,6 @@ def fetch_archived_requests(page: int = 1):
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return rows, total_pages
-
 
 def show_archived_requests(
     chat_id: int, page: int = 1, message: Optional[types.Message] = None
@@ -20727,7 +19356,6 @@ def show_archived_requests(
         ui_message_state[chat_id] = message.message_id
     send_or_edit_ui_message(chat_id, "🗄 Arxivlənmiş sorğular:", mk)
 
-
 def fetch_user_archived_requests(user_id: int, page: int = 1):
     conn = get_local_conn()
     cur = conn.cursor()
@@ -20759,7 +19387,6 @@ def fetch_user_archived_requests(user_id: int, page: int = 1):
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return rows, total_pages, page
-
 
 def show_user_archived_requests(chat_id: int, page: int = 1, message=None):
     rows, total_pages, current_page = fetch_user_archived_requests(chat_id, page)
@@ -20822,7 +19449,6 @@ def show_user_archived_requests(chat_id: int, page: int = 1, message=None):
         except Exception:
             continue
 
-
 def format_customer_request_rule_summary(rule: dict) -> str:
     req_type = format_request_rule_type(rule.get("request_type"))
     rayons_raw = rule.get("rayons") or ""
@@ -20841,7 +19467,6 @@ def format_customer_request_rule_summary(rule: dict) -> str:
         f"🛏 {rooms} | 🔎 {keyword}"
     )
 
-
 def fetch_customer_request_rules(user_id: int) -> List[dict]:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -20856,7 +19481,6 @@ def fetch_customer_request_rules(user_id: int) -> List[dict]:
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return rows
-
 
 def show_customer_request_rules(chat_id: int, message: Optional[types.Message] = None):
     rules = fetch_customer_request_rules(chat_id)
@@ -20885,13 +19509,11 @@ def show_customer_request_rules(chat_id: int, message: Optional[types.Message] =
         return
     render_ui(chat_id, text, mk)
 
-
 def build_customer_request_rule_type_keyboard() -> types.ReplyKeyboardMarkup:
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("🏠 Satılır", "🏢 Kirayə")
     kb.row("⬅️ Geri")
     return kb
-
 
 def build_customer_request_rule_rayon_markup(
     selected: List[str],
@@ -20915,7 +19537,6 @@ def build_customer_request_rule_rayon_markup(
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="cr_rule_rayon_back"))
     return mk
 
-
 def start_customer_request_rule_flow(chat_id: int):
     customer_request_rule_state[chat_id] = {"step": "type"}
     bot.send_message(
@@ -20923,7 +19544,6 @@ def start_customer_request_rule_flow(chat_id: int):
         "🔔 Bildiriş qaydası üçün tip seçin:",
         reply_markup=build_customer_request_rule_type_keyboard(),
     )
-
 
 def send_customer_request_rule_rayon_prompt(chat_id: int, message=None):
     selected = customer_request_rule_state.get(chat_id, {}).get("rayons", [])
@@ -20934,13 +19554,11 @@ def send_customer_request_rule_rayon_prompt(chat_id: int, message=None):
         return
     render_ui(chat_id, text, mk)
 
-
 def build_optional_input_keyboard() -> types.ReplyKeyboardMarkup:
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("⚪️ Keç")
     kb.row("⬅️ Geri")
     return kb
-
 
 def save_customer_request_rule(user_id: int, data: dict) -> Optional[int]:
     conn = get_local_conn()
@@ -20966,7 +19584,6 @@ def save_customer_request_rule(user_id: int, data: dict) -> Optional[int]:
     conn.close()
     return rule_id
 
-
 def set_customer_request_rule_active(user_id: int, rule_id: int, active: bool):
     conn = get_local_conn()
     cur = conn.cursor()
@@ -20981,7 +19598,6 @@ def set_customer_request_rule_active(user_id: int, rule_id: int, active: bool):
     conn.commit()
     conn.close()
 
-
 def delete_customer_request_alert(user_id: int, request_id: int, rule_id: int):
     conn = get_local_conn()
     cur = conn.cursor()
@@ -20994,7 +19610,6 @@ def delete_customer_request_alert(user_id: int, request_id: int, rule_id: int):
     )
     conn.commit()
     conn.close()
-
 
 def fetch_customer_request_alerts(user_id: int, period: str, page: int = 1):
     conn = get_local_conn()
@@ -21030,7 +19645,6 @@ def fetch_customer_request_alerts(user_id: int, period: str, page: int = 1):
     conn.close()
     return rows, total, total_pages, page
 
-
 def format_customer_request_alert_line(idx: int, row: dict) -> str:
     req_type = format_request_type(_row_value_safe(row, "request_type"))
     rayon = _row_value_safe(row, "rayon") or "-"
@@ -21040,7 +19654,6 @@ def format_customer_request_alert_line(idx: int, row: dict) -> str:
     return (
         f"{idx}. 🆔 {req_id} | {req_type} | 📍 {rayon} | " f"🚪 {rooms} | 💰 {budget}"
     )
-
 
 def show_customer_request_alerts_inbox(
     chat_id: int, period: str, page: int = 1, message: Optional[types.Message] = None
@@ -21112,7 +19725,6 @@ def show_customer_request_alerts_inbox(
     else:
         render_ui(chat_id, text, mk)
 
-
 def send_financial_reports_menu(
     chat_id: int, message: Optional[types.Message] = None
 ):
@@ -21140,7 +19752,6 @@ def send_financial_reports_menu(
         ui_message_state[chat_id] = message.message_id
     send_or_edit_ui_message(chat_id, "💰 Maliyyə hesabatları:", mk)
 
-
 def send_admin_payments_menu(chat_id: int, message: Optional[types.Message] = None):
     if not is_admin(chat_id):
         return
@@ -21160,7 +19771,6 @@ def send_admin_payments_menu(chat_id: int, message: Optional[types.Message] = No
     if message:
         ui_message_state[chat_id] = message.message_id
     send_or_edit_ui_message(chat_id, "💳 Ödənişlər", mk)
-
 
 def show_card_payments(
     chat_id: int, page: int = 1, message: Optional[types.Message] = None
@@ -21261,7 +19871,6 @@ def show_card_payments(
     if message:
         ui_message_state[chat_id] = message.message_id
     send_or_edit_ui_message(chat_id, text, mk)
-
 
 def show_manual_payment_requests(
     chat_id: int, page: int = 1, message: Optional[types.Message] = None
@@ -21367,7 +19976,6 @@ def show_manual_payment_requests(
         ui_message_state[chat_id] = message.message_id
     send_or_edit_ui_message(chat_id, text, mk)
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("finrep:"))
 @callback_guard
 def handle_financial_reports_menu(c):
@@ -21384,7 +19992,6 @@ def handle_financial_reports_menu(c):
     elif action == "back":
         page = admin_panel_page_state.get(chat_id, 1)
         send_admin_panel(chat_id, page=page, message=c.message)
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("admpayments:"))
 @callback_guard
@@ -21410,7 +20017,6 @@ def handle_admin_payments_menu(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_period:"))
 @callback_guard
 def cb_admin_request_period(c):
@@ -21423,7 +20029,6 @@ def cb_admin_request_period(c):
     period = c.data.split(":", 1)[1]
     show_customer_requests_overview(c.message.chat.id, period, message=c.message)
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "adm_req_types")
 @callback_guard
 def cb_admin_request_types(c):
@@ -21434,7 +20039,6 @@ def cb_admin_request_types(c):
     except Exception:
         pass
     show_admin_customer_request_types(c.message.chat.id, message=c.message)
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_type:"))
 @callback_guard
@@ -21448,7 +20052,6 @@ def cb_admin_request_type_select(c):
     req_type = c.data.split(":", 1)[1]
     show_admin_request_rayons(c.message.chat.id, req_type, message=c.message)
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_rayons:"))
 @callback_guard
 def cb_admin_request_rayons(c):
@@ -21460,7 +20063,6 @@ def cb_admin_request_rayons(c):
         pass
     req_type = c.data.split(":", 1)[1]
     show_admin_request_rayons(c.message.chat.id, req_type, message=c.message)
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_rayon:"))
 @callback_guard
@@ -21487,7 +20089,6 @@ def cb_admin_request_rayon_list(c):
         c.message.chat.id, req_type, rayon, page=page, message=c.message
     )
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "adm_req_main")
 @callback_guard
 def cb_admin_request_main_menu(c):
@@ -21498,7 +20099,6 @@ def cb_admin_request_main_menu(c):
     except Exception:
         pass
     return_to_main_menu(c.message.chat.id)
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req:"))
 @callback_guard
@@ -21525,7 +20125,6 @@ def cb_admin_request_rayon(c):
         pass
     show_customer_requests_by_rayon(c.message.chat.id, period, rayon, page)
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_flag:"))
 @callback_guard
 def cb_admin_request_flag(c):
@@ -21547,7 +20146,6 @@ def cb_admin_request_flag(c):
     conn.commit()
     conn.close()
     bot.send_message(c.message.chat.id, f"⭐ Sorğu işarələndi (ID: {req_id}).")
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_arch:"))
 @callback_guard
@@ -21571,7 +20169,6 @@ def cb_admin_request_archive(c):
     conn.close()
     bot.send_message(c.message.chat.id, f"🗄 Sorğu arxivləndi (ID: {req_id}).")
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_restore:"))
 @callback_guard
 def cb_admin_request_restore(c):
@@ -21593,7 +20190,6 @@ def cb_admin_request_restore(c):
     conn.commit()
     conn.close()
     bot.send_message(c.message.chat.id, f"♻️ Sorğu aktiv edildi (ID: {req_id}).")
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_del:"))
 @callback_guard
@@ -21617,7 +20213,6 @@ def cb_admin_request_delete(c):
     conn.close()
     bot.send_message(c.message.chat.id, f"🗑 Sorğu silindi (ID: {req_id}).")
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_archived:"))
 @callback_guard
 def cb_admin_request_archived(c):
@@ -21633,7 +20228,6 @@ def cb_admin_request_archived(c):
     except Exception:
         pass
     show_archived_requests(c.message.chat.id, page)
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_viewflag:"))
 @callback_guard
@@ -21651,7 +20245,6 @@ def cb_admin_request_view_flagged(c):
         pass
     show_flagged_requests(c.message.chat.id, page)
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_req_nop"))
 @callback_guard
 def cb_admin_request_noop(c):
@@ -21661,7 +20254,6 @@ def cb_admin_request_noop(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("admin_view_profile:"))
 @callback_guard
@@ -21680,7 +20272,6 @@ def admin_open_user_profile(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(
     func=lambda c: c.data.startswith("toggle_customer_requests:")
@@ -21713,7 +20304,6 @@ def toggle_customer_requests(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cust_req_access:"))
 @callback_guard
 def cb_customer_requests_access(c):
@@ -21742,7 +20332,6 @@ def cb_customer_requests_access(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "cust_req_access_add")
 @callback_guard
 def cb_customer_requests_access_add(c):
@@ -21757,7 +20346,6 @@ def cb_customer_requests_access_add(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(
     func=lambda c: c.data.startswith("cust_req_access_disable:")
@@ -21780,7 +20368,6 @@ def cb_customer_requests_access_disable(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(
     func=lambda c: c.data.startswith("toggle_customer_request_user:")
@@ -21814,7 +20401,6 @@ def toggle_customer_request_user(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 def get_user_phone_for_admin(user_id: int) -> Optional[str]:
     conn = get_local_conn()
@@ -21875,13 +20461,11 @@ def get_user_phone_for_admin(user_id: int) -> Optional[str]:
 
     return phone
 
-
 def build_admin_whatsapp_url(phone_raw: Optional[str]) -> Optional[str]:
     digits = re.sub(r"\D", "", phone_raw or "")
     if not digits:
         return None
     return f"https://wa.me/{digits}"
-
 
 def show_user_profile(chat_id: int, user_id: int):
     record = get_user_record(user_id) or {}
@@ -21947,7 +20531,6 @@ def show_user_profile(chat_id: int, user_id: int):
         parse_mode="HTML",
     )
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("admin_send_message:"))
 @callback_guard
 def admin_start_message(c):
@@ -21967,7 +20550,6 @@ def admin_start_message(c):
     except Exception:
         pass
 
-
 @bot.message_handler(func=lambda m: m.chat.id in admin_message_state)
 def admin_send_text(m):
     if m.text and m.text.startswith('/'):
@@ -21981,7 +20563,6 @@ def admin_send_text(m):
         f"📩 Admin mesajı:\n\n{m.text}",
     )
     bot.send_message(m.chat.id, "✅ Mesaj göndərildi")
-
 
 def format_remaining_time(delta: timedelta) -> str:
     total_seconds = max(0, int(delta.total_seconds()))
@@ -21997,10 +20578,8 @@ def format_remaining_time(delta: timedelta) -> str:
         parts.append(f"{minutes} dəq")
     return " ".join(parts)
 
-
 def get_demo_profile_url(user_id: int, _username: Optional[str]) -> str:
     return f"tg://user?id={user_id}"
-
 
 def resolve_demo_expiry(row: sqlite3.Row) -> Optional[datetime]:
     expiry_raw = None
@@ -22019,7 +20598,6 @@ def resolve_demo_expiry(row: sqlite3.Row) -> Optional[datetime]:
             expiry_raw = None
     return parse_dt_safe(expiry_raw)
 
-
 def normalize_demo_user_display(
     full_name: Optional[str], username: Optional[str], user_id: int
 ) -> str:
@@ -22031,13 +20609,11 @@ def normalize_demo_user_display(
         name = f"ID: {user_id}"
     return html.escape(name)
 
-
 def deactivate_expired_demo(
     user_id: int, expiry_dt: Optional[datetime], plan: Optional[str]
 ):
     if not expiry_dt:
         return
-
 
 def build_demo_users_view(page: int = 1) -> Tuple[str, types.InlineKeyboardMarkup, int]:
     conn = get_local_conn()
@@ -22193,7 +20769,6 @@ def build_demo_users_view(page: int = 1) -> Tuple[str, types.InlineKeyboardMarku
 
     return text, mk, total_pages
 
-
 def send_demo_users_report(chat_id: int, page: int = 1, message=None):
     if not is_admin(chat_id):
         return
@@ -22217,17 +20792,14 @@ def send_demo_users_report(chat_id: int, page: int = 1, message=None):
         disable_preview=True,
     )
 
-
 def extend_demo_for_user(user_id: int, days: int) -> Optional[datetime]:
     record = get_user_record(user_id)
     if not record:
         return None
     return admin_grant_demo_days(user_id, days)
 
-
 def cancel_demo_for_user(user_id: int):
     update_user_demo_end(user_id, None, approve=False)
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("demo_users|"))
 @callback_guard
@@ -22284,7 +20856,6 @@ def cb_demo_users_actions(c):
         except Exception:
             pass
 
-
 def start_direct_user_message_flow(
     chat_id: int, message: Optional[types.Message] = None
 ):
@@ -22304,7 +20875,6 @@ def start_direct_user_message_flow(
         return
     msg = bot.send_message(chat_id, prompt)
     bot.register_next_step_handler(msg, admin_direct_message_get_user)
-
 
 def admin_direct_message_get_user(message):
     if not is_admin(message.chat.id):
@@ -22349,7 +20919,6 @@ def admin_direct_message_get_user(message):
     )
     bot.register_next_step_handler(msg, admin_direct_message_send)
 
-
 def admin_direct_message_send(message):
     if not is_admin(message.chat.id):
         return
@@ -22377,7 +20946,6 @@ def admin_direct_message_send(message):
         )
     finally:
         admin_direct_message_state.pop(message.chat.id, None)
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm|"))
 @callback_guard
@@ -22454,7 +21022,6 @@ def cb_admin(c):
     except:
         pass
 
-
 def show_admin_promo_menu(chat_id: int, message: Optional[types.Message] = None):
     if not is_admin(chat_id):
         return
@@ -22491,7 +21058,6 @@ def show_admin_promo_menu(chat_id: int, message: Optional[types.Message] = None)
         ui_message_state[chat_id] = message.message_id
     send_or_edit_ui_message(
         chat_id, TEXTS_AZ["admin_promo_menu_title"], mk)
-
 
 def show_admin_promo_list(
     chat_id: int, page: int = 1, message: Optional[types.Message] = None
@@ -22594,7 +21160,6 @@ def show_admin_promo_list(
     if message:
         ui_message_state[chat_id] = message.message_id
     send_or_edit_ui_message(chat_id, txt, mk)
-
 
 def show_admin_promo_stats(
     chat_id: int, page: int = 1, message: Optional[types.Message] = None
@@ -22761,7 +21326,6 @@ def show_admin_promo_stats(
         ui_message_state[chat_id] = message.message_id
     send_or_edit_ui_message(chat_id, txt, mk)
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("prm|"))
 @callback_guard
 def cb_admin_promo(c):
@@ -22819,7 +21383,6 @@ def cb_admin_promo(c):
     except Exception:
         pass
 
-
 def admin_search_by_id_step(message):
     if not is_admin(message.chat.id):
         return
@@ -22829,7 +21392,6 @@ def admin_search_by_id_step(message):
         bot.send_message(message.chat.id, "⚠️ Düzgün chat_id yazın.")
         return
     admin_show_user_panel(message.chat.id, target_id)
-
 
 def _build_admin_user_markup(
     target_id: int, record: dict, unlimited: bool, blocked_flag: bool
@@ -22882,7 +21444,6 @@ def _build_admin_user_markup(
         )
     )
     return mk
-
 
 def admin_show_user_panel(
     admin_chat_id: int, target_id: int, message: Optional[types.Message] = None
@@ -22940,7 +21501,6 @@ def admin_show_user_panel(
         render_ui(admin_chat_id, info_txt, mk, parse_mode="HTML")
         return
     render_ui(admin_chat_id, info_txt, mk, parse_mode="HTML")
-
 
 def show_payment_history_list(
     chat_id: int, page: int = 1, message: Optional[types.Message] = None
@@ -23027,7 +21587,6 @@ def show_payment_history_list(
     if message:
         ui_message_state[chat_id] = message.message_id
     send_or_edit_ui_message(chat_id, txt, mk)
-
 
 def show_user_payment_details(
     admin_chat_id: int,
@@ -23163,7 +21722,6 @@ def show_user_payment_details(
         mk,
     )
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("payhist|"))
 @callback_guard
 def cb_pay_history_list(c):
@@ -23181,7 +21739,6 @@ def cb_pay_history_list(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("paydetail|"))
 @callback_guard
@@ -23215,7 +21772,6 @@ def cb_pay_user_detail(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("subctl|"))
 @callback_guard
@@ -23274,7 +21830,6 @@ def cb_subscription_control(c):
         pass
     admin_show_user_panel(c.message.chat.id, uid, message=c.message)
 
-
 def admin_extend_user_time(
     user_id: int, days: int, note: str = "admin_extend"
 ) -> Optional[datetime]:
@@ -23287,7 +21842,6 @@ def admin_extend_user_time(
     plan_name = sub.get("plan") or f"manual {days}g"
     insert_subscription(user_id, plan_name, new_exp, is_demo=0, note=note)
     return new_exp
-
 
 def bulk_extend_user_time(
     user_ids: List[int], days: int, note: str = "bulk_extend"
@@ -23350,7 +21904,6 @@ def bulk_extend_user_time(
     )
     return len(paid_updates)
 
-
 def admin_grant_demo_days(user_id: int, days: int) -> Optional[datetime]:
     logger.info("besthome_bot: Admin demo grant user_id=%s days=%s", user_id, days)
     unblock_user(user_id)
@@ -23364,7 +21917,6 @@ def admin_grant_demo_days(user_id: int, days: int) -> Optional[datetime]:
             user_id, "demo", new_exp, is_active=1, is_demo=1, note="admin_demo"
         )
     return new_exp
-
 
 def send_demo_update_notification(user_id: int, days: int, new_exp: Optional[datetime], granted: bool):
     if not new_exp:
@@ -23395,7 +21947,6 @@ def send_demo_update_notification(user_id: int, days: int, new_exp: Optional[dat
             user_id,
             e,
         )
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("admusr|"))
 @callback_guard
@@ -23494,17 +22045,14 @@ def cb_admin_user_panel_actions(c):
             force_new=True,
         )
 
-
 def set_admin_state(chat_id: int, state: Optional[str]):
     if state:
         admin_state[chat_id] = state
     else:
         admin_state.pop(chat_id, None)
 
-
 def get_admin_state(chat_id: int) -> Optional[str]:
     return admin_state.get(chat_id)
-
 
 def show_users_menu(chat_id, message: Optional[types.Message] = None):
     set_admin_state(chat_id, "admin_users_menu")
@@ -23537,7 +22085,6 @@ def show_users_menu(chat_id, message: Optional[types.Message] = None):
     send_or_edit_ui_message(
         chat_id, TEXTS_AZ["admin_users_menu_prompt"], mk)
 
-
 def _select_first_column(
     columns: set, choices: List[str], fallback: Optional[str] = None
 ) -> Optional[str]:
@@ -23547,7 +22094,6 @@ def _select_first_column(
     if fallback and fallback in columns:
         return fallback
     return None
-
 
 def _unverified_filter_from_schema(schema: dict) -> Tuple[str, Tuple]:
     columns = schema.get("columns", set())
@@ -23559,7 +22105,6 @@ def _unverified_filter_from_schema(schema: dict) -> Tuple[str, Tuple]:
         return "verified=0", ()
     return "1=0", ()
 
-
 def get_admin_users_state(chat_id: int) -> Dict[str, Any]:
     state = admin_navigation_state.get(chat_id) or {}
     if state.get("section") != "users":
@@ -23568,7 +22113,6 @@ def get_admin_users_state(chat_id: int) -> Dict[str, Any]:
     state.setdefault("page", 1)
     admin_navigation_state[chat_id] = state
     return state
-
 
 def update_admin_users_state(
     chat_id: int,
@@ -23592,14 +22136,12 @@ def update_admin_users_state(
         admin_user_last_list[chat_id] = state["filter"]
     return state
 
-
 def show_unverified_users(
     chat_id: int, page: int = 1, message=None, force_new: bool = False
 ):
     show_all_users(
         chat_id, status="pending", page=page, message=message, force_new=force_new
     )
-
 
 def parse_join_datetime(dt_raw: Optional[str]) -> Tuple[str, str]:
     if not dt_raw:
@@ -23611,7 +22153,6 @@ def parse_join_datetime(dt_raw: Optional[str]) -> Tuple[str, str]:
     except Exception:
         return str(dt_raw), "-"
 
-
 def format_display_date(dt_raw: Optional[str]) -> str:
     if isinstance(dt_raw, datetime):
         dt = dt_raw
@@ -23621,7 +22162,6 @@ def format_display_date(dt_raw: Optional[str]) -> str:
         return "-"
     display_time = dt + timedelta(hours=4)
     return display_time.strftime("%d.%m.%Y")
-
 
 def normalize_effective_expiry(
     raw: Optional[Union[str, datetime]],
@@ -23639,14 +22179,12 @@ def normalize_effective_expiry(
         return None
     return dt
 
-
 def format_effective_expiry_for_ui(raw: Optional[Union[str, datetime]]) -> str:
     dt = normalize_effective_expiry(raw)
     if not dt:
         return "—"
     display_time = dt + timedelta(hours=4)
     return display_time.strftime("%d.%m.%Y")
-
 
 def format_remaining_days_for_ui(
     computed_status: Optional[str], raw: Optional[Union[str, datetime]]
@@ -23661,7 +22199,6 @@ def format_remaining_days_for_ui(
         return "—"
     days = math.ceil((expiry - now).total_seconds() / 86400)
     return f"{days} gün"
-
 
 def format_long_date(dt: datetime) -> str:
     months = [
@@ -23679,7 +22216,6 @@ def format_long_date(dt: datetime) -> str:
         "Dekabr",
     ]
     return f"{dt.day} {months[dt.month - 1]} {dt.year}"
-
 
 def get_user_view_count(chat_id: int, days: int) -> int:
     conn = get_local_conn()
@@ -23703,7 +22239,6 @@ def get_user_view_count(chat_id: int, days: int) -> int:
             conn.close()
         except Exception:
             pass
-
 
 def build_account_status_text(chat_id: int) -> str:
     sub = get_subscription(chat_id) or {}
@@ -23749,7 +22284,6 @@ def build_account_status_text(chat_id: int) -> str:
 
     return "\n".join(lines)
 
-
 def resolve_admin_user_status(record: Optional[dict]) -> str:
     if not record:
         return "unknown"
@@ -23774,7 +22308,6 @@ def resolve_admin_user_status(record: Optional[dict]) -> str:
     return (
         row["admin_status"] if isinstance(row, dict) or hasattr(row, "keys") else row[0]
     )
-
 
 def mark_user_delivery_failure(user_id: int, error_text: str):
     error_text = (error_text or "").strip()
@@ -23816,7 +22349,6 @@ def mark_user_delivery_failure(user_id: int, error_text: str):
         if conn:
             conn.close()
 
-
 def deactivate_user(user_id: int) -> bool:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -23850,7 +22382,6 @@ def deactivate_user(user_id: int) -> bool:
 
     logger.info("besthome_bot: User permanently deleted chat_id=%s", user_id)
     return True
-
 
 def block_user(chat_id: int) -> bool:
     conn = get_local_conn()
@@ -23892,7 +22423,6 @@ def block_user(chat_id: int) -> bool:
 
     return True
 
-
 def unblock_user(chat_id: int) -> bool:
     conn = get_local_conn()
     cur = conn.cursor()
@@ -23923,7 +22453,6 @@ def unblock_user(chat_id: int) -> bool:
     logger.info("besthome_bot: User unblocked chat_id=%s", chat_id)
     return True
 
-
 def reject_user(chat_id: int):
     update_user_status(chat_id, STATUS_REJECTED)
     try:
@@ -23934,10 +22463,8 @@ def reject_user(chat_id: int):
     except Exception:
         pass
 
-
 def restore_user_to_pending(chat_id: int):
     update_user_status(chat_id, STATUS_PENDING)
-
 
 def is_user_unlimited(chat_id: int, sub: Optional[dict] = None) -> bool:
     sub = sub or get_subscription(chat_id)
@@ -23949,7 +22476,6 @@ def is_user_unlimited(chat_id: int, sub: Optional[dict] = None) -> bool:
     if not is_active:
         return False
     return plan == "unlimited" or note.startswith("unlimited:on")
-
 
 def set_user_unlimited(chat_id: int) -> str:
     ensure_subscription_record(chat_id)
@@ -23977,7 +22503,6 @@ def set_user_unlimited(chat_id: int) -> str:
     conn.close()
     logger.info("besthome_bot: Unlimited enabled chat_id=%s", chat_id)
     return note
-
 
 def disable_user_unlimited(chat_id: int) -> bool:
     ensure_subscription_record(chat_id)
@@ -24014,14 +22539,12 @@ def disable_user_unlimited(chat_id: int) -> bool:
     logger.info("besthome_bot: Unlimited disabled chat_id=%s", chat_id)
     return True
 
-
 def switch_user_to_paid_flow(chat_id: int):
     conn = get_local_conn()
     cur = conn.cursor()
     cur.execute("UPDATE users SET approved=0 WHERE chat_id=?", (chat_id,))
     conn.commit()
     conn.close()
-
 
 def delete_user_fully(chat_id: int):
     record = get_user_record(chat_id)
@@ -24038,14 +22561,11 @@ def delete_user_fully(chat_id: int):
     conn.close()
     return True
 
-
 def get_selected_users(chat_id: int) -> set:
     return admin_selected_users.setdefault(chat_id, set())
 
-
 def clear_selected_users(chat_id: int):
     admin_selected_users.pop(chat_id, None)
-
 
 def select_page_users(chat_id: int, rows: List[sqlite3.Row]):
     selected = get_selected_users(chat_id)
@@ -24056,7 +22576,6 @@ def select_page_users(chat_id: int, rows: List[sqlite3.Row]):
         except Exception:
             continue
     admin_selected_users[chat_id] = selected
-
 
 def show_all_users(
     chat_id, status="active", page: int = 1, message=None, force_new: bool = False
@@ -24334,7 +22853,6 @@ def show_all_users(
             time.perf_counter() - started_at,
         )
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("userlist|"))
 def cb_userlist(c):
     safe_answer_callback_query(c.id)
@@ -24376,7 +22894,6 @@ def cb_userlist(c):
         force_new=False,
     )
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_u:"))
 @callback_guard
 def cb_admin_user_pagination(c):
@@ -24391,7 +22908,6 @@ def cb_admin_user_pagination(c):
         page = 1
     update_admin_users_state(c.message.chat.id, filter_value=list_type, page=page)
     show_all_users(c.message.chat.id, list_type, page=page, message=c.message)
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_upd:"))
 @callback_guard
@@ -24430,7 +22946,6 @@ def cb_admin_pending_actions(c):
         chat_id, status=list_status, page=page, message=c.message, force_new=False
     )
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_sel:"))
 @callback_guard
 def cb_admin_toggle_select(c):
@@ -24453,7 +22968,6 @@ def cb_admin_toggle_select(c):
     update_admin_users_state(chat_id, filter_value=list_status, page=page)
     show_all_users(chat_id, list_status, page=page, message=c.message, force_new=False)
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_all:"))
 @callback_guard
 def cb_admin_select_all(c):
@@ -24470,7 +22984,6 @@ def cb_admin_select_all(c):
     update_admin_users_state(chat_id, filter_value=list_status, page=page)
     show_all_users(chat_id, list_status, page=page, message=c.message, force_new=False)
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_none:"))
 @callback_guard
 def cb_admin_select_none(c):
@@ -24486,7 +22999,6 @@ def cb_admin_select_none(c):
     clear_selected_users(chat_id)
     update_admin_users_state(chat_id, filter_value=list_status, page=page)
     show_all_users(chat_id, list_status, page=page, message=c.message, force_new=False)
-
 
 def _build_bulk_action_markup(
     list_status: str, page: int, selected_ids: List[int]
@@ -24529,7 +23041,6 @@ def _build_bulk_action_markup(
     )
     return mk
 
-
 def _send_bulk_action_menu(
     chat_id: int, list_status: str, page: int, message: Optional[types.Message] = None
 ):
@@ -24548,7 +23059,6 @@ def _send_bulk_action_menu(
     bot.send_message(
         chat_id, "Seçilən istifadəçilər üçün müddət seçin:", reply_markup=mk
     )
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_ops:"))
 @callback_guard
@@ -24569,7 +23079,6 @@ def cb_admin_ops_menu(c):
         )
         return
     _send_bulk_action_menu(chat_id, list_status, page)
-
 
 def _perform_bulk_extend(chat_id: int, days: int, list_status: str, page: int):
     selected_ids = list(admin_selected_users.get(chat_id, set()))
@@ -24597,7 +23106,6 @@ def _perform_bulk_extend(chat_id: int, days: int, list_status: str, page: int):
         time.perf_counter() - op_started,
     )
 
-
 def _fetch_chance_block_state(user_ids: List[int]) -> Dict[int, int]:
     if not user_ids:
         return {}
@@ -24612,7 +23120,6 @@ def _fetch_chance_block_state(user_ids: List[int]) -> Dict[int, int]:
     result = {int(row[0]): int(row[1] or 0) for row in cur.fetchall()}
     conn.close()
     return result
-
 
 def _set_chance_block_state(user_ids: List[int], blocked: int) -> int:
     if not user_ids:
@@ -24633,7 +23140,6 @@ def _set_chance_block_state(user_ids: List[int], blocked: int) -> int:
     conn.close()
     return updated
 
-
 def _reset_chance_usage_for_users(user_ids: List[int]) -> int:
     if not user_ids:
         return 0
@@ -24651,10 +23157,8 @@ def _reset_chance_usage_for_users(user_ids: List[int]) -> int:
     conn.close()
     return updated
 
-
 def _block_chance_for_users(user_ids: List[int]) -> int:
     return _set_chance_block_state(user_ids, 1)
-
 
 def _perform_bulk_chance_reset(chat_id: int, list_status: str, page: int):
     selected_ids = list(admin_selected_users.get(chat_id, set()))
@@ -24669,7 +23173,6 @@ def _perform_bulk_chance_reset(chat_id: int, list_status: str, page: int):
     update_admin_users_state(chat_id, filter_value=list_status, page=page)
     show_all_users(chat_id, status=list_status, page=page, message=None, force_new=False)
 
-
 def _perform_bulk_chance_block(chat_id: int, list_status: str, page: int):
     selected_ids = list(admin_selected_users.get(chat_id, set()))
     if not selected_ids:
@@ -24680,7 +23183,6 @@ def _perform_bulk_chance_block(chat_id: int, list_status: str, page: int):
     bot.send_message(chat_id, f"✅ {updated} istifadəçi üçün şans bağlandı")
     update_admin_users_state(chat_id, filter_value=list_status, page=page)
     show_all_users(chat_id, status=list_status, page=page, message=None, force_new=False)
-
 
 def _ensure_chance_columns_exists(conn: sqlite3.Connection) -> None:
     columns = set()
@@ -24705,7 +23207,6 @@ def _ensure_chance_columns_exists(conn: sqlite3.Connection) -> None:
             pass
     conn.commit()
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_bulk_do:"))
 @callback_guard
 def cb_admin_bulk_apply(c):
@@ -24724,7 +23225,6 @@ def cb_admin_bulk_apply(c):
         return
     _perform_bulk_extend(chat_id, days, list_status, page)
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_bulk_reset:"))
 @callback_guard
 def cb_admin_bulk_reset(c):
@@ -24739,7 +23239,6 @@ def cb_admin_bulk_reset(c):
         return
     _perform_bulk_chance_reset(chat_id, list_status, page)
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_bulk_block:"))
 @callback_guard
 def cb_admin_bulk_block(c):
@@ -24753,7 +23252,6 @@ def cb_admin_bulk_block(c):
     except Exception:
         return
     _perform_bulk_chance_block(chat_id, list_status, page)
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("chance_toggle:"))
 @callback_guard
@@ -24812,7 +23310,6 @@ def cb_chance_toggle(c):
         _send_bulk_action_menu(chat_id, list_status, page, message=c.message)
         return
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_bulk_custom:"))
 @callback_guard
 def cb_admin_bulk_custom(c):
@@ -24832,7 +23329,6 @@ def cb_admin_bulk_custom(c):
     bot.send_message(chat_id, "Neçə gün əlavə etmək istəyirsiniz?")
     safe_answer_callback_query(c.id)
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_bulk_cancel:"))
 @callback_guard
 def cb_admin_bulk_cancel(c):
@@ -24849,7 +23345,6 @@ def cb_admin_bulk_cancel(c):
     show_all_users(
         chat_id, status=list_status, page=page, message=c.message, force_new=False
     )
-
 
 @bot.message_handler(func=lambda m: get_user_state(m.chat.id) == "ADMIN_BULK_EXTEND")
 def admin_bulk_custom_input(message):
@@ -24877,7 +23372,6 @@ def admin_bulk_custom_input(message):
     admin_bulk_action_state.pop(chat_id, None)
     set_user_state(chat_id, "ADMIN_USERS")
     _perform_bulk_extend(chat_id, days, list_status, page)
-
 
 @bot.message_handler(func=lambda m: get_user_state(m.chat.id) == "ADMIN_USER_EXTEND")
 def admin_user_custom_extend_input(message):
@@ -24919,7 +23413,6 @@ def admin_user_custom_extend_input(message):
             force_new=False,
         )
 
-
 def get_admin_user_page(chat_id: int, list_type: str) -> int:
     if list_type == "unverified":
         list_type = "pending"
@@ -24930,7 +23423,6 @@ def get_admin_user_page(chat_id: int, list_type: str) -> int:
         return max(1, int(admin_user_page_state.get((chat_id, list_type), 1)))
     except Exception:
         return 1
-
 
 def build_admin_msg_back_markup(
     list_type: str, page: int
@@ -24944,7 +23436,6 @@ def build_admin_msg_back_markup(
     )
     return mk
 
-
 def build_admin_extend_back_markup(
     list_type: str, page: int
 ) -> types.InlineKeyboardMarkup:
@@ -24957,7 +23448,6 @@ def build_admin_extend_back_markup(
     )
     return mk
 
-
 def send_admin_user_action_menu(chat_id: int, user_id: int, status_text: str):
     text = TEXTS_AZ["admin_user_action_menu"].format(
         user_id=user_id, status=status_text, price_text=ADMIN_PAYMENT_PRICE_TEXT
@@ -24967,7 +23457,6 @@ def send_admin_user_action_menu(chat_id: int, user_id: int, status_text: str):
     except Exception:
         logger.error("Admin send failed", exc_info=True)
         safe_admin_step(chat_id, text)
-
 
 def activate_user_for_days(user_id: int, days: int):
     sub = get_subscription(user_id) or {}
@@ -24991,7 +23480,6 @@ def activate_user_for_days(user_id: int, days: int):
         bot.send_message(user_id, f"✅ Hesabınız {days} gün aktiv edildi")
     except Exception:
         pass
-
 
 def show_pending_listings(chat_id, message: Optional[types.Message] = None):
     return
@@ -25037,7 +23525,6 @@ def show_pending_listings(chat_id, message: Optional[types.Message] = None):
         )
 
         bot.send_message(chat_id, txt, reply_markup=mk)
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("admin_approve:"))
 @callback_guard
@@ -25105,7 +23592,6 @@ def handle_admin_approve(c):
     except Exception as e:
         bot.answer_callback_query(c.id, "Xəta baş verdi ❌", show_alert=True)
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("admin_delete:"))
 @callback_guard
 def handle_admin_delete(c):
@@ -25126,9 +23612,7 @@ def handle_admin_delete(c):
     except Exception as e:
         bot.answer_callback_query(c.id, "Xəta baş verdi ❌", show_alert=True)
 
-
 # =============== İSTİFADƏÇİ TƏSDİQİ (ADMIN) ===============
-
 
 def show_pending_users(chat_id, message=None):
     set_admin_state(chat_id, "admin_users_pending")
@@ -25139,7 +23623,6 @@ def show_pending_users(chat_id, message=None):
         message=message,
         force_new=message is None,
     )
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("approve_user:"))
 @callback_guard
@@ -25178,7 +23661,6 @@ def cb_approve_new_user(c):
     except Exception:
         logger.exception("Failed to edit approve message for user_id=%s", uid)
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("block_user:"))
 @callback_guard
 def cb_block_new_user(c):
@@ -25202,7 +23684,6 @@ def cb_block_new_user(c):
         render_ui(c.message.chat.id, f"⛔ İstifadəçi bloklandı\nID: {uid}", None)
     except Exception:
         logger.exception("Failed to edit block message for user_id=%s", uid)
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_approve|"))
 @callback_guard
@@ -25233,7 +23714,6 @@ def cb_user_approve_action(c):
 
     show_pending_users(c.message.chat.id, message=c.message)
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_demo|"))
 @callback_guard
 def cb_user_demo_action(c):
@@ -25256,7 +23736,6 @@ def cb_user_demo_action(c):
     safe_answer_callback_query(c.id, TEXTS_AZ["admin_user_demo_given"])
     show_pending_users(c.message.chat.id, message=c.message)
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_free|"))
 @callback_guard
 def cb_user_free_action(c):
@@ -25272,7 +23751,6 @@ def cb_user_free_action(c):
         pass
     show_pending_users(c.message.chat.id, message=c.message)
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_reject|"))
 @callback_guard
 def cb_user_reject_action(c):
@@ -25283,7 +23761,6 @@ def cb_user_reject_action(c):
     reject_user(uid)
     safe_answer_callback_query(c.id, "? R?dd edildi")
     show_pending_users(c.message.chat.id, message=c.message)
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("user_block|"))
 @callback_guard
@@ -25297,7 +23774,6 @@ def cb_user_block_action(c):
         c.id, " Bloklandı" if blocked else " Dəyişiklik olmadə"
     )
     show_pending_users(c.message.chat.id, message=c.message)
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("uappr|"))
 @callback_guard
@@ -25323,7 +23799,6 @@ def cb_user_approve(c):
 
     show_pending_users(c.message.chat.id, message=c.message)
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ublock|"))
 @callback_guard
 def cb_user_block_pending(c):
@@ -25336,9 +23811,7 @@ def cb_user_block_pending(c):
     bot.answer_callback_query(c.id, "⛔ İstifadəçi bloklandı.")
     show_pending_users(c.message.chat.id, message=c.message)
 
-
 # =============== BOT YENİLƏMƏ BİLDİRİŞİ ===============
-
 
 def broadcast_bot_update(
     admin_chat_id: int, message: Optional[types.Message] = None
@@ -25398,7 +23871,6 @@ def broadcast_bot_update(
         None,
     )
 
-
 def handle_bot_refresh(message):
     chat_id = message.chat.id
     user_state.pop(chat_id, None)
@@ -25426,14 +23898,12 @@ def handle_bot_refresh(message):
     search_reminder_shown.discard(chat_id)
     return_to_main_menu(chat_id)
 
-
 @bot.message_handler(func=lambda m: m.text == "🔄 Botu yenilə")
 def refresh_button_message(message):
     if message.text and message.text.startswith('/'):
         return
 
     handle_bot_refresh(message)
-
 
 @bot.callback_query_handler(func=lambda c: c.data == "bot_refresh")
 @callback_guard
@@ -25443,7 +23913,6 @@ def cb_bot_refresh(c):
     except:
         pass
     handle_bot_refresh(c.message)
-
 
 @bot.callback_query_handler(func=lambda c: c.data == "refresh_bot")
 @callback_guard
@@ -25455,9 +23924,7 @@ def cb_refresh_bot(c):
         pass
     handle_bot_refresh(c.message)
 
-
 # =============== PUBLIC MENYUDAN DÜYMƏLƏR ===============
-
 
 @bot.message_handler(func=lambda m: m.text == "🧑‍💼 Vasitəçilər")
 def agents_button(message):
@@ -25502,7 +23969,6 @@ def agents_button(message):
         reply_markup=mk,
     )
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "pub_agents_kw")
 @callback_guard
 def cb_pub_agents_kw(c):
@@ -25513,7 +23979,6 @@ def cb_pub_agents_kw(c):
         "🔎 Vasitəçi elanlarında açar söz yaz:",
     )
     bot.register_next_step_handler(msg, pub_agent_search_by_keyword)
-
 
 def build_agent_request_rayon_markup():
     mk = types.InlineKeyboardMarkup()
@@ -25543,7 +24008,6 @@ def build_agent_request_rayon_markup():
     mk.add(types.InlineKeyboardButton("🔔 Bildirişlərim", callback_data="notif_menu"))
     return mk
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "agent_requests")
 @callback_guard
 def cb_agent_requests(c):
@@ -25565,7 +24029,6 @@ def cb_agent_requests(c):
         pass
     build_customer_requests_operation_menu(chat_id, message=c.message)
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "cust_req_ops")
 @callback_guard
 def cb_customer_requests_ops(c):
@@ -25581,7 +24044,6 @@ def cb_customer_requests_ops(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "cust_req_back")
 @callback_guard
 def cb_customer_requests_back(c):
@@ -25593,7 +24055,6 @@ def cb_customer_requests_back(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cust_req_op:"))
 @callback_guard
@@ -25612,7 +24073,6 @@ def cb_customer_requests_op(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cr_rule_rayon_"))
 @callback_guard
@@ -25657,7 +24117,6 @@ def cb_customer_request_rule_rayon(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 def show_agent_requests_by_rayon(
     chat_id: int,
@@ -25722,7 +24181,6 @@ def show_agent_requests_by_rayon(
         except Exception:
             continue
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("agt_req:"))
 @callback_guard
 def cb_agent_request_page(c):
@@ -25758,7 +24216,6 @@ def cb_agent_request_page(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cust_req_save:"))
 @callback_guard
 def cb_customer_request_save(c):
@@ -25779,7 +24236,6 @@ def cb_customer_request_save(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cust_req_arch:"))
 @callback_guard
@@ -25802,7 +24258,6 @@ def cb_customer_request_archive(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cust_req_unarch:"))
 @callback_guard
 def cb_customer_request_unarchive(c):
@@ -25824,7 +24279,6 @@ def cb_customer_request_unarchive(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cust_req_archived:"))
 @callback_guard
 def cb_customer_request_archived(c):
@@ -25844,7 +24298,6 @@ def cb_customer_request_archived(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "cust_req_rules")
 @callback_guard
 def cb_customer_request_rules(c):
@@ -25859,7 +24312,6 @@ def cb_customer_request_rules(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "cust_req_rules_new")
 @callback_guard
 def cb_customer_request_rules_new(c):
@@ -25873,7 +24325,6 @@ def cb_customer_request_rules_new(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cust_req_rule_toggle:"))
 @callback_guard
@@ -25897,7 +24348,6 @@ def cb_customer_request_rule_toggle(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cust_req_alerts:"))
 @callback_guard
@@ -25928,7 +24378,6 @@ def cb_customer_request_alerts(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cr_alert_view:"))
 @callback_guard
@@ -25977,7 +24426,6 @@ def cb_customer_request_alert_view(c):
     except Exception:
         pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cr_rule_stop:"))
 @callback_guard
 def cb_customer_request_rule_stop(c):
@@ -25996,7 +24444,6 @@ def cb_customer_request_rule_stop(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cr_alert_delete:"))
 @callback_guard
@@ -26020,7 +24467,6 @@ def cb_customer_request_alert_delete(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 def show_agent_my_customers(
     chat_id: int, page: int = 1, message: Optional[types.Message] = None
@@ -26108,7 +24554,6 @@ def show_agent_my_customers(
         except Exception:
             continue
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("agt_my:"))
 @callback_guard
 def cb_agent_my_customers(c):
@@ -26132,7 +24577,6 @@ def cb_agent_my_customers(c):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("agt_int:"))
 @callback_guard
@@ -26192,7 +24636,6 @@ def cb_agent_interest(c):
         except Exception:
             pass
 
-
 def pub_agent_search_by_keyword(message):
     if not ensure_allowed(message):
         return
@@ -26225,7 +24668,6 @@ def pub_agent_search_by_keyword(message):
     bot.send_message(message.chat.id, f"✅ Tapıldı: {len(rows)} elan.")
     for r in rows:
         send_agent_card(message.chat.id, dict(r))
-
 
 @bot.message_handler(
     func=lambda m: agent_request_lookup_state.get(m.chat.id, {}).get("step") == "rayon"
@@ -26261,13 +24703,11 @@ def handle_agent_request_rayon(message):
 
 # =============== ADMIN STATİSTİKA, AXTARIŞ, BROADCAST ===============
 
-
 STATS_PERIOD_MAP = {
     "day": TEXTS_AZ["admin_stats_period_day"].replace("📆 ", "").replace("📅 ", ""),
     "week": TEXTS_AZ["admin_stats_period_week"].replace("📆 ", "").replace("📅 ", ""),
     "month": TEXTS_AZ["admin_stats_period_month"].replace("📆 ", "").replace("📅 ", ""),
 }
-
 
 def stats_period_keyboard(selected: str) -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup()
@@ -26286,7 +24726,6 @@ def stats_period_keyboard(selected: str) -> types.InlineKeyboardMarkup:
     mk.add(types.InlineKeyboardButton(ADMIN_PANEL_BACK_MAIN, callback_data="ui_admin_menu"))
     return mk
 
-
 def stats_period_range(period: str) -> Tuple[date, date, str]:
     today = date.today()
     if period == "week":
@@ -26300,7 +24739,6 @@ def stats_period_range(period: str) -> Tuple[date, date, str]:
     label = STATS_PERIOD_MAP.get(period, "Bu gün")
     return start, end, label
 
-
 def get_time_range(scope: str) -> datetime:
     now = datetime.now()
     if scope == "today":
@@ -26310,7 +24748,6 @@ def get_time_range(scope: str) -> datetime:
     if scope == "month":
         return now - timedelta(days=30)
     raise ValueError("Invalid stats scope")
-
 
 def format_ranked_lines(items, name_key: str, count_key: str):
     if not items:
@@ -26332,11 +24769,9 @@ def format_ranked_lines(items, name_key: str, count_key: str):
         lines.append(f"{idx}) {name} — {count} axtarış")
     return lines
 
-
 def normalize_rayon_label(name_raw: str) -> str:
     name = str(name_raw or "").strip()
     return name or "Açar söz"
-
 
 def format_rayon_stats(rayons):
     lines = []
@@ -26352,23 +24787,19 @@ def format_rayon_stats(rayons):
         lines.append(f"• {normalize_rayon_label(rn)} — {cnt}")
     return lines
 
-
 def build_profile_url(chat_id: int, username: Optional[str]) -> str:
     username_clean = (username or "").strip().lstrip("@")
     if username_clean:
         return f"https://t.me/{username_clean}"
     return f"tg://user?id={chat_id}"
 
-
 def format_user_id_link(user_id: int) -> str:
     return f'<a href="tg://user?id={user_id}">{user_id}</a>'
-
 
 def get_profile_url_for_user(user_id: int) -> str:
     record = get_user_record(user_id)
     username = record.get("username") if record else None
     return build_profile_url(user_id, username)
-
 
 def format_active_user_stats(users):
     lines = []
@@ -26411,7 +24842,6 @@ def format_active_user_stats(users):
     if lines and lines[-1] == "":
         lines.pop()
     return lines
-
 
 def show_admin_stats(
     chat_id, period: Optional[str] = None, message_id: Optional[int] = None
@@ -26642,7 +25072,6 @@ def show_admin_stats(
 
     render_ui(chat_id, text, keyboard, parse_mode="HTML")
 
-
 @bot.callback_query_handler(
     func=lambda c: c.data and c.data.startswith("stats_period:")
 )
@@ -26667,7 +25096,6 @@ def handle_stats_period_callback(c):
     if c.message:
         show_admin_stats(chat_id, period=period)
 
-
 @bot.callback_query_handler(
     func=lambda c: c.data and c.data.startswith("bonus_stats_period:")
 )
@@ -26691,7 +25119,6 @@ def handle_bonus_stats_period_callback(c):
 
     if c.message:
         show_bonus_stats(chat_id, period=period)
-
 
 def show_referral_stats(chat_id: int, message: Optional[types.Message] = None):
     if not is_admin(chat_id):
@@ -26753,8 +25180,6 @@ def show_referral_stats(chat_id: int, message: Optional[types.Message] = None):
         ui_message_state[chat_id] = message.message_id
     send_or_edit_ui_message(chat_id, "\n".join(lines), mk, parse_mode="HTML")
 
-
-
 def bonus_stats_period_keyboard(selected: str) -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup()
     buttons = [
@@ -26774,7 +25199,6 @@ def bonus_stats_period_keyboard(selected: str) -> types.InlineKeyboardMarkup:
     mk.add(types.InlineKeyboardButton("🔄 Yenilə", callback_data="bonusprob:refresh"))
     mk.add(types.InlineKeyboardButton(ADMIN_PANEL_BACK_MAIN, callback_data="ui_admin_menu"))
     return mk
-
 
 def show_bonus_stats(
     chat_id: int,
@@ -26828,8 +25252,6 @@ def show_bonus_stats(
         mk,
         parse_mode="HTML",
     )
-
-
 
 def show_revenue_report(chat_id: int, message: Optional[types.Message] = None):
     if not is_admin(chat_id):
@@ -26906,7 +25328,6 @@ def show_revenue_report(chat_id: int, message: Optional[types.Message] = None):
     if message:
         ui_message_state[chat_id] = message.message_id
     send_or_edit_ui_message(chat_id, "\n\n".join(report_lines), mk)
-
 
 def admin_agents_broadcast(message):
     """Adminin yazdığı mətni bütün qeydiyyatlı istifadəçilərə göndər."""
@@ -27031,7 +25452,6 @@ def admin_agents_broadcast(message):
         daemon=True,
     ).start()
 
-
 def admin_search_handler(message):
     """Admin üçün ümumi açar sözlə axtarış (əsas + lokal + agent)."""
     if not is_admin(message.chat.id):
@@ -27150,7 +25570,6 @@ def admin_search_handler(message):
             params={"query": q},
         )
 
-
 @bot.message_handler(
     content_types=["text"],
     func=lambda m: not is_admin(m.chat.id)
@@ -27199,7 +25618,6 @@ def support_user_message_router(message):
     update_admin_support_ui_on_incoming(message.chat.id)
     send_support_sent_toast(message.chat.id)
 
-
 @bot.message_handler(
     content_types=["text"],
     func=lambda m: is_admin(m.chat.id) and get_support_admin_reply_user_id(m.chat.id),
@@ -27236,7 +25654,6 @@ def support_admin_message_router(message):
     _set_support_admin_state(message.chat.id, reply_to_user_id=None)
     show_support_thread_view(message.chat.id, reply_user_id, set_active=False)
 
-
 def has_active_text_flow(chat_id: int) -> bool:
     flow_states = [
         user_state,
@@ -27266,12 +25683,10 @@ def has_active_text_flow(chat_id: int) -> bool:
             return True
     return False
 
-
 def has_active_support_session(chat_id: int) -> bool:
     if is_admin(chat_id):
         return bool(get_support_admin_reply_user_id(chat_id))
     return is_user_support_active(chat_id)
-
 
 @bot.message_handler(
     content_types=[
@@ -27295,7 +25710,6 @@ def has_active_support_session(chat_id: int) -> bool:
 def track_last_user_message(message: types.Message) -> None:
     last_user_message_id[message.chat.id] = message.message_id
 
-
 @bot.message_handler(content_types=["text"])
 def guard_idle_messages(message):
     if message.text and message.text.startswith("/"):
@@ -27309,20 +25723,16 @@ def guard_idle_messages(message):
         "Əvvəlcə menudan seçim edin, sonra yazın.",
     )
 
-
 # =============== RUN (Render / Lokal) ===============
-
 
 def api_error_response(message: str, status_code: int = 400):
     logger.warning("API error status=%s message=%s", status_code, message)
     return jsonify({"ok": False, "error": message}), status_code
 
-
 def api_ok_response(payload: dict, status_code: int = 200):
     body = {"ok": True}
     body.update(payload)
     return jsonify(body), status_code
-
 
 def _wrap_api(name: str, handler):
     """Execute an API handler with consistent logging and error handling."""
@@ -27340,7 +25750,6 @@ def _wrap_api(name: str, handler):
             logger.info("API %s completed in %sms", name, duration_ms)
 
     return _inner()
-
 
 def resolve_user_from_payload(payload: dict):
     uid_raw = (
@@ -27365,7 +25774,6 @@ def resolve_user_from_payload(payload: dict):
     )
     return uid, None if user else api_error_response("İstifadəçi yaradılmadı", 500)
 
-
 def map_date_range_to_days(code: Optional[str]) -> Optional[Union[int, str]]:
     if not code:
         return None
@@ -27384,7 +25792,6 @@ def map_date_range_to_days(code: Optional[str]) -> Optional[Union[int, str]]:
         "all": None,
     }
     return mapping.get(val)
-
 
 def compute_besthome_overview_stats():
     stats = {
@@ -27424,8 +25831,6 @@ def compute_besthome_overview_stats():
 
     for row in rows:
         row["__source"] = "main"
-        if int(_row_value_safe(row, "is_hidden") or 0) == 1:
-            continue
         approved_raw = _row_value_safe(row, "approved")
         if approved_raw is None:
             approved_raw = _row_value_safe(row, "is_approved")
@@ -27457,20 +25862,17 @@ def compute_besthome_overview_stats():
 
     return stats
 
-
 def filter_results_by_rayon(items: List[dict], rayon: Optional[str]):
     if not rayon or rayon == "all":
         return items
     filters = {"region": "all", "rayon": rayon}
     return [ev for ev in items if matches_region_rayon(ev, filters)]
 
-
 def parse_int_value(val, default: Optional[int] = None) -> Optional[int]:
     try:
         return int(val)
     except Exception:
         return default
-
 
 def get_user_id_from_request() -> Optional[int]:
     uid_raw = request.args.get("user_id") if request else None
@@ -27487,7 +25889,6 @@ def get_user_id_from_request() -> Optional[int]:
     except Exception:
         return None
 
-
 def clean_field(value: Optional[str]) -> str:
     if value is None:
         return ""
@@ -27496,10 +25897,8 @@ def clean_field(value: Optional[str]) -> str:
         return ""
     return text
 
-
 def log_api_call(name: str, user_id: Optional[int], payload: dict):
     logger.info("API call %s user=%s payload=%s", name, user_id, payload)
-
 
 def subscription_notifier():
     while True:
@@ -27533,11 +25932,9 @@ def subscription_notifier():
             print("Subscription notifier error:", e)
         time.sleep(3600)
 
-
 def main_menu(chat_id):
     set_ui_context(chat_id, UI_CONTEXT_MAIN)
     send_main_menu(chat_id, "📋 Əsas menyudan seçim et:", force=True)
-
 
 @bot.callback_query_handler(func=lambda c: True)
 def cb_unhandled_callback(c):
@@ -27551,13 +25948,11 @@ def cb_unhandled_callback(c):
     if c.message:
         recover_main_menu(c.message.chat.id, c.message)
 
-
 _app_initialized = False
 app: Optional[Flask] = None
 __all__ = ["main", "create_flask_app", "app"]
 
 _polling_started = threading.Event()
-
 
 def _initialize_app_state():
     global _app_initialized
@@ -27574,7 +25969,6 @@ def _initialize_app_state():
     ensure_fts_tables()
     check_favorite_price_drops()
     _app_initialized = True
-
 
 def create_flask_app():
     global app
@@ -27692,7 +26086,6 @@ def create_flask_app():
             }
 
             results = []
-            include_hidden = bool(user_id and is_admin(user_id))
 
             if os.path.exists(MAIN_DB):
                 conn = get_main_conn()
@@ -27713,9 +26106,7 @@ def create_flask_app():
                 order_clause = (
                     f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
                 )
-                visibility_sql = build_listing_visibility_sql(
-                    cur, "listings", include_hidden=include_hidden
-                )
+                visibility_sql = ""
                 cur.execute(
                     base + flt + visibility_sql + date_sql + order_clause,
                     params + date_params,
@@ -27844,11 +26235,10 @@ def create_flask_app():
             listing_id = parse_int_value(args.get("id"))
             if listing_id is None:
                 return api_error_response("id tələb olunur", 400)
-            include_hidden = bool(user_id and is_admin(user_id))
             sources = ["main", "local"]
             for src in sources:
                 ev = fetch_listing_by_source(
-                    src, listing_id, include_hidden=include_hidden
+                    src, listing_id
                 )
                 if ev:
                     normalized = _normalize_listing_response(ev)
@@ -27969,17 +26359,16 @@ def create_flask_app():
             conn.close()
 
             results = []
-            include_hidden = bool(user_id and is_admin(user_id))
             for r in rows:
                 src = r["source"] or "main"
                 if src == "besthome":
                     src = "main"
                 listing = fetch_listing_by_source(
-                    src, r["listing_id"], include_hidden=include_hidden
+                    src, r["listing_id"]
                 )
                 if not listing and src != "main":
                     listing = fetch_listing_by_source(
-                        "main", r["listing_id"], include_hidden=include_hidden
+                        "main", r["listing_id"]
                     )
 
                 base_payload = {
@@ -28271,7 +26660,6 @@ def create_flask_app():
 
     return app
 
-
 def main():
     if _polling_started.is_set():
         logger.info("Bot polling already running; skipping duplicate start")
@@ -28301,7 +26689,6 @@ def main():
     create_flask_app()
     run_bot()
 
-
 def run_bot():
     logger.info("🤖 Telegram bot polling started (safe mode)")
     while True:
@@ -28314,7 +26701,6 @@ def run_bot():
         except Exception as e:
             logger.error(f"Polling crashed, restarting in 5s: {e}")
             time.sleep(5)
-
 
 def keepalive_worker(interval_seconds: int = 300):
     while True:
@@ -28329,7 +26715,6 @@ def keepalive_worker(interval_seconds: int = 300):
         except Exception as exc:
             logger.warning("Keep-alive ping failed: %s", exc)
         time.sleep(interval_seconds)
-
 
 def download_db() -> bool:
     if not DRIVE_DIRECT_LINK or DRIVE_DIRECT_LINK == "DRIVE_DIRECT_LINK":
@@ -28376,7 +26761,6 @@ def download_db() -> bool:
                 os.remove(tmp_path)
             except Exception:
                 pass
-
 
 def sync_loop():
     while True:
