@@ -6568,6 +6568,35 @@ def build_rayon_filter_sql(cur, table: str, rayon: Optional[str], prefix: str):
     params = [f"%{rayon.lower()}%"] * len(targets)
     return " AND (" + " OR ".join(conds) + ")", params
 
+def build_absheron_settlement_sql(
+    cur, table: str, region: Optional[str], settlement: Optional[str], prefix: str = ""
+):
+    region_norm = normalize_region(region or "")
+    settlement_val = (settlement or "").strip()
+    if region_norm != "abseron":
+        return "", []
+
+    cols = get_table_columns(cur, table)
+    region_targets = []
+    if table == "listings" and "region_name" in cols:
+        region_targets.append(f'{prefix}"{cols["region_name"]}"')
+    for name in ("region", "rayon"):
+        if name in cols:
+            region_targets.append(f'{prefix}"{cols[name]}"')
+    region_targets = list(dict.fromkeys(region_targets))
+    if not region_targets:
+        return "", []
+
+    region_conds = [f"LOWER(COALESCE({col},'')) LIKE ?" for col in region_targets]
+    sql = " AND (" + " OR ".join(region_conds) + ")"
+    params = ["%abşeron%"] * len(region_targets)
+
+    settlement_col = cols.get("settlement")
+    if settlement_col and settlement_val:
+        sql += f' AND LOWER(COALESCE({prefix}"{settlement_col}", \'\')) = LOWER(?)'
+        params.append(settlement_val)
+    return sql, params
+
 def count_main_active_listings(
     op_code: str = "all",
     prop_code: str = "all",
@@ -14212,6 +14241,21 @@ BAKU_RAYONS = [
     "Yasamal",
 ]
 ABS_RAYONS = ["Xırdalan", "Abşeron", "Masazır", "Digər"]
+ABSHERON_SETTLEMENTS = [
+    "Xırdalan",
+    "Masazır",
+    "Hökməli",
+    "Saray",
+    "Pirəkəşkül",
+    "Novxanı",
+    "Mehdiabad",
+    "Qobu",
+    "Məmmədli",
+    "Fatmayı",
+    "Digah",
+    "Aşağı Güzdək",
+    "Zuğulba",
+]
 SUM_RAYONS = ["Sumqayıt"]
 ALL_RAYONS = sorted(set(BAKU_RAYONS + ABS_RAYONS + SUM_RAYONS + ["Digər"]))
 REGION_OPTIONS = {
@@ -14264,6 +14308,23 @@ def get_region_filter_options(region_code: str) -> List[str]:
     group_norm = {normalize_region(name) for name in group}
     filtered = [name for name in regions if normalize_region(name) in group_norm]
     return filtered or group
+
+def absheron_settlements_keyboard() -> types.InlineKeyboardMarkup:
+    mk = types.InlineKeyboardMarkup()
+    row: List[types.InlineKeyboardButton] = []
+    for settlement in ABSHERON_SETTLEMENTS:
+        row.append(
+            types.InlineKeyboardButton(
+                settlement, callback_data=f"settlement_{settlement}"
+            )
+        )
+        if len(row) == 2:
+            mk.row(*row)
+            row = []
+    if row:
+        mk.row(*row)
+    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="fs|bk"))
+    return mk
 
 def structured_send(chat_id, message, text, markup):
     if message:
@@ -14347,7 +14408,28 @@ def parse_floor_value(ev: dict):
 def matches_region_rayon(ev: dict, filters: dict) -> bool:
     region = filters.get("region") or "all"
     rayon = filters.get("rayon")
+    settlement = (filters.get("settlement") or "").strip()
     listing_region = get_listing_region_value(ev).lower()
+    listing_settlement = (
+        str(
+            ev.get("settlement")
+            or ev.get("Settlement")
+            or ev.get("qesebe")
+            or ev.get("Qesebe")
+            or ""
+        )
+        .strip()
+        .lower()
+    )
+
+    if normalize_region(str(region)) == "abseron" and settlement:
+        if "abşeron" not in listing_region and "abseron" not in normalize_region(
+            listing_region
+        ):
+            return False
+        if listing_settlement:
+            return listing_settlement == settlement.lower()
+        return settlement.lower() in listing_region
 
     if rayon and rayon != "all":
         return rayon.lower() in listing_region
@@ -15295,12 +15377,18 @@ def query_structured_results(
         date_col = detect_table_date_column(cur, "listings")
         date_expr = build_listing_date_expr(cur, "listings", date_col)
         date_sql, date_params = build_date_range_clause(date_expr, date_days)
+        abs_sql, abs_params = build_absheron_settlement_sql(
+            cur,
+            "listings",
+            filters.get("rayon") or filters.get("region"),
+            filters.get("settlement"),
+        )
         order_parts = build_listing_order_parts(cur, "listings", date_col)
         order_clause = f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
         visibility_sql = ""
         cur.execute(
-            base + flt + visibility_sql + date_sql + order_clause,
-            params + date_params,
+            base + flt + visibility_sql + date_sql + abs_sql + order_clause,
+            params + date_params + abs_params,
         )
         for r in cur.fetchall():
             d = dict(r)
@@ -15317,9 +15405,15 @@ def query_structured_results(
     date_col = detect_table_date_column(cur, "listings_approved")
     date_expr = build_listing_date_expr(cur, "listings_approved", date_col)
     date_sql, date_params = build_date_range_clause(date_expr, date_days)
+    abs_sql, abs_params = build_absheron_settlement_sql(
+        cur,
+        "listings_approved",
+        filters.get("rayon") or filters.get("region"),
+        filters.get("settlement"),
+    )
     order_parts = build_listing_order_parts(cur, "listings_approved", date_col)
     order_clause = f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
-    cur.execute(base + flt + date_sql + order_clause, params + date_params)
+    cur.execute(base + flt + date_sql + abs_sql + order_clause, params + date_params + abs_params)
     for r in cur.fetchall():
         d = dict(r)
         d["__source"] = "local"
@@ -16787,6 +16881,16 @@ def render_region_step(chat_id, message=None):
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="fs|bk"))
     structured_send(chat_id, message, "📍 Regionu seç:", mk)
 
+def render_absheron_settlement_step(chat_id, message=None):
+    st = search_state.setdefault(chat_id, {})
+    st["step"] = "settlement"
+    structured_send(
+        chat_id,
+        message,
+        "📍 Abşeron rayonu üçün qəsəbəni seçin:",
+        absheron_settlements_keyboard(),
+    )
+
 def render_rayon_step(chat_id, message=None):
     st = search_state.setdefault(chat_id, {})
     st["step"] = "rayon"
@@ -16876,6 +16980,8 @@ def structured_go_back(chat_id, message=None):
         render_prop_step(chat_id, message)
     elif step == "region":
         render_region_step(chat_id, message)
+    elif step == "settlement":
+        render_absheron_settlement_step(chat_id, message)
     elif step == "rayon":
         render_rayon_step(chat_id, message)
     elif step == "price":
@@ -16947,19 +17053,25 @@ def cb_structured(c):
         filters = st.setdefault("filters", {})
         region_code = parts[2]
         filters.pop("rayon", None)
+        filters.pop("settlement", None)
         if region_code == "all":
             filters["region"] = None
+            print("Selected region:", "all")
             structured_push_history(chat_id)
             render_price_step(chat_id, c.message)
             return
         filters["region"] = region_code
+        selected_region = (
+            "Abşeron" if region_code == "abs" else "Sumqayıt" if region_code == "sum" else "Bakı"
+        )
+        print("Selected region:", selected_region)
         structured_push_history(chat_id)
         if region_code == "sum":
             filters["rayon"] = "Sumqayıt"
             render_price_step(chat_id, c.message)
         elif region_code == "abs":
-            filters["rayon"] = "Abşeron"
-            render_price_step(chat_id, c.message)
+            render_absheron_settlement_step(chat_id, c.message)
+            return
         else:
             render_rayon_step(chat_id, c.message)
     elif action == "rn":
@@ -17030,6 +17142,35 @@ def cb_structured(c):
         update_ui_message(
             chat_id, chat_id, "✏️ Mərtəbəni yazın (məs: 3 və ya 1-3):", None
         )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("settlement_"))
+@callback_guard
+def cb_absheron_settlement(c):
+    if not ensure_allowed_cb(c):
+        return
+    chat_id = c.message.chat.id
+    st = search_state.setdefault(
+        chat_id,
+        {
+            "mode": "structured",
+            "filters": {},
+            "history": [],
+            "awaiting_floor_range": False,
+        },
+    )
+    settlement = c.data[len("settlement_") :].strip()
+    if not settlement:
+        safe_answer_callback_query(c.id)
+        return
+
+    filters = st.setdefault("filters", {})
+    filters["region"] = "abs"
+    filters["rayon"] = "Abşeron"
+    filters["settlement"] = settlement
+    print("Selected settlement:", settlement)
+    structured_push_history(chat_id)
+    render_price_step(chat_id, c.message)
+    safe_answer_callback_query(c.id)
 
 @bot.message_handler(
     func=lambda m: search_state.get(m.chat.id, {}).get("awaiting_floor_range")
