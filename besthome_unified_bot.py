@@ -96,10 +96,37 @@ class _BotProxy:
 
     def _store_handler(self, handler_type, *args, **kwargs):
         def decorator(func):
+            @wraps(func)
+            def guarded(update):
+                user = getattr(update, "from_user", None)
+                user_id = getattr(user, "id", None)
+                if user_id is not None and not is_allowed(user_id):
+                    try:
+                        if handler_type == "callback_query_handler":
+                            safe_answer_callback_query(
+                                getattr(update, "id", None),
+                                "⛔ Bu bot yalnız icazəli istifadəçilər üçündür.",
+                            )
+                        msg = getattr(update, "message", None)
+                        target_chat = (
+                            msg.chat.id
+                            if msg and getattr(msg, "chat", None)
+                            else getattr(getattr(update, "chat", None), "id", None)
+                        )
+                        if target_chat is not None:
+                            bot.send_message(
+                                target_chat,
+                                "⛔ Bu bot yalnız icazəli istifadəçilər üçündür.",
+                            )
+                    except Exception:
+                        logger.exception("Failed to send access denied message")
+                    return
+                return func(update)
+
             if self._bot is not None:
-                getattr(self._bot, handler_type)(*args, **kwargs)(func)
+                getattr(self._bot, handler_type)(*args, **kwargs)(guarded)
             else:
-                self._pending_handlers.append((handler_type, args, kwargs, func))
+                self._pending_handlers.append((handler_type, args, kwargs, guarded))
             return func
 
         return decorator
@@ -166,6 +193,10 @@ class _BotProxy:
         return attr
 
 ADMINS = [1311851277, 899663909]
+ALLOWED_USERS = [
+    1311851277,
+    899663909,
+]
 CHANNEL_ID = -1001878623087  # Bot bu kanalda admin olmalıdır
 
 bot = _BotProxy()
@@ -4121,6 +4152,13 @@ def is_admin(chat_id: int) -> bool:
     except Exception:
         return False
 
+def is_allowed(user_id: int) -> bool:
+    try:
+        uid = int(str(user_id).strip())
+    except Exception:
+        return False
+    return uid in {int(x) for x in ALLOWED_USERS}
+
 def send_message_to_admins(text: str, **kwargs) -> None:
     for admin_id in ADMIN_IDS:
         try:
@@ -6138,15 +6176,15 @@ def format_sqlite_datetime(dt: datetime) -> str:
 def build_time_filter(days: Optional[int]) -> str:
     if days is None:
         return ""
-    return f"WHERE date_read >= NOW() - INTERVAL '{days} days'"
+    return f"WHERE created_at >= NOW() - INTERVAL '{days} days'"
 
 def build_time_clause(scope: str) -> str:
     if scope == "24h":
-        return "WHERE date_read >= datetime('now','-1 day')"
+        return "WHERE created_at >= datetime('now','-24 hours')"
     if scope == "7d":
-        return "WHERE date_read >= datetime('now','-7 day')"
+        return "WHERE created_at >= datetime('now','-7 days')"
     if scope == "30d":
-        return "WHERE date_read >= datetime('now','-30 day')"
+        return "WHERE created_at >= datetime('now','-30 days')"
     if scope == "all":
         return ""
     raise ValueError("Invalid stats scope")
@@ -9791,11 +9829,6 @@ def format_stats_text(stats: dict, period_key: str, is_admin: bool = False) -> s
     if stats.get("note"):
         lines.append(f"({stats['note']})")
 
-    if is_admin:
-        meta = stats.get("meta") or {}
-        scope = meta.get("scope") or period_key
-        lines.append("")
-        lines.append(f"(dbg: table=listings ts=date_read scope={scope} op_norm=enabled)")
     return "\n".join(lines)
 
 def send_user_statistics(chat_id: int, period_key: str, message_id: Optional[int] = None):
@@ -14548,7 +14581,7 @@ def compute_user_statistics(period: str) -> dict:
         "prop_type_counts": {},
         "meta": {
             "table": "listings",
-            "ts_col": "date_read",
+            "ts_col": None,
             "ts_kind": "iso",
             "op_col": "operation",
             "type_col": "prop_type",
@@ -14579,9 +14612,9 @@ def compute_user_statistics(period: str) -> dict:
 
         col_names = {str(r[1]).lower(): r[1] for r in col_rows if len(r) > 1}
 
-        ts_col = col_names.get("date_read")
+        ts_col = col_names.get("created_at") or col_names.get("created_date")
         if not ts_col:
-            logger.error("[STATS] No timestamp column found")
+            logger.warning("[STATS] No created_at/created_date column found, using fallback")
         ts_kind = "iso"
 
         op_col = col_names.get("operation")
@@ -14589,7 +14622,7 @@ def compute_user_statistics(period: str) -> dict:
 
         stats["meta"] = {
             "table": "listings",
-            "ts_col": "date_read",
+            "ts_col": ts_col,
             "ts_kind": "iso",
             "op_col": op_col,
             "type_col": type_col,
@@ -14602,49 +14635,38 @@ def compute_user_statistics(period: str) -> dict:
             key_base,
         )
 
-        where_clauses: List[str] = []
-        where_params: List[Any] = []
+        where_sql = ""
+        if key_base != "all" and ts_col:
+            if key_base == "24h":
+                where_sql = f" WHERE datetime(l.\"{ts_col}\") >= datetime('now','-24 hours')"
+            elif key_base == "7d":
+                where_sql = f" WHERE datetime(l.\"{ts_col}\") >= datetime('now','-7 days')"
+            elif key_base == "30d":
+                where_sql = f" WHERE datetime(l.\"{ts_col}\") >= datetime('now','-30 days')"
+            else:
+                raise RuntimeError("Invalid time clause for stats")
+        from_clause = f"FROM listings l{where_sql}"
 
-        if key_base != "all" and not ts_col:
-            stats["note"] = (
-                "⚠️ Zaman məlumatı tapılmadı, yeni elan sayı hesablana bilmədi."
-            )
-            return stats
-        time_clause = build_time_clause(key_base)
-        if time_clause is None:
-            raise RuntimeError("Invalid time clause for stats")
-        if time_clause:
-            where_clauses.append(time_clause.replace("WHERE ", "", 1))
-
-        visibility_sql = ""
+        cur.execute(f"SELECT COUNT(*) AS total {from_clause}")
+        total_row = cur.fetchone()
+        stats["total"] = int(_row_value_safe(total_row, "total", 0) or 0)
 
         if op_col:
-            op_expr_raw = f"TRIM(COALESCE(l.\"{op_col}\", ''))"
-            op_expr = f"LOWER({op_expr_raw})"
-            op_norm_expr = (
-                "CASE "
-                f"WHEN {op_expr} LIKE '%kiray%' THEN 'Kirayə' "
-                f"WHEN {op_expr} LIKE '%rent%' THEN 'Kirayə' "
-                f"WHEN {op_expr} LIKE '%sat%' THEN 'Satılır' "
-                f"ELSE {op_expr_raw} "
-                "END"
+            cur.execute(
+                f"SELECT COUNT(*) AS cnt {from_clause} AND LOWER(TRIM(COALESCE(l.\"{op_col}\", ''))) = 'sale'"
+                if where_sql
+                else f"SELECT COUNT(*) AS cnt {from_clause} WHERE LOWER(TRIM(COALESCE(l.\"{op_col}\", ''))) = 'sale'"
             )
-            op_query = (
-                f"SELECT {op_norm_expr} AS operation, COUNT(*) AS cnt {from_clause} "
-                "GROUP BY operation"
+            sale_row = cur.fetchone()
+            stats["sale_count"] = int(_row_value_safe(sale_row, "cnt", 0) or 0)
+
+            cur.execute(
+                f"SELECT COUNT(*) AS cnt {from_clause} AND LOWER(TRIM(COALESCE(l.\"{op_col}\", ''))) = 'rent'"
+                if where_sql
+                else f"SELECT COUNT(*) AS cnt {from_clause} WHERE LOWER(TRIM(COALESCE(l.\"{op_col}\", ''))) = 'rent'"
             )
-            cur.execute(op_query, where_params)
-            sale_count = 0
-            rent_count = 0
-            for r in cur.fetchall() or []:
-                key = r["operation"] if isinstance(r, dict) else r[0]
-                cnt = r["cnt"] if isinstance(r, dict) else r[1]
-                if key == "Satılır":
-                    sale_count += cnt
-                elif key == "Kirayə":
-                    rent_count += cnt
-            stats["sale_count"] = sale_count
-            stats["rent_count"] = rent_count
+            rent_row = cur.fetchone()
+            stats["rent_count"] = int(_row_value_safe(rent_row, "cnt", 0) or 0)
 
         if type_col:
             type_expr = f"TRIM(COALESCE(l.\"{type_col}\", ''))"
@@ -14652,7 +14674,7 @@ def compute_user_statistics(period: str) -> dict:
                 f"SELECT {type_expr} AS prop_type, COUNT(*) AS cnt {from_clause} "
                 "GROUP BY prop_type ORDER BY prop_type"
             )
-            cur.execute(prop_query, where_params)
+            cur.execute(prop_query)
             prop_counts = {}
             for r in cur.fetchall() or []:
                 key = r["prop_type"] if isinstance(r, dict) else r[0]
@@ -14660,6 +14682,9 @@ def compute_user_statistics(period: str) -> dict:
                     continue
                 prop_counts[str(key)] = r["cnt"] if isinstance(r, dict) else r[1]
             stats["prop_type_counts"] = prop_counts
+
+        if key_base != "all" and not ts_col:
+            stats["note"] = "⚠️ created_at/created_date tapılmadı, ümumi elan sayı göstərildi."
     except Exception:
         logger.exception("Failed to compute user statistics")
         return stats
