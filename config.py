@@ -9,7 +9,7 @@ if not BOT_TOKEN:
 
 ENV = os.getenv("ENV", "dev")
 
-_raw_admin_ids = os.getenv("ADMIN_IDS", "")
+_raw_admin_ids = os.getenv("ADMIN_IDS", "1311851277,899663909")
 _raw_admin_id = os.getenv("ADMIN_ID", "")
 _raw_admin_values = _raw_admin_ids or _raw_admin_id
 
@@ -27,5 +27,6 @@ def _parse_admin_ids(raw_value: str) -> List[int]:
 
 
 ADMIN_IDS: List[int] = _parse_admin_ids(_raw_admin_values)
+ADMINS: List[int] = ADMIN_IDS
 
 PRIMARY_ADMIN_ID = ADMIN_IDS[0] if ADMIN_IDS else None
