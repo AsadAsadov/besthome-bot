@@ -165,7 +165,7 @@ class _BotProxy:
 
         return attr
 
-ADMIN_ID = 1311851277
+ADMINS = [1311851277, 899663909]
 CHANNEL_ID = -1001878623087  # Bot bu kanalda admin olmalıdır
 
 bot = _BotProxy()
@@ -173,11 +173,10 @@ bot = _BotProxy()
 # ==============================
 # 💾 DATABASE KONFİQURASİYASI
 # ==============================
-from config import ENV, ADMIN_IDS as CONFIG_ADMIN_IDS, PRIMARY_ADMIN_ID
+from config import ENV, ADMIN_IDS as CONFIG_ADMIN_IDS
 import os
 
-ADMIN_ID = PRIMARY_ADMIN_ID or ADMIN_ID
-ADMIN_IDS = CONFIG_ADMIN_IDS or [ADMIN_ID]
+ADMIN_IDS = CONFIG_ADMIN_IDS or ADMINS
 _raw_auto_update_sender_ids = os.getenv("AUTO_UPDATE_SENDER_IDS", "")
 AUTO_UPDATE_SENDER_IDS = {
     int(item)
@@ -1267,7 +1266,7 @@ def callback_guard(handler):
             chat_id = None
             if call and getattr(call, "message", None):
                 chat_id = call.message.chat.id
-            primary_admin = ADMIN_IDS[0] if ADMIN_IDS else ADMIN_ID
+            primary_admin = ADMIN_IDS[0] if ADMIN_IDS else None
             notify_chat_id = chat_id if chat_id and is_admin(chat_id) else primary_admin
             if notify_chat_id is not None:
                 safe_admin_step(
@@ -4118,11 +4117,16 @@ def is_admin(chat_id: int) -> bool:
 
     try:
         admin_ids = {int(str(x).strip()) for x in ADMIN_IDS}
-        if ADMIN_ID is not None:
-            admin_ids.add(int(str(ADMIN_ID).strip()))
         return cid in admin_ids
     except Exception:
         return False
+
+def send_message_to_admins(text: str, **kwargs) -> None:
+    for admin_id in ADMIN_IDS:
+        try:
+            bot.send_message(int(admin_id), text, **kwargs)
+        except Exception:
+            logger.exception("Admin send failed chat_id=%s", admin_id)
 
 # Access rule: admins always pass; non-admins must have an active subscription/demo.
 def has_access(chat_id: int) -> bool:
@@ -8194,7 +8198,7 @@ def register_or_update_user_if_needed(message, start_arg: str) -> bool:
                         "⛔ Blokla", callback_data=f"block_user:{chat_id}"
                     )
                 )
-                bot.send_message(ADMIN_ID, admin_text, reply_markup=mk)
+                send_message_to_admins(admin_text, reply_markup=mk)
             except Exception as e:
                 logger.warning(
                     "Failed to notify admin about new user %s: %s", chat_id, e
@@ -10175,7 +10179,7 @@ def cb_paytype_card(c):
         return
     chat_id = c.message.chat.id
     try:
-        bot.send_message(ADMIN_ID, f"⚠️ User clicked card payment placeholder: {chat_id}")
+        send_message_to_admins(f"⚠️ User clicked card payment placeholder: {chat_id}")
     except Exception:
         logger.warning("Admin notification for card placeholder failed chat_id=%s", chat_id)
     send_payment_menu(chat_id)
@@ -10398,7 +10402,7 @@ def cb_demo_activate(c):
         "⏳ Demo bitmə tarixi:\n"
         f"{display_expiry.strftime('%d.%m.%Y %H:%M')}"
     )
-    bot.send_message(ADMIN_ID, admin_text)
+    send_message_to_admins(admin_text)
     reset_user_state(chat_id)
     reset_search_state(chat_id)
     set_ui_context(chat_id, UI_CONTEXT_MAIN)
@@ -10451,7 +10455,7 @@ def cb_paydone(c):
             "❌ Rədd et", callback_data=f"manualpay|reject|{request_id}"
         ),
     )
-    bot.send_message(ADMIN_ID, admin_text, reply_markup=mk)
+    send_message_to_admins(admin_text, reply_markup=mk)
     bot.send_message(
         chat_id,
         "✅ Ödəniş sorğunuz adminə göndərildi. Nəticə barədə məlumat veriləcək.",
@@ -11045,7 +11049,7 @@ def step_link(message):
                 "❌ Sil", callback_data=f"admin_delete:{new_id}"
             ),
         )
-        bot.send_message(ADMIN_ID, preview, parse_mode="Markdown", reply_markup=mk)
+        send_message_to_admins(preview, parse_mode="Markdown", reply_markup=mk)
     except:
         pass
 
