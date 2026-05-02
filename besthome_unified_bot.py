@@ -1054,21 +1054,30 @@ def _table_columns(conn: sqlite3.Connection, table_name: str) -> set:
     except Exception:
         return set()
 
-def normalize_text(text: str) -> str:
-    mapping = {
-        "ə": "e",
-        "ş": "s",
+def normalize(text):
+    if not text:
+        return ""
+
+    text = text.strip().lower()
+
+    replacements = {
         "ı": "i",
+        "ə": "e",
         "ö": "o",
         "ü": "u",
-        "ç": "c",
         "ğ": "g",
+        "ş": "s",
+        "ç": "c",
     }
-    text = (text or "").lower().strip()
-    for k, v in mapping.items():
+
+    for k, v in replacements.items():
         text = text.replace(k, v)
-    text = " ".join(text.split())
-    return text
+
+    return " ".join(text.split())
+
+
+def normalize_text(text: str) -> str:
+    return normalize(text)
 
 def _extract_first_number(value: str) -> Optional[float]:
     match = re.search(r"(\d+(?:[.,]\d+)?)", value or "")
@@ -6602,7 +6611,7 @@ def build_absheron_settlement_sql(
     cur, table: str, region: Optional[str], settlement: Optional[str], prefix: str = ""
 ):
     region_norm = normalize_region(region or "")
-    settlement_val = (settlement or "").strip()
+    settlement_val = normalize(settlement)
     if region_norm != "abseron":
         return "", []
 
@@ -6625,8 +6634,9 @@ def build_absheron_settlement_sql(
     if settlement_val:
         if not settlement_col:
             return " AND 1=0", []
-        sql += f' AND LOWER(COALESCE({prefix}"{settlement_col}", \'\')) = LOWER(?)'
-        params.append(settlement_val)
+        sql += f' AND {prefix}"{settlement_col}" IS NOT NULL'
+        sql += f' AND LOWER(COALESCE({prefix}"{settlement_col}", \'\')) LIKE ?'
+        params.append(f"%{settlement_val}%")
     return sql, params
 
 def count_main_active_listings(
@@ -14370,7 +14380,7 @@ def matches_region_rayon(ev: dict, filters: dict) -> bool:
             listing_region
         ):
             return False
-        return listing_settlement == settlement.lower()
+        return normalize(listing_settlement) == normalize(settlement)
 
     if rayon and rayon != "all":
         return rayon.lower() in listing_region
