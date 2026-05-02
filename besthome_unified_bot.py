@@ -2595,9 +2595,9 @@ def _chunk_list(values: List[int], size: int = 900) -> List[List[int]]:
 def get_operation_sql_values(op_code: str) -> Tuple[str, ...]:
     op_norm = normalize_operation_value(op_code) or (op_code or "")
     if op_norm == "sale":
-        return ("satılır", "satilir")
+        return ("%sat%",)
     if op_norm == "rent":
-        return ("kirayə", "kiraye")
+        return ("%kiray%",)
     return tuple()
 
 def count_listings_by_op_for_ids(
@@ -2621,9 +2621,9 @@ def count_listings_by_op_for_ids(
                 SELECT COUNT(*)
                 FROM listings
                 WHERE id IN ({placeholders})
-                  AND LOWER(operation) IN ({op_placeholders})
+                  AND LOWER(COALESCE(operation,'')) LIKE ?
                 """,
-                (*batch, *candidates),
+                (*batch, candidates[0]),
             )
             row = cur.fetchone()
             total += int(row[0]) if row and row[0] is not None else 0
@@ -2677,9 +2677,9 @@ def count_new_listings_by_op(
             SELECT COUNT(*)
             FROM listings
             WHERE id > ? AND id <= ?
-              AND LOWER(operation) IN ({placeholders})
+              AND LOWER(COALESCE(operation,'')) LIKE ?
             """,
-            (from_id, to_id, *candidates),
+            (from_id, to_id, candidates[0]),
         )
         row = cur.fetchone()
         return int(row[0]) if row and row[0] is not None else 0
@@ -2740,10 +2740,10 @@ def count_last_24h_listings(db_path: str) -> Tuple[int, int, int]:
                 f"""
                 SELECT COUNT(*)
                 FROM listings
-                WHERE LOWER(operation) IN ({placeholders})
+                WHERE LOWER(COALESCE(operation,'')) LIKE ?
                 """
                 + date_sql,
-                (*sale_candidates, *date_params),
+                (sale_candidates[0], *date_params),
             )
             row = cur.fetchone()
             sale_count = int(row[0]) if row and row[0] is not None else 0
@@ -2754,10 +2754,10 @@ def count_last_24h_listings(db_path: str) -> Tuple[int, int, int]:
                 f"""
                 SELECT COUNT(*)
                 FROM listings
-                WHERE LOWER(operation) IN ({placeholders})
+                WHERE LOWER(COALESCE(operation,'')) LIKE ?
                 """
                 + date_sql,
-                (*rent_candidates, *date_params),
+                (rent_candidates[0], *date_params),
             )
             row = cur.fetchone()
             rent_count = int(row[0]) if row and row[0] is not None else 0
@@ -6609,38 +6609,6 @@ def build_rayon_filter_sql(cur, table: str, rayon: Optional[str], prefix: str):
     conds = [f"LOWER(COALESCE({col},'')) LIKE ?" for col in targets]
     params = [f"%{rayon.lower()}%"] * len(targets)
     return " AND (" + " OR ".join(conds) + ")", params
-
-def build_absheron_settlement_sql(
-    cur, table: str, region: Optional[str], settlement: Optional[str], prefix: str = ""
-):
-    region_norm = normalize_region(region or "")
-    settlement_val = normalize(settlement)
-    if region_norm != "abseron":
-        return "", []
-
-    cols = get_table_columns(cur, table)
-    region_targets = []
-    if table == "listings" and "region_name" in cols:
-        region_targets.append(f'{prefix}"{cols["region_name"]}"')
-    for name in ("region", "rayon"):
-        if name in cols:
-            region_targets.append(f'{prefix}"{cols[name]}"')
-    region_targets = list(dict.fromkeys(region_targets))
-    if not region_targets:
-        return "", []
-
-    region_conds = [f"LOWER(COALESCE({col},'')) LIKE ?" for col in region_targets]
-    sql = " AND (" + " OR ".join(region_conds) + ")"
-    params = ["%abşeron%"] * len(region_targets)
-
-    settlement_col = cols.get("settlement")
-    if settlement_val:
-        if not settlement_col:
-            return " AND 1=0", []
-        sql += f' AND {prefix}"{settlement_col}" IS NOT NULL'
-        sql += f' AND LOWER(COALESCE({prefix}"{settlement_col}", \'\')) LIKE ?'
-        params.append(f"%{settlement_val}%")
-    return sql, params
 
 def count_main_active_listings(
     op_code: str = "all",
@@ -14157,10 +14125,12 @@ def build_filters_sql(
     params = []
 
     # Əməliyyat
-    op_value = resolve_operation_filter(op_code, mode)
-    if op_value:
-        sql += " AND operation = ?"
-        params.append(op_value)
+    if op_code == "sat":
+        sql += " AND LOWER(COALESCE(operation,'')) LIKE ?"
+        params.append("%sat%")
+    elif op_code == "kir":
+        sql += " AND LOWER(COALESCE(operation,'')) LIKE ?"
+        params.append("%kiray%")
 
     # Əmlak tipi
     _, prop_values = get_property_type_filter_values(prop_code)
@@ -14207,21 +14177,6 @@ BAKU_RAYONS = [
     "Yasamal",
 ]
 ABS_RAYONS = ["Xırdalan", "Abşeron", "Masazır", "Digər"]
-ABSHERON_SETTLEMENTS = [
-    "Xırdalan",
-    "Masazır",
-    "Hökməli",
-    "Saray",
-    "Pirəkəşkül",
-    "Novxanı",
-    "Mehdiabad",
-    "Qobu",
-    "Məmmədli",
-    "Fatmayı",
-    "Digah",
-    "Aşağı Güzdək",
-    "Zuğulba",
-]
 SUM_RAYONS = ["Sumqayıt"]
 ALL_RAYONS = sorted(set(BAKU_RAYONS + ABS_RAYONS + SUM_RAYONS + ["Digər"]))
 REGION_OPTIONS = {
@@ -14274,24 +14229,6 @@ def get_region_filter_options(region_code: str) -> List[str]:
     group_norm = {normalize_region(name) for name in group}
     filtered = [name for name in regions if normalize_region(name) in group_norm]
     return filtered or group
-
-def absheron_settlements_keyboard() -> types.InlineKeyboardMarkup:
-    mk = types.InlineKeyboardMarkup()
-    mk.add(types.InlineKeyboardButton("🏙 Hamısı", callback_data="settlement_all"))
-    row: List[types.InlineKeyboardButton] = []
-    for settlement in ABSHERON_SETTLEMENTS:
-        row.append(
-            types.InlineKeyboardButton(
-                settlement, callback_data=f"settlement_{settlement}"
-            )
-        )
-        if len(row) == 2:
-            mk.row(*row)
-            row = []
-    if row:
-        mk.row(*row)
-    mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="fs|bk"))
-    return mk
 
 def structured_send(chat_id, message, text, markup):
     if message:
@@ -14365,26 +14302,8 @@ def price_input_keyboard() -> types.InlineKeyboardMarkup:
 def matches_region_rayon(ev: dict, filters: dict) -> bool:
     region = filters.get("region") or "all"
     rayon = filters.get("rayon")
-    settlement = (filters.get("settlement") or "").strip()
     listing_region = get_listing_region_value(ev).lower()
-    listing_settlement = (
-        str(
-            ev.get("settlement")
-            or ev.get("Settlement")
-            or ev.get("qesebe")
-            or ev.get("Qesebe")
-            or ""
-        )
-        .strip()
-        .lower()
-    )
 
-    if normalize_region(str(region)) == "abseron" and settlement:
-        if "abşeron" not in listing_region and "abseron" not in normalize_region(
-            listing_region
-        ):
-            return False
-        return normalize(listing_settlement) == normalize(settlement)
 
     if rayon and rayon != "all":
         return rayon.lower() in listing_region
@@ -14668,17 +14587,17 @@ def compute_user_statistics(period: str) -> dict:
 
         if op_col:
             cur.execute(
-                f"SELECT COUNT(*) AS cnt {from_clause} AND LOWER(TRIM(COALESCE(l.\"{op_col}\", ''))) = 'sale'"
+                f"SELECT COUNT(*) AS cnt {from_clause} AND LOWER(TRIM(COALESCE(l.\"{op_col}\", ''))) LIKE '%sat%'"
                 if where_sql
-                else f"SELECT COUNT(*) AS cnt {from_clause} WHERE LOWER(TRIM(COALESCE(l.\"{op_col}\", ''))) = 'sale'"
+                else f"SELECT COUNT(*) AS cnt {from_clause} WHERE LOWER(TRIM(COALESCE(l.\"{op_col}\", ''))) LIKE '%sat%'"
             )
             sale_row = cur.fetchone()
             stats["sale_count"] = int(_row_value_safe(sale_row, "cnt", 0) or 0)
 
             cur.execute(
-                f"SELECT COUNT(*) AS cnt {from_clause} AND LOWER(TRIM(COALESCE(l.\"{op_col}\", ''))) = 'rent'"
+                f"SELECT COUNT(*) AS cnt {from_clause} AND LOWER(TRIM(COALESCE(l.\"{op_col}\", ''))) LIKE '%kiray%'"
                 if where_sql
-                else f"SELECT COUNT(*) AS cnt {from_clause} WHERE LOWER(TRIM(COALESCE(l.\"{op_col}\", ''))) = 'rent'"
+                else f"SELECT COUNT(*) AS cnt {from_clause} WHERE LOWER(TRIM(COALESCE(l.\"{op_col}\", ''))) LIKE '%kiray%'"
             )
             rent_row = cur.fetchone()
             stats["rent_count"] = int(_row_value_safe(rent_row, "cnt", 0) or 0)
@@ -15291,9 +15210,7 @@ def query_structured_results(
     min_p = filters.get("min_price")
     max_p = filters.get("max_price")
     region_for_debug = filters.get("rayon") or filters.get("region")
-    settlement_for_debug = filters.get("settlement")
     print("FILTER DEBUG → region:", region_for_debug)
-    print("FILTER DEBUG → settlement:", settlement_for_debug)
     if min_p is None and max_p is None:
         price_code = filters.get("price", "s0")
         min_p, max_p = decode_price_range(price_code)
@@ -15341,29 +15258,6 @@ def query_structured_results(
         d["__source"] = "local"
         results.append(d)
     conn.close()
-
-    def normalize(text):
-        if not text:
-            return ""
-        text = str(text).lower().strip()
-        repl = {
-            "ı": "i", "ə": "e", "ö": "o", "ü": "u",
-            "ğ": "g", "ş": "s", "ç": "c"
-        }
-        for k, v in repl.items():
-            text = text.replace(k, v)
-        return text
-
-    settlement = filters.get("settlement")
-    print("DEBUG settlement:", settlement)
-    print("DEBUG listings before:", len(results))
-    if settlement and settlement != "all":
-        s_norm = normalize(settlement)
-        results = [
-            x for x in results
-            if normalize(x.get("settlement")) == s_norm
-        ]
-    print("DEBUG listings after:", len(results))
 
     filtered = []
     for ev in results:
@@ -15698,9 +15592,12 @@ def query_keyword_results(
         )
         base_where = "1=1"
         params: List[Any] = []
-        if operation_value:
-            base_where += " AND operation = ?"
-            params.append(operation_value)
+        if operation_value == "sale":
+            base_where += " AND LOWER(COALESCE(operation,'')) LIKE ?"
+            params.append("%sat%")
+        elif operation_value == "rent":
+            base_where += " AND LOWER(COALESCE(operation,'')) LIKE ?"
+            params.append("%kiray%")
         if table == "listings":
             base_where += ""
         rows = []
@@ -15953,9 +15850,12 @@ def query_smart_results(
     def build_filters(op_value):
         clauses = ["1=1"]
         params = []
-        if op_value:
-            clauses.append("operation = ?")
-            params.append(op_value)
+        if op_value == "sale":
+            clauses.append("LOWER(COALESCE(operation,'')) LIKE ?")
+            params.append("%sat%")
+        elif op_value == "rent":
+            clauses.append("LOWER(COALESCE(operation,'')) LIKE ?")
+            params.append("%kiray%")
         if price_min is not None:
             clauses.append(
                 "CAST(REPLACE(REPLACE(price, ',', ''), ' ', '') AS INTEGER) >= ?"
@@ -16106,29 +16006,6 @@ def query_smart_results(
         d["__source"] = "local"
         results.append(d)
     conn.close()
-
-    def normalize(text):
-        if not text:
-            return ""
-        text = str(text).lower().strip()
-        repl = {
-            "ı": "i", "ə": "e", "ö": "o", "ü": "u",
-            "ğ": "g", "ş": "s", "ç": "c"
-        }
-        for k, v in repl.items():
-            text = text.replace(k, v)
-        return text
-
-    settlement = filters.get("settlement")
-    print("DEBUG settlement:", settlement)
-    print("DEBUG listings before:", len(results))
-    if settlement and settlement != "all":
-        s_norm = normalize(settlement)
-        results = [
-            x for x in results
-            if normalize(x.get("settlement")) == s_norm
-        ]
-    print("DEBUG listings after:", len(results))
 
     filtered = []
     for ev in results:
@@ -16845,16 +16722,6 @@ def render_region_step(chat_id, message=None):
     mk.add(types.InlineKeyboardButton("⬅️ Geri", callback_data="fs|bk"))
     structured_send(chat_id, message, "📍 Regionu seç:", mk)
 
-def render_absheron_settlement_step(chat_id, message=None):
-    st = search_state.setdefault(chat_id, {})
-    st["step"] = "settlement"
-    structured_send(
-        chat_id,
-        message,
-        "📍 Abşeron rayonu üçün qəsəbəni seçin:",
-        absheron_settlements_keyboard(),
-    )
-
 def render_rayon_step(chat_id, message=None):
     st = search_state.setdefault(chat_id, {})
     st["step"] = "rayon"
@@ -16929,8 +16796,6 @@ def structured_go_back(chat_id, message=None):
         render_prop_step(chat_id, message)
     elif step == "region":
         render_region_step(chat_id, message)
-    elif step == "settlement":
-        render_absheron_settlement_step(chat_id, message)
     elif step == "rayon":
         render_rayon_step(chat_id, message)
     elif step == "price":
@@ -16999,7 +16864,6 @@ def cb_structured(c):
         filters = st.setdefault("filters", {})
         region_code = parts[2]
         filters.pop("rayon", None)
-        filters.pop("settlement", None)
         if region_code == "all":
             filters["region"] = None
             print("Selected region:", "all")
@@ -17016,8 +16880,8 @@ def cb_structured(c):
             filters["rayon"] = "Sumqayıt"
             render_price_step(chat_id, c.message)
         elif region_code == "abs":
-            render_absheron_settlement_step(chat_id, c.message)
-            return
+            filters["rayon"] = "Abşeron"
+            render_room_step(chat_id, c.message)
         else:
             render_rayon_step(chat_id, c.message)
     elif action == "rn":
@@ -17065,41 +16929,6 @@ def cb_structured(c):
             chat_id,
             offset=0,
         )
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("settlement_"))
-@callback_guard
-def cb_absheron_settlement(c):
-    if not ensure_allowed_cb(c):
-        return
-    chat_id = c.message.chat.id
-    st = search_state.setdefault(
-        chat_id,
-        {
-            "mode": "structured",
-            "filters": {},
-            "history": [],
-        },
-    )
-    filters = st.setdefault("filters", {})
-    filters["region"] = "abs"
-    filters["rayon"] = "Abşeron"
-
-    data = c.data
-    if data == "settlement_all":
-        filters["settlement"] = "all"
-    elif data.startswith("settlement_"):
-        selected = data.replace("settlement_", "")
-        filters["settlement"] = selected
-
-    settlement = filters.get("settlement")
-    if not settlement:
-        safe_answer_callback_query(c.id)
-        return
-
-    print("Selected settlement:", settlement)
-    structured_push_history(chat_id)
-    render_price_step(chat_id, c.message)
-    safe_answer_callback_query(c.id)
 
 def cancel_price_range_flow(chat_id: int) -> None:
     user_state[chat_id] = None
