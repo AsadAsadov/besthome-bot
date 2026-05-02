@@ -2591,16 +2591,23 @@ def fetch_listing_ids(db_path: str) -> Set[int]:
 def _chunk_list(values: List[int], size: int = 900) -> List[List[int]]:
     return [values[i : i + size] for i in range(0, len(values), size)]
 
+
+def get_operation_sql_values(op_code: str) -> Tuple[str, ...]:
+    op_norm = normalize_operation_value(op_code) or (op_code or "")
+    if op_norm == "sale":
+        return ("satılır", "satilir")
+    if op_norm == "rent":
+        return ("kirayə", "kiraye")
+    return tuple()
+
 def count_listings_by_op_for_ids(
     db_path: str, op_code: str, listing_ids: Set[int]
 ) -> int:
     if not listing_ids:
         return 0
-    op_norm = normalize_operation_value(op_code) or op_code
-    op_value = detect_db_operation_value(op_norm, "main") if op_norm else None
-    if not op_value:
+    candidates = get_operation_sql_values(op_code)
+    if not candidates:
         return 0
-    candidates = {op_value, str(op_value).upper()}
     ids_list = list(listing_ids)
     conn = sqlite3.connect(db_path)
     try:
@@ -2614,7 +2621,7 @@ def count_listings_by_op_for_ids(
                 SELECT COUNT(*)
                 FROM listings
                 WHERE id IN ({placeholders})
-                  AND operation IN ({op_placeholders})
+                  AND LOWER(operation) IN ({op_placeholders})
                 """,
                 (*batch, *candidates),
             )
@@ -2658,11 +2665,9 @@ def count_recent_listings_for_ids(db_path: str, listing_ids: Set[int]) -> int:
 def count_new_listings_by_op(
     db_path: str, op_code: str, from_id: int, to_id: int
 ) -> int:
-    op_norm = normalize_operation_value(op_code) or op_code
-    op_value = detect_db_operation_value(op_norm, "main") if op_norm else None
-    if not op_value:
+    candidates = get_operation_sql_values(op_code)
+    if not candidates:
         return 0
-    candidates = {op_value, str(op_value).upper()}
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.cursor()
@@ -2672,7 +2677,7 @@ def count_new_listings_by_op(
             SELECT COUNT(*)
             FROM listings
             WHERE id > ? AND id <= ?
-              AND operation IN ({placeholders})
+              AND LOWER(operation) IN ({placeholders})
             """,
             (from_id, to_id, *candidates),
         )
@@ -2706,10 +2711,8 @@ def count_new_listings_today(db_path: str, from_id: int, to_id: int) -> int:
         conn.close()
 
 def count_last_24h_listings(db_path: str) -> Tuple[int, int, int]:
-    sale_value = detect_db_operation_value("sale", "main")
-    rent_value = detect_db_operation_value("rent", "main")
-    sale_candidates = {sale_value, str(sale_value).upper()} if sale_value else set()
-    rent_candidates = {rent_value, str(rent_value).upper()} if rent_value else set()
+    sale_candidates = get_operation_sql_values("sale")
+    rent_candidates = get_operation_sql_values("rent")
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.cursor()
@@ -2737,7 +2740,7 @@ def count_last_24h_listings(db_path: str) -> Tuple[int, int, int]:
                 f"""
                 SELECT COUNT(*)
                 FROM listings
-                WHERE operation IN ({placeholders})
+                WHERE LOWER(operation) IN ({placeholders})
                 """
                 + date_sql,
                 (*sale_candidates, *date_params),
@@ -2751,7 +2754,7 @@ def count_last_24h_listings(db_path: str) -> Tuple[int, int, int]:
                 f"""
                 SELECT COUNT(*)
                 FROM listings
-                WHERE operation IN ({placeholders})
+                WHERE LOWER(operation) IN ({placeholders})
                 """
                 + date_sql,
                 (*rent_candidates, *date_params),
@@ -14274,6 +14277,7 @@ def get_region_filter_options(region_code: str) -> List[str]:
 
 def absheron_settlements_keyboard() -> types.InlineKeyboardMarkup:
     mk = types.InlineKeyboardMarkup()
+    mk.add(types.InlineKeyboardButton("🏙 Hamısı", callback_data="settlement_all"))
     row: List[types.InlineKeyboardButton] = []
     for settlement in ABSHERON_SETTLEMENTS:
         row.append(
@@ -15305,12 +15309,7 @@ def query_structured_results(
         date_col = detect_table_date_column(cur, "listings")
         date_expr = build_listing_date_expr(cur, "listings", date_col)
         date_sql, date_params = build_date_range_clause(date_expr, date_days)
-        abs_sql, abs_params = build_absheron_settlement_sql(
-            cur,
-            "listings",
-            filters.get("rayon") or filters.get("region"),
-            filters.get("settlement"),
-        )
+        abs_sql, abs_params = "", []
         order_parts = build_listing_order_parts(cur, "listings", date_col)
         order_clause = f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
         visibility_sql = ""
@@ -15333,12 +15332,7 @@ def query_structured_results(
     date_col = detect_table_date_column(cur, "listings_approved")
     date_expr = build_listing_date_expr(cur, "listings_approved", date_col)
     date_sql, date_params = build_date_range_clause(date_expr, date_days)
-    abs_sql, abs_params = build_absheron_settlement_sql(
-        cur,
-        "listings_approved",
-        filters.get("rayon") or filters.get("region"),
-        filters.get("settlement"),
-    )
+    abs_sql, abs_params = "", []
     order_parts = build_listing_order_parts(cur, "listings_approved", date_col)
     order_clause = f" ORDER BY {', '.join(order_parts)}" if order_parts else ""
     cur.execute(base + flt + date_sql + abs_sql + order_clause, params + date_params + abs_params)
@@ -15347,6 +15341,29 @@ def query_structured_results(
         d["__source"] = "local"
         results.append(d)
     conn.close()
+
+    def normalize(text):
+        if not text:
+            return ""
+        text = str(text).lower().strip()
+        repl = {
+            "ı": "i", "ə": "e", "ö": "o", "ü": "u",
+            "ğ": "g", "ş": "s", "ç": "c"
+        }
+        for k, v in repl.items():
+            text = text.replace(k, v)
+        return text
+
+    settlement = filters.get("settlement")
+    print("DEBUG settlement:", settlement)
+    print("DEBUG listings before:", len(results))
+    if settlement and settlement != "all":
+        s_norm = normalize(settlement)
+        results = [
+            x for x in results
+            if normalize(x.get("settlement")) == s_norm
+        ]
+    print("DEBUG listings after:", len(results))
 
     filtered = []
     for ev in results:
@@ -16089,6 +16106,29 @@ def query_smart_results(
         d["__source"] = "local"
         results.append(d)
     conn.close()
+
+    def normalize(text):
+        if not text:
+            return ""
+        text = str(text).lower().strip()
+        repl = {
+            "ı": "i", "ə": "e", "ö": "o", "ü": "u",
+            "ğ": "g", "ş": "s", "ç": "c"
+        }
+        for k, v in repl.items():
+            text = text.replace(k, v)
+        return text
+
+    settlement = filters.get("settlement")
+    print("DEBUG settlement:", settlement)
+    print("DEBUG listings before:", len(results))
+    if settlement and settlement != "all":
+        s_norm = normalize(settlement)
+        results = [
+            x for x in results
+            if normalize(x.get("settlement")) == s_norm
+        ]
+    print("DEBUG listings after:", len(results))
 
     filtered = []
     for ev in results:
@@ -17040,15 +17080,22 @@ def cb_absheron_settlement(c):
             "history": [],
         },
     )
-    settlement = c.data[len("settlement_") :].strip()
+    filters = st.setdefault("filters", {})
+    filters["region"] = "abs"
+    filters["rayon"] = "Abşeron"
+
+    data = c.data
+    if data == "settlement_all":
+        filters["settlement"] = "all"
+    elif data.startswith("settlement_"):
+        selected = data.replace("settlement_", "")
+        filters["settlement"] = selected
+
+    settlement = filters.get("settlement")
     if not settlement:
         safe_answer_callback_query(c.id)
         return
 
-    filters = st.setdefault("filters", {})
-    filters["region"] = "abs"
-    filters["rayon"] = "Abşeron"
-    filters["settlement"] = settlement
     print("Selected settlement:", settlement)
     structured_push_history(chat_id)
     render_price_step(chat_id, c.message)
