@@ -258,6 +258,7 @@ SUPPORT_THREAD_STATUS_CLOSED = "CLOSED"
 support_admin_state: Dict[int, Dict[str, Optional[Union[str, int]]]] = {}
 support_last_admin_notify_ts: Dict[int, float] = {}
 welcome_back_sent: Set[int] = set()
+phone_request_prompted: Set[int] = set()
 
 AZ_PHONE_PREFIXES = {"50", "51", "55", "70", "77", "99"}
 
@@ -429,24 +430,25 @@ def handle_start(message):
     text = message.text or ""
     parts = text.split(maxsplit=1)
     start_arg = parts[1].strip().lower() if len(parts) > 1 else ""
+    existing_before_start = None
+    created_for_start = False
     try:
+        existing_before_start = user_db.get_user(chat_id, use_cache=False)
         _ensure_start_user_record(message, start_arg)
+        created_for_start = existing_before_start is None
     except Exception:
         logger.exception("Failed to upsert /start user in Supabase chat_id=%s", chat_id)
-    phone_row = get_phone_verification_row(chat_id)
-    if not phone_row:
-        logger.info("NEW_USER_STARTED user_id=%s", chat_id)
-        send_phone_request(chat_id)
+    if should_request_phone(chat_id):
+        if chat_id in phone_request_prompted:
+            logger.info("PHONE_REQUEST_ALREADY_SHOWN user_id=%s", chat_id)
+        else:
+            if created_for_start:
+                logger.info("NEW_USER_STARTED user_id=%s", chat_id)
+            else:
+                logger.info("RETURNING_USER_MISSING_PHONE user_id=%s", chat_id)
+            send_phone_request(chat_id)
         return
-    is_verified = (
-        bool(phone_row["is_verified"])
-        if phone_row and "is_verified" in phone_row.keys()
-        else False
-    )
-    if not is_verified:
-        logger.info("RETURNING_USER user_id=%s", chat_id)
-        send_phone_request(chat_id)
-        return
+    logger.info("PHONE_REQUEST_SKIPPED_EXISTING_USER user_id=%s", chat_id)
     logger.info("RETURNING_USER user_id=%s", chat_id)
     if chat_id not in welcome_back_sent:
         bot.send_message(
@@ -553,14 +555,24 @@ def handle_contact(message):
         return
     now_iso = datetime.now(timezone.utc).isoformat()
     row = get_phone_verification_row(chat_id)
-    if row and "is_verified" in row.keys() and row["is_verified"]:
+    existing_phone = row.get("phone") if row else None
+    if existing_phone and str(existing_phone).strip():
+        logger.info("PHONE_CONTACT_SKIPPED_EXISTING_USER user_id=%s", chat_id)
+        bot.send_message(
+            chat_id,
+            "✅ Nömrən artıq təsdiqlənib.",
+            reply_markup=types.ReplyKeyboardRemove(),
+        )
+        reset_user_state(chat_id)
+        restore_reply_keyboard(chat_id)
         return
     if not row:
         try:
-            handle_start_attribution_and_demo(message, "")
+            _ensure_start_user_record(message, "")
         except Exception:
-            logger.exception("Start logic failed after phone verification")
+            logger.exception("Failed to create user before phone verification chat_id=%s", chat_id)
     update_phone_verification(chat_id, phone, now_iso)
+    phone_request_prompted.discard(chat_id)
     try:
         text = message.text or ""
         parts = text.split(maxsplit=1)
@@ -574,6 +586,7 @@ def handle_contact(message):
         chat_id,
         "✅ Təşəkkürlər!\n"
         "Hesabın aktiv edildi.",
+        reply_markup=types.ReplyKeyboardRemove(),
     )
     reset_user_state(chat_id)
     restore_reply_keyboard(chat_id)
@@ -1289,6 +1302,15 @@ def update_phone_verification(
     conn.commit()
     conn.close()
 
+def should_request_phone(chat_id: int) -> bool:
+    """Return True only when the Supabase user row is missing or phone is NULL/blank."""
+    record = user_db.get_user(chat_id, use_cache=False)
+    if not record:
+        return True
+    phone = record.get("phone")
+    return phone is None or not str(phone).strip()
+
+
 def send_phone_request(chat_id: int) -> None:
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     keyboard.add(types.KeyboardButton("📱 Nömrəni paylaş", request_contact=True))
@@ -1298,6 +1320,7 @@ def send_phone_request(chat_id: int) -> None:
         "Davam etmək üçün zəhmət olmasa əlaqə nömrəni daxil et.",
         reply_markup=keyboard,
     )
+    phone_request_prompted.add(chat_id)
     logger.info("PHONE_REQUESTED user_id=%s", chat_id)
 
 def set_ui_context(chat_id: int, context: str):
