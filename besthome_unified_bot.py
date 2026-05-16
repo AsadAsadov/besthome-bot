@@ -438,7 +438,12 @@ def handle_start(message):
         created_for_start = existing_before_start is None
     except Exception:
         logger.exception("Failed to upsert /start user in Supabase chat_id=%s", chat_id)
-    if should_request_phone(chat_id):
+    try:
+        phone_missing = should_request_phone(chat_id)
+    except Exception:
+        logger.exception("Failed to check phone before /start flow chat_id=%s", chat_id)
+        phone_missing = True
+    if phone_missing:
         if chat_id in phone_request_prompted:
             logger.info("PHONE_REQUEST_ALREADY_SHOWN user_id=%s", chat_id)
         else:
@@ -448,86 +453,12 @@ def handle_start(message):
                 logger.info("RETURNING_USER_MISSING_PHONE user_id=%s", chat_id)
             send_phone_request(chat_id)
         return
-    logger.info("PHONE_REQUEST_SKIPPED_EXISTING_USER user_id=%s", chat_id)
+    logger.info("PHONE_ALREADY_EXISTS -> skipping contact request user_id=%s", chat_id)
     logger.info("RETURNING_USER user_id=%s", chat_id)
-    if chat_id not in welcome_back_sent:
-        bot.send_message(
-            chat_id,
-            "👋 Yenidən xoş gəldin!\n"
-            "Hesabın aktivdir, botdan istifadə edə bilərsən.\n"
-            "Səni burada görməyə şadıq.",
-        )
-        welcome_back_sent.add(chat_id)
-
-    def fetch_user_row():
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT approved, blocked, demo_end_at, demo_expires_at, paid_until
-            FROM users
-            WHERE chat_id=?
-            """,
-            (chat_id,),
-        )
-        row = cur.fetchone()
-        conn.close()
-        return row
-
-    user_row = fetch_user_row()
-    now = datetime.now(timezone.utc)
-
-    logger.info("START HANDLER HIT user=%s arg=%s", chat_id, start_arg)
-
-    is_first_time = False
-    try:
-        is_first_time = handle_start_attribution_and_demo(message, start_arg)
-    except Exception as e:
-        logger.exception("Start logic failed")
-        bot.send_message(
-            chat_id,
-            "⚠️ Sistem yenilənir, zəhmət olmasa 1 dəqiqə sonra yenidən yoxlayın.",
-        )
-
-    user_row = fetch_user_row()
-
-    def to_utc(dt: Optional[datetime]) -> Optional[datetime]:
-        if not dt:
-            return None
-        if dt.tzinfo is None:
-            return dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
-
-    blocked = bool(user_row["blocked"]) if user_row and "blocked" in user_row.keys() else False
-    paid_until_raw = user_row["paid_until"] if user_row and "paid_until" in user_row.keys() else None
-    demo_end_raw = None
-    if user_row:
-        if "demo_end_at" in user_row.keys() and user_row["demo_end_at"]:
-            demo_end_raw = user_row["demo_end_at"]
-        elif "demo_expires_at" in user_row.keys() and user_row["demo_expires_at"]:
-            demo_end_raw = user_row["demo_expires_at"]
-
-    paid_until_dt = to_utc(parse_dt_safe(paid_until_raw))
-    demo_end_dt = to_utc(parse_dt_safe(demo_end_raw))
-
-    user_active = is_admin(chat_id) or (
-        (not blocked)
-        and (
-            (paid_until_dt is not None and paid_until_dt > now)
-            or (demo_end_dt is not None and demo_end_dt > now)
-        )
-    )
-
-    if not user_active and not is_first_time:
-        bot.send_message(
-            chat_id,
-            "⏳ Pulsuz sınaq müddətiniz başa çatıb.\n"
-            "🔒 Botdan tam şəkildə istifadə etmək üçün\n"
-            "📌 Ödəniş bölməsindən uyğun paketi seçə bilərsiniz.",
-        )
-
+    phone_request_prompted.discard(chat_id)
     reset_user_state(chat_id)
-    restore_reply_keyboard(chat_id)
+    show_main_menu(chat_id)
+    return
 
 @bot.message_handler(commands=["menu"])
 def handle_menu(message):
@@ -542,54 +473,69 @@ def handle_web_app_data(message):
 @bot.message_handler(content_types=["contact"])
 def handle_contact(message):
     chat_id = message.chat.id
+
+    def run_phone_flow_step(step_name: str, func, *args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception:
+            logger.exception("PHONE_FLOW_STEP_FAILED step=%s user_id=%s", step_name, chat_id)
+            return None
+
     contact = message.contact
     if not contact or not contact.phone_number:
         return
+
     phone = normalize_az_phone(contact.phone_number)
     if not phone:
-        bot.send_message(
+        run_phone_flow_step(
+            "invalid_phone_message",
+            bot.send_message,
             chat_id,
             "❌ Nömrə düzgün deyil.\n"
             "Zəhmət olmasa 070XXXXXXX formatında daxil et.",
         )
         return
+
     now_iso = datetime.now(timezone.utc).isoformat()
-    row = get_phone_verification_row(chat_id)
+    row = run_phone_flow_step("load_existing_phone", get_phone_verification_row, chat_id)
     existing_phone = row.get("phone") if row else None
     if existing_phone and str(existing_phone).strip():
-        logger.info("PHONE_CONTACT_SKIPPED_EXISTING_USER user_id=%s", chat_id)
-        bot.send_message(
+        logger.info("PHONE_ALREADY_EXISTS -> skipping contact request user_id=%s", chat_id)
+        phone_request_prompted.discard(chat_id)
+        run_phone_flow_step(
+            "remove_contact_keyboard",
+            bot.send_message,
             chat_id,
-            "✅ Nömrən artıq təsdiqlənib.",
+            "\u2063",
             reply_markup=types.ReplyKeyboardRemove(),
         )
-        reset_user_state(chat_id)
-        restore_reply_keyboard(chat_id)
+        run_phone_flow_step("show_main_menu", show_main_menu, chat_id)
         return
-    if not row:
-        try:
-            _ensure_start_user_record(message, "")
-        except Exception:
-            logger.exception("Failed to create user before phone verification chat_id=%s", chat_id)
-    update_phone_verification(chat_id, phone, now_iso)
-    phone_request_prompted.discard(chat_id)
-    try:
-        text = message.text or ""
-        parts = text.split(maxsplit=1)
-        handle_start_attribution_and_demo(message, parts[1].strip().lower() if len(parts) > 1 else "")
-    except Exception:
-        logger.exception("Start logic failed after phone verification")
-    logger.info(
-        "PHONE_VERIFIED user_id=%s phone=%s", chat_id, mask_phone(phone)
+
+    # A) Save phone to Supabase. This step is retry-safe and cannot block menu recovery.
+    saved = run_phone_flow_step(
+        "save_phone",
+        lambda: (update_phone_verification(chat_id, phone, now_iso), True)[1],
     )
-    bot.send_message(
+    if saved:
+        phone_request_prompted.discard(chat_id)
+        logger.info("PHONE_SAVED_SUCCESSFULLY user_id=%s phone=%s", chat_id, mask_phone(phone))
+
+    # B) Remove contact keyboard.
+    run_phone_flow_step(
+        "remove_contact_keyboard",
+        bot.send_message,
         chat_id,
-        "✅ Təşəkkürlər!\n"
-        "Hesabın aktiv edildi.",
+        "\u2063",
         reply_markup=types.ReplyKeyboardRemove(),
     )
+
+    # C) Send activation confirmation.
+    run_phone_flow_step("send_activation_confirmation", bot.send_message, chat_id, "Account activated")
+
+    # D) Always send main menu, even when an earlier step failed.
     reset_user_state(chat_id)
-    restore_reply_keyboard(chat_id)
+    run_phone_flow_step("show_main_menu", show_main_menu, chat_id)
 
 def _start_user_payload(message, start_arg: str, created: bool = True) -> Dict[str, Any]:
     chat_id = message.chat.id
@@ -1302,16 +1248,26 @@ def update_phone_verification(
     conn.commit()
     conn.close()
 
-def should_request_phone(chat_id: int) -> bool:
-    """Return True only when the Supabase user row is missing or phone is NULL/blank."""
+def user_has_phone(chat_id: int) -> bool:
+    """Check Supabase by chat_id and return True when users.phone is not NULL/blank."""
     record = user_db.get_user(chat_id, use_cache=False)
     if not record:
-        return True
+        return False
     phone = record.get("phone")
-    return phone is None or not str(phone).strip()
+    return phone is not None and bool(str(phone).strip())
+
+
+def should_request_phone(chat_id: int) -> bool:
+    """Return True only when the Supabase user row is missing or phone is NULL/blank."""
+    return not user_has_phone(chat_id)
 
 
 def send_phone_request(chat_id: int) -> None:
+    if user_has_phone(chat_id):
+        logger.info("PHONE_ALREADY_EXISTS -> skipping contact request user_id=%s", chat_id)
+        phone_request_prompted.discard(chat_id)
+        show_main_menu(chat_id)
+        return
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     keyboard.add(types.KeyboardButton("📱 Nömrəni paylaş", request_contact=True))
     bot.send_message(
@@ -7070,6 +7026,20 @@ def send_main_menu(
         parse_mode=parse_mode,
         disable_preview=disable_preview,
     )
+
+def show_main_menu(chat_id: int):
+    """Reliably show the main reply keyboard for onboarding and recovery flows."""
+    try:
+        send_main_menu(chat_id, "📋 Əsas menyudan seçim et:", force=True)
+    except Exception:
+        logger.exception("MAIN_MENU_SEND_FAILED user_id=%s", chat_id)
+        kb = types.ReplyKeyboardMarkup(
+            resize_keyboard=True, one_time_keyboard=False, is_persistent=True, row_width=2
+        )
+        kb.row(MENU_REFRESH_BUTTON)
+        bot.send_message(chat_id, "📋 Əsas menyudan seçim et:", reply_markup=kb)
+    logger.info("MAIN_MENU_SENT user_id=%s", chat_id)
+
 
 def restore_reply_keyboard(chat_id: int, text: Optional[str] = None):
     send_main_menu(chat_id, text or "Əsas menyu", force=True)
@@ -25859,7 +25829,7 @@ def _dict_row(row: Optional[dict]) -> Optional[dict]:
 
 
 def get_phone_verification_row(chat_id: int) -> Optional[dict]:
-    row = user_db.get_user(chat_id)
+    row = user_db.get_user(chat_id, use_cache=False)
     if not row:
         return None
     return {
@@ -25873,16 +25843,17 @@ def get_phone_verification_row(chat_id: int) -> Optional[dict]:
 
 def update_phone_verification(chat_id: int, phone: str, now_iso: str) -> None:
     record, _ = user_db.ensure_user(chat_id)
-    user_db.update_user(
-        chat_id,
-        {
-            "phone": phone,
-            "last_seen_at": now_iso,
-            "last_seen": now_iso,
-            "first_seen_at": record.get("first_seen_at") or now_iso,
-            "is_verified": 1,
-        },
-    )
+    payload = {
+        "chat_id": chat_id,
+        "phone": phone,
+        "last_seen_at": now_iso,
+        "last_seen": now_iso,
+        "first_seen_at": (record or {}).get("first_seen_at") or now_iso,
+        "is_verified": 1,
+    }
+    updated = user_db.upsert("users", payload, on_conflict="chat_id")
+    if not updated:
+        raise RuntimeError("Supabase users phone upsert failed")
 
 
 def get_user_record(chat_id: int) -> Optional[dict]:
