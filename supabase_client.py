@@ -6,31 +6,45 @@ from supabase import create_client
 logger = logging.getLogger("besthome_supabase")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "").strip()
+SUPABASE_SERVICE_ROLE_KEY = (
+    os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    or os.getenv("SUPABASE_SERVICE_KEY", "").strip()
+)
+SUPABASE_ANON_KEY = (
+    os.getenv("SUPABASE_ANON_KEY", "").strip()
+    or os.getenv("ANON_KEY", "").strip()
+)
+SUPABASE_KEY = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_ANON_KEY
 
 
 class _MissingSupabaseConfig:
     def table(self, table_name: str):
         raise RuntimeError(
-            "SUPABASE_URL and SUPABASE_SERVICE_KEY environment variables must be configured "
+            "SUPABASE_URL and a Supabase key (SUPABASE_SERVICE_ROLE_KEY, "
+            "SUPABASE_SERVICE_KEY, or SUPABASE_ANON_KEY) must be configured "
             f"before accessing Supabase table '{table_name}'."
         )
 
 
 def _log_init_status() -> None:
     logger.info(
-        "[SUPABASE INIT]\nurl_loaded=%s\nservice_key_loaded=%s\nmode=%s",
+        "[SUPABASE INIT]\nurl_loaded=%s\nservice_role_key_loaded=%s\nanon_key_loaded=%s\nmode=%s",
         bool(SUPABASE_URL),
-        bool(SUPABASE_SERVICE_KEY),
-        "supabase" if SUPABASE_URL and SUPABASE_SERVICE_KEY else "missing_config",
+        bool(SUPABASE_SERVICE_ROLE_KEY),
+        bool(SUPABASE_ANON_KEY),
+        (
+            "service_role"
+            if SUPABASE_SERVICE_ROLE_KEY
+            else ("anon" if SUPABASE_ANON_KEY else "missing_config")
+        ),
     )
 
 
 _log_init_status()
 
 supabase = (
-    create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-    if SUPABASE_URL and SUPABASE_SERVICE_KEY
+    create_client(SUPABASE_URL, SUPABASE_KEY)
+    if SUPABASE_URL and SUPABASE_KEY
     else _MissingSupabaseConfig()
 )
 
