@@ -34,6 +34,8 @@ from functools import wraps
 from typing import Optional, Tuple, List, Dict, Any, Literal, Union, Set
 from urllib.parse import quote, unquote, urlsplit, urlunsplit, parse_qs, urlencode
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from datetime import datetime, timezone
+from typing import Optional
 
 import requests
 from flask import (
@@ -25855,7 +25857,6 @@ def update_phone_verification(chat_id: int, phone: str, now_iso: str) -> None:
     if not updated:
         raise RuntimeError("Supabase users phone upsert failed")
 
-
 def get_user_record(chat_id: int) -> Optional[dict]:
     record = user_db.get_user(chat_id)
     if not record:
@@ -25884,7 +25885,8 @@ def _effective_expires_timestamp(record: dict) -> Optional[float]:
         parse_dt_safe(record.get("demo_end_at") or record.get("demo_expires_at")),
         parse_dt_safe(record.get("promo_expires_at")) if record.get("promo_active") else None,
     ]
-    dates = [d for d in dates if d]
+    # Zonaları təmizləyib yalnız düzgün tarixləri saxlayırıq
+    dates = [d.replace(tzinfo=None) for d in dates if d]
     if not dates:
         return None
     return max(dates).timestamp()
@@ -25893,17 +25895,27 @@ def _effective_expires_timestamp(record: dict) -> Optional[float]:
 def _compute_user_status_from_record(record: dict) -> str:
     if record.get("blocked") or record.get("is_blocked") or record.get("deleted_at") or record.get("is_active") == 0:
         return "BLOCKED"
+        
     if record.get("approved") == 0 and not record.get("is_admin"):
         return "PENDING"
-    now = datetime.utcnow()
+        
+    # Python 3.14+ üçün ən müasir və təhlükəsiz UTC vaxt təyini (Zonasız hala salırıq)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    
     for key in ("paid_until", "demo_end_at", "demo_expires_at", "promo_expires_at"):
         if key == "promo_expires_at" and not record.get("promo_active"):
             continue
+            
         dt = parse_dt_safe(record.get(key))
-        if dt and dt > now:
-            return "ACTIVE"
+        if dt:
+            # Müqayisədən qabaq dt-nin də zonasını silirik (Toqquşma olmasın deyə)
+            dt_naive = dt.replace(tzinfo=None)
+            if dt_naive > now:
+                return "ACTIVE"
+                
     if record.get("is_admin"):
         return "ACTIVE"
+        
     return "EXPIRED"
 
 
