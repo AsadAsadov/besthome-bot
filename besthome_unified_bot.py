@@ -2,7 +2,7 @@
 # 🏠 BestHome Unified Bot — FULL v9
 # Elan əlavə • Filtrlə axtarış • Açar sözlə axtarış • Nömrə ilə axtarış
 # Favorilər • Admin Panel • Vasitəçi bazası • İstifadəçi təsdiqi
-# besthome.db + local_data.db + agents.db
+# besthome.db (listings only) + Supabase PostgreSQL (user data)
 # ©️ 2025 Əsəd Əsədov (@esedovesed)
 # ============================================
 
@@ -13,6 +13,8 @@ import time
 import errno
 import zipfile
 import sqlite3
+import user_db
+from listing_db import MAIN_DB as LISTING_MAIN_DB
 import threading
 import math
 import re
@@ -235,9 +237,8 @@ DRIVE_DIRECT_LINK = os.getenv("DRIVE_DIRECT_LINK", "DRIVE_DIRECT_LINK").strip()
 DB_SYNC_INTERVAL_SECONDS = 7200
 
 MAIN_DB_DEFAULT_PATH = os.path.join(BASE_DATA_DIR, "besthome.db")
-MAIN_DB = os.path.realpath(os.getenv("BESTHOME_DB_PATH", MAIN_DB_DEFAULT_PATH))
-LOCAL_DB = os.path.join(BASE_DATA_DIR, "local_data.db")
-AGENTS_DB = os.path.join(BASE_DATA_DIR, "agents.db")
+MAIN_DB = LISTING_MAIN_DB
+SUPABASE_USER_TABLES = user_db.USER_TABLES
 SUPPORT_THREAD_STATUS_OPEN = "OPEN"
 SUPPORT_THREAD_STATUS_ACTIVE = "ACTIVE"
 SUPPORT_THREAD_STATUS_WAITING = "WAITING"
@@ -271,8 +272,6 @@ def _load_bot_token():
 def _log_db_status():
     for label, db_path in (
         ("besthome", MAIN_DB),
-        ("local", LOCAL_DB),
-        ("agents", AGENTS_DB),
     ):
         if os.path.exists(db_path):
             try:
@@ -1028,23 +1027,13 @@ def get_conn():
     return sqlite3.connect(MAIN_DB)
 
 def get_local_conn():
-    _ensure_parent_dir(LOCAL_DB)
-    conn = sqlite3.connect(LOCAL_DB, check_same_thread=False)  # 🔥 ÇOX VACİB
-    conn.row_factory = sqlite3.Row
-    return conn
+    return user_db.SupabaseCompatConnection()
 
 def get_db():
-    _ensure_parent_dir(LOCAL_DB)
-    conn = sqlite3.connect(LOCAL_DB, timeout=30, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
+    return user_db.SupabaseCompatConnection()
 
 def get_agents_conn():
-    _ensure_parent_dir(AGENTS_DB)
-    conn = sqlite3.connect(AGENTS_DB, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return user_db.SupabaseCompatConnection()
 
 def _table_columns(conn: sqlite3.Connection, table_name: str) -> set:
     try:
@@ -3223,791 +3212,13 @@ def sanity_check_main_db():
         conn.close()
 
 def init_local_db():
-    _ensure_parent_dir(LOCAL_DB)
-    conn = get_local_conn()
-    cur = conn.cursor()
-
-    ensure_feature_flag_tables(cur)
-
-    # Yeni elanlar
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS listings_new (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date_added TEXT,
-            created_at TEXT,
-            chat_id INTEGER,
-            role TEXT,
-            prop_type TEXT,
-            operation TEXT,
-            rayon TEXT,
-            metro TEXT,
-            rooms TEXT,
-            area_kvm TEXT,
-            price TEXT,
-            currency TEXT,
-            phone TEXT,
-            contact_name TEXT,
-            summary TEXT,
-            link TEXT,
-            approved INTEGER DEFAULT 0
-        )
-    """
-    )
-
-    # Təsdiqlənmiş elanlar (lokal)
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS listings_approved (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date_added TEXT,
-            created_at TEXT,
-            chat_id INTEGER,
-            role TEXT,
-            prop_type TEXT,
-            operation TEXT,
-            rayon TEXT,
-            metro TEXT,
-            rooms TEXT,
-            area_kvm TEXT,
-            price TEXT,
-            currency TEXT,
-            phone TEXT,
-            contact_name TEXT,
-            summary TEXT,
-            link TEXT
-        )
-    """
-    )
-
-    # Vasitəçilər (özünü vasitəçi kimi qeyd edən userlər üçün)
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS agents (
-            chat_id INTEGER PRIMARY KEY,
-            role TEXT,
-            phone TEXT,
-            name TEXT
-        )
-    """
-    )
-
-    ensure_created_at_column(conn, "listings_new", ("date_added",))
-    ensure_created_at_column(conn, "listings_approved", ("date_added",))
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_listings_approved_created_at ON listings_approved(created_at)"
-    )
-
-    # Vasitəçi aktivliyi (axtarış, baxış, WhatsApp, favorit)
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS agent_activity (
-            chat_id INTEGER PRIMARY KEY,
-            last_activity TEXT,
-            searches INTEGER DEFAULT 0,
-            views INTEGER DEFAULT 0,
-            whatsapp INTEGER DEFAULT 0,
-            favorites INTEGER DEFAULT 0
-        )
-    """
-    )
-
-    # Favorilər
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS favorites (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
-            listing_id INTEGER,
-            source TEXT,
-            added_at TEXT,
-            UNIQUE(chat_id, listing_id, source)
-        )
-    """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS favorite_price_history (
-            source TEXT,
-            listing_id INTEGER,
-            last_price INTEGER,
-            updated_at TEXT,
-            PRIMARY KEY (source, listing_id)
-        )
-    """
-    )
-
-    # İstifadəçilər (access control)
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            chat_id INTEGER PRIMARY KEY,
-            full_name TEXT,
-            username TEXT,
-            first_name TEXT,
-            role TEXT,
-            date_joined TEXT,
-            approved INTEGER DEFAULT 0,
-            blocked INTEGER DEFAULT 0,
-            is_blocked INTEGER DEFAULT 0,
-            blocked_at TEXT,
-            last_error TEXT,
-            status TEXT,
-            is_active INTEGER DEFAULT 1,
-            deleted_at TEXT,
-            joined_at TEXT,
-            demo_start_at TEXT,
-            demo_end_at TEXT,
-            paid_until TEXT,
-            last_status_change_at TEXT,
-            payment_type TEXT,
-            last_payment_at TEXT,
-            customer_requests_enabled INTEGER DEFAULT 0,
-            source_type TEXT,
-            source_area TEXT,
-            join_source TEXT,
-            attribution_created_at TEXT,
-            created_at TEXT,
-            demo_days INTEGER,
-            bonus_allowed INTEGER DEFAULT 0,
-            last_spin_at TEXT,
-            chance_last_used_at TEXT,
-            chance_blocked INTEGER DEFAULT 0,
-            user_support_active INTEGER DEFAULT 0,
-            user_support_inbox_unread INTEGER DEFAULT 0
-        )
-    """
-    )
-
-    # Promo sahələri (mövcud deyilsə əlavə et)
-    for alter_stmt in [
-        "ALTER TABLE users ADD COLUMN promo_active INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN promo_expires_at TEXT",
-        "ALTER TABLE users ADD COLUMN referred_by INTEGER",
-        "ALTER TABLE users ADD COLUMN referral_bonus_used INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN referral_milestone_used INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN demo_used INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN demo_expires_at TEXT",
-        "ALTER TABLE users ADD COLUMN role TEXT",
-        "ALTER TABLE users ADD COLUMN blocked_at TEXT",
-        "ALTER TABLE users ADD COLUMN status TEXT",
-        "ALTER TABLE users ADD COLUMN first_seen TEXT",
-        "ALTER TABLE users ADD COLUMN last_seen TEXT",
-        "ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN last_version TEXT",
-        "ALTER TABLE users ADD COLUMN joined_at TEXT",
-        "ALTER TABLE users ADD COLUMN demo_start_at TEXT",
-        "ALTER TABLE users ADD COLUMN demo_end_at TEXT",
-        "ALTER TABLE users ADD COLUMN paid_until TEXT",
-        "ALTER TABLE users ADD COLUMN last_status_change_at TEXT",
-        "ALTER TABLE users ADD COLUMN is_first_start INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN customer_requests_enabled INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN first_name TEXT",
-        "ALTER TABLE users ADD COLUMN source_type TEXT",
-        "ALTER TABLE users ADD COLUMN source_area TEXT",
-        "ALTER TABLE users ADD COLUMN join_source TEXT",
-        "ALTER TABLE users ADD COLUMN attribution_created_at TEXT",
-        "ALTER TABLE users ADD COLUMN created_at TEXT",
-        "ALTER TABLE users ADD COLUMN demo_days INTEGER",
-        "ALTER TABLE users ADD COLUMN bonus_allowed INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN last_spin_at TEXT",
-        "ALTER TABLE users ADD COLUMN chance_last_used_at TEXT",
-        "ALTER TABLE users ADD COLUMN chance_blocked INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN is_blocked INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN last_error TEXT",
-        "ALTER TABLE users ADD COLUMN is_active INTEGER DEFAULT 1",
-        "ALTER TABLE users ADD COLUMN deleted_at TEXT",
-        "ALTER TABLE users ADD COLUMN payment_type TEXT",
-        "ALTER TABLE users ADD COLUMN last_payment_at TEXT",
-        "ALTER TABLE users ADD COLUMN user_support_active INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN user_support_inbox_unread INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN phone TEXT",
-        "ALTER TABLE users ADD COLUMN first_seen_at TEXT",
-        "ALTER TABLE users ADD COLUMN last_seen_at TEXT",
-        "ALTER TABLE users ADD COLUMN is_verified INTEGER DEFAULT 0",
-    ]:
-        try:
-            cur.execute(alter_stmt)
-        except sqlite3.OperationalError:
-            pass
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS bonus_probabilities (
-            days INTEGER PRIMARY KEY,
-            weight INTEGER NOT NULL
-        )
-        """
-    )
-    for days, weight in BONUS_DEFAULT_PROBABILITIES.items():
-        cur.execute(
-            "INSERT OR IGNORE INTO bonus_probabilities (days, weight) VALUES (?, ?)",
-            (days, weight),
-        )
-
-    # Abunəliklər
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS subscriptions (
-            chat_id INTEGER PRIMARY KEY,
-            plan TEXT,
-            expires_at TEXT,
-            is_active INTEGER DEFAULT 0,
-            is_demo INTEGER DEFAULT 0,
-            last_payment_note TEXT
-        )
-    """
-    )
-
-    cur.execute("DROP VIEW IF EXISTS users_with_status")
-    user_columns = _table_columns(conn, "users")
-    demo_end_expr = (
-        "COALESCE(strftime('%s', u.demo_end_at), 0)"
-        if "demo_end_at" in user_columns
-        else "0"
-    )
-    promo_expr = (
-        "COALESCE(strftime('%s', u.promo_expires_at), 0)"
-        if "promo_expires_at" in user_columns
-        else "0"
-    )
-    cur.execute(
-        f"""
-        CREATE VIEW users_with_status AS
-        SELECT
-            u.chat_id,
-            u.full_name,
-            u.username,
-            u.approved,
-            u.blocked,
-            u.is_active,
-            u.deleted_at,
-
-            -- effective_expires_at ALWAYS as unix timestamp
-            MAX(
-                COALESCE(strftime('%s', s.expires_at), 0),
-                {demo_end_expr},
-                CASE
-                    WHEN u.promo_active = 1
-                    THEN {promo_expr}
-                    ELSE 0
-                END
-            ) AS effective_expires_at,
-
-            CASE
-                WHEN u.blocked = 1 THEN 'BLOCKED'
-                WHEN COALESCE(u.is_active, 1) = 0 THEN 'BLOCKED'
-                WHEN u.deleted_at IS NOT NULL AND u.deleted_at != '' THEN 'BLOCKED'
-                WHEN u.approved = 0 THEN 'PENDING'
-                WHEN
-                    MAX(
-                        COALESCE(strftime('%s', s.expires_at), 0),
-                        {demo_end_expr},
-                        CASE
-                            WHEN u.promo_active = 1
-                            THEN {promo_expr}
-                            ELSE 0
-                        END
-                    ) > strftime('%s','now')
-                THEN 'ACTIVE'
-                ELSE 'EXPIRED'
-            END AS computed_status
-
-        FROM users u
-        LEFT JOIN subscriptions s
-            ON s.chat_id = u.chat_id
-            AND s.is_active = 1
-
-        GROUP BY u.chat_id, u.full_name, u.username, u.approved, u.blocked, u.is_active, u.deleted_at
-        """
-    )
-
-    # Ödənişlər
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS payments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
-            plan TEXT,
-            amount INTEGER,
-            approved_at TEXT DEFAULT (CURRENT_TIMESTAMP)
-        )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS manual_payments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            payment_code TEXT,
-            selected_package TEXT,
-            plan_key TEXT,
-            created_at TEXT,
-            status TEXT,
-            updated_at TEXT
-        )
-        """
-    )
-
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_manual_payments_status ON manual_payments(status)"
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_manual_payments_user ON manual_payments(user_id)"
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS referrals (
-            referrer_chat_id INTEGER,
-            referred_chat_id INTEGER PRIMARY KEY,
-            created_at TEXT,
-            reward_given INTEGER DEFAULT 0
-        )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS referral_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            referrer_id INTEGER,
-            referred_user_id INTEGER,
-            bonus_days INTEGER,
-            created_at TEXT
-        )
-        """
-    )
-
-    # Promo kodlar
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS promo_codes (
-            code TEXT PRIMARY KEY,
-            days INTEGER,
-            is_active INTEGER DEFAULT 1,
-            created_at TEXT
-        )
-        """
-    )
-
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_users_referred_by ON users(referred_by)"
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_chat_id)"
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_referral_logs_referrer ON referral_logs(referrer_id)"
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_referral_logs_referred ON referral_logs(referred_user_id)"
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_users_admin_pending ON users(approved, blocked, first_seen DESC)"
-    )
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_users_chat_id_lookup ON users(chat_id)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_users_paid_until ON users(paid_until)")
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_users_demo_end ON users(demo_end_at, demo_expires_at)"
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS promo_usages (
-            code TEXT,
-            chat_id INTEGER,
-            used_at TEXT,
-            expires_at TEXT,
-            PRIMARY KEY (code, chat_id)
-        )
-        """
-    )
-
-    # Limitlər
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS search_limits (
-            chat_id INTEGER,
-            date TEXT,
-            key_type TEXT,    -- 'phone', 'keyword', 'structured'
-            used INTEGER,
-            PRIMARY KEY (chat_id, date, key_type)
-        )
-    """
-    )
-
-    # Elan baxışları
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS listing_views (
-            source TEXT,
-            listing_id INTEGER,
-            views INTEGER DEFAULT 0,
-            last_viewed_at TEXT,
-            PRIMARY KEY (source, listing_id)
-        )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS user_view_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
-            listing_id INTEGER,
-            source TEXT,
-            created_at TEXT DEFAULT (CURRENT_TIMESTAMP)
-        )
-        """
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_user_view_logs_user_date ON user_view_logs(chat_id, created_at DESC)"
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS listing_stats (
-            listing_id INTEGER PRIMARY KEY,
-            views INTEGER DEFAULT 0,
-            favorites INTEGER DEFAULT 0,
-            contacts INTEGER DEFAULT 0,
-            popularity_score INTEGER DEFAULT 0,
-            last_interaction TEXT
-        )
-    """
-    )
-
-    # Saxlanılan axtarışlar
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS saved_searches (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
-            operation TEXT,
-            rooms INTEGER,
-            price_min INTEGER,
-            price_max INTEGER,
-            rayon TEXT,
-            prop_type TEXT,
-            created_at TEXT,
-            last_notified_at TEXT,
-            is_active INTEGER DEFAULT 1
-        )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS user_notifications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
-            criteria_id INTEGER,
-            listing_id INTEGER,
-            created_at TEXT,
-            status TEXT DEFAULT 'new',
-            UNIQUE(chat_id, criteria_id, listing_id)
-        )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS support_threads (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER UNIQUE,
-            status TEXT NOT NULL DEFAULT 'OPEN',
-            needs_reply INTEGER NOT NULL DEFAULT 1,
-            unread_for_admin INTEGER NOT NULL DEFAULT 1,
-            last_message_at TEXT,
-            last_message_from TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS support_messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            thread_id INTEGER NOT NULL,
-            sender TEXT NOT NULL,
-            text TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_support_messages_thread_created ON support_messages(thread_id, created_at)"
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_support_threads_status_needs ON support_threads(status, needs_reply, unread_for_admin, last_message_at)"
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS customer_requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
-            request_type TEXT,
-            rayon TEXT,
-            rooms TEXT,
-            budget TEXT,
-            notes TEXT,
-            phone TEXT,
-            created_at DATETIME DEFAULT (CURRENT_TIMESTAMP),
-            status TEXT DEFAULT 'active'
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS customer_requests_access (
-            user_id INTEGER PRIMARY KEY,
-            enabled INTEGER DEFAULT 0,
-            updated_at TEXT
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS agent_interests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            agent_chat_id INTEGER,
-            request_id INTEGER,
-            created_at TEXT DEFAULT (CURRENT_TIMESTAMP),
-            UNIQUE(agent_chat_id, request_id)
-        )
-        """
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_agent_interests_agent ON agent_interests(agent_chat_id)"
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS agent_notifications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            agent_chat_id INTEGER,
-            request_id INTEGER,
-            created_at TEXT DEFAULT (CURRENT_TIMESTAMP),
-            status TEXT DEFAULT 'new',
-            UNIQUE(agent_chat_id, request_id)
-        )
-        """
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_agent_notifications_agent ON agent_notifications(agent_chat_id)"
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_customer_requests_status ON customer_requests(status)"
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_customer_requests_type_status ON customer_requests(request_type, status)"
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_customer_requests_rayon_status ON customer_requests(rayon, status)"
-    )
-    try:
-        cur.execute(
-            "ALTER TABLE customer_requests ADD COLUMN flagged INTEGER DEFAULT 0"
-        )
-    except Exception:
-        pass
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_customer_requests_flagged ON customer_requests(flagged)"
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS customer_request_favorites (
-            user_id INTEGER,
-            request_id INTEGER,
-            created_at TEXT DEFAULT (CURRENT_TIMESTAMP),
-            PRIMARY KEY (user_id, request_id)
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS customer_request_archives (
-            user_id INTEGER,
-            request_id INTEGER,
-            created_at TEXT DEFAULT (CURRENT_TIMESTAMP),
-            PRIMARY KEY (user_id, request_id)
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS customer_request_rules (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            request_type TEXT,
-            rayons TEXT,
-            price_min INTEGER,
-            price_max INTEGER,
-            rooms TEXT,
-            keyword TEXT,
-            is_active INTEGER DEFAULT 1,
-            created_at TEXT DEFAULT (CURRENT_TIMESTAMP)
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS customer_request_alerts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            rule_id INTEGER,
-            request_id INTEGER,
-            created_at TEXT DEFAULT (CURRENT_TIMESTAMP),
-            UNIQUE(user_id, rule_id, request_id)
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS keyword_alerts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            keywords TEXT,
-            regions TEXT,
-            is_active INTEGER DEFAULT 1,
-            created_at DATETIME
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS keyword_alert_hits (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            alert_id INTEGER,
-            user_id INTEGER,
-            target_type TEXT,
-            target_id INTEGER,
-            source TEXT DEFAULT '',
-            created_at DATETIME,
-            UNIQUE(user_id, alert_id, target_type, target_id, source)
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS keyword_alert_state (
-            key TEXT PRIMARY KEY,
-            last_checked_at TEXT
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS keyword_alert_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            listing_id INTEGER,
-            keyword TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_customer_request_favorites_user ON customer_request_favorites(user_id)"
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_customer_request_archives_user ON customer_request_archives(user_id)"
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_customer_request_rules_user ON customer_request_rules(user_id)"
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_customer_request_alerts_user ON customer_request_alerts(user_id)"
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_keyword_alerts_user ON keyword_alerts(user_id)"
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_keyword_alerts_user_created ON keyword_alerts(user_id, created_at DESC)"
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_keyword_alert_hits_user ON keyword_alert_hits(user_id)"
-    )
-
-    # Axtarış logları
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS search_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
-            search_type TEXT,
-            operation TEXT,
-            rayon TEXT,
-            query_text TEXT,
-            created_at TEXT DEFAULT (CURRENT_TIMESTAMP)
-        )
-    """
-    )
-
-    # İstifadəçi aktivliyi
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS user_activity (
-            chat_id INTEGER PRIMARY KEY,
-            last_seen TEXT,
-            total_searches INTEGER DEFAULT 0
-        )
-    """
-    )
-
-    # saved_searches cədvəli üçün sütun yoxlaması
-    cur.execute("PRAGMA table_info(saved_searches)")
-    saved_cols = {row[1] for row in cur.fetchall()}
-    if "last_notified_at" not in saved_cols:
-        cur.execute("ALTER TABLE saved_searches ADD COLUMN last_notified_at TEXT")
-    if "created_at" not in saved_cols:
-        cur.execute("ALTER TABLE saved_searches ADD COLUMN created_at TEXT")
-    if "is_active" not in saved_cols:
-        cur.execute("ALTER TABLE saved_searches ADD COLUMN is_active INTEGER DEFAULT 1")
-
-    conn.commit()
-    conn.close()
-    print("✅ local_data.db hazırdır.")
+    """Supabase owns all user-data tables; legacy local user DB is intentionally not created."""
+    logger.info("Supabase user-data layer active for tables: %s", sorted(SUPABASE_USER_TABLES))
 
 def init_agents_db():
-    """Vasitəçi elanları üçün ayrıca baza."""
-    _ensure_parent_dir(AGENTS_DB)
-    conn = get_agents_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS arenda_data (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            Emeliyyat TEXT,
-            Emlakin_novu TEXT,
-            Rayon_Qesebe TEXT,
-            Unvan TEXT,
-            Metro TEXT,
-            Otaq_sayi TEXT,
-            Mertebe TEXT,
-            Sahe_sot TEXT,
-            Sahe_kvm TEXT,
-            Qiymet TEXT,
-            Elaqe_nomresi TEXT,
-            Ad TEXT,
-            Sened TEXT,
-            Menbe TEXT,
-            Elani_veren TEXT,
-            Elanin_tarixi TEXT,
-            Elan_kodu TEXT,
-            Umumi_melumat TEXT,
-            added_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """
-    )
-    conn.commit()
-    conn.close()
-    print("✅ agents.db hazırdır.")
+    """Agent tables are user data and are stored in Supabase."""
+    logger.info("Supabase agent tables active: agents, agent_activity, agent_notifications, agent_interests")
+
 
 def init_main_db_indices():
     """Əsas bazada indekslər."""
@@ -6581,11 +5792,8 @@ def build_date_range_clause(
     )
 
 def attach_local_db(conn) -> bool:
-    try:
-        conn.execute("ATTACH DATABASE ? AS local_db", (LOCAL_DB,))
-        return True
-    except Exception:
-        return False
+    # legacy local user DB was removed; user data lives in Supabase.
+    return False
 
 def detach_local_db(conn, attached: bool):
     if not attached:
@@ -14878,8 +14086,8 @@ def fetch_global_statistics(period: str = "all", stat_context: str = STAT_CONTEX
             conn = get_main_conn()
             source_db = MAIN_DB
         else:
-            conn = get_local_conn()
-            source_db = LOCAL_DB
+            conn = get_main_conn()
+            source_db = MAIN_DB
 
         cur = conn.cursor()
         if stat_context == STAT_CONTEXT_USER:
@@ -25929,13 +25137,7 @@ def create_flask_app():
                     close_main_conn(conn_main)
             except Exception:
                 logger.exception("Health check failed for main DB")
-            try:
-                conn_local = get_local_conn()
-                conn_local.execute("SELECT 1")
-                db_status["local"] = True
-                conn_local.close()
-            except Exception:
-                logger.exception("Health check failed for local DB")
+            db_status["supabase_user_data"] = True
 
             return api_ok_response(
                 {"time": datetime.utcnow().isoformat(), "db": db_status}
@@ -25943,12 +25145,9 @@ def create_flask_app():
 
         return _wrap_api("health", _handler)
 
-    @app.route("/download/local_data.db", methods=["GET"])
+    @app.route("/download/user-data", methods=["GET"])
     def download_local_db():
-        file_path = LOCAL_DB
-        if os.path.exists(file_path):
-            return send_file(file_path, as_attachment=True)
-        return "File not found", 404
+        return jsonify({"ok": False, "error": "legacy local user DB removed; user data is in Supabase"}), 410
 
     @app.route("/api/stats/overview", methods=["GET"])
     def api_stats_overview():
@@ -26182,16 +25381,12 @@ def create_flask_app():
             district = normalize_text(args.get("district") or args.get("rayon") or "")
             op = normalize_operation_value(args.get("op") or args.get("operation"))
 
-            if not os.path.exists(AGENTS_DB):
-                return api_ok_response(
-                    {"page": page, "pages": 1, "total": 0, "items": []}
-                )
+            rows = user_db.select_many("agents")
+            # Continue with the legacy in-memory filtering shape below.
+            return api_ok_response({"page": page, "pages": 1, "total": len(rows), "items": rows})
 
-            conn = get_agents_conn()
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='agents'"
-            )
+            conn = None
+            cur = None
             if not cur.fetchone():
                 conn.close()
                 return api_ok_response(
@@ -26574,6 +25769,238 @@ def create_flask_app():
 
     return app
 
+
+# ==============================
+# Supabase user-data overrides
+# ==============================
+def _dict_row(row: Optional[dict]) -> Optional[dict]:
+    return dict(row) if row else None
+
+
+def get_phone_verification_row(chat_id: int) -> Optional[dict]:
+    row = user_db.get_user(chat_id)
+    if not row:
+        return None
+    return {
+        "chat_id": row.get("chat_id"),
+        "phone": row.get("phone"),
+        "first_seen_at": row.get("first_seen_at") or row.get("first_seen"),
+        "last_seen_at": row.get("last_seen_at") or row.get("last_seen"),
+        "is_verified": row.get("is_verified"),
+    }
+
+
+def update_phone_verification(chat_id: int, phone: str, now_iso: str) -> None:
+    record, _ = user_db.ensure_user(chat_id)
+    user_db.update_user(
+        chat_id,
+        {
+            "phone": phone,
+            "last_seen_at": now_iso,
+            "last_seen": now_iso,
+            "first_seen_at": record.get("first_seen_at") or now_iso,
+            "is_verified": 1,
+        },
+    )
+
+
+def get_user_record(chat_id: int) -> Optional[dict]:
+    record = user_db.get_user(chat_id)
+    if not record:
+        return None
+    computed_status = _compute_user_status_from_record(record)
+    record = dict(record)
+    record["computed_status"] = computed_status
+    record["effective_expires_at"] = _effective_expires_timestamp(record)
+    return record
+
+
+def ensure_user_exists(chat_id: int, username: str = "", full_name: str = "") -> dict:
+    record, _ = user_db.ensure_user(
+        chat_id,
+        username=username or "",
+        full_name=full_name or "",
+        is_admin=is_admin(chat_id),
+        start_source={"last_version": CURRENT_VERSION},
+    )
+    return get_user_record(chat_id) or record or {}
+
+
+def _effective_expires_timestamp(record: dict) -> Optional[float]:
+    dates = [
+        parse_dt_safe(record.get("paid_until")),
+        parse_dt_safe(record.get("demo_end_at") or record.get("demo_expires_at")),
+        parse_dt_safe(record.get("promo_expires_at")) if record.get("promo_active") else None,
+    ]
+    dates = [d for d in dates if d]
+    if not dates:
+        return None
+    return max(dates).timestamp()
+
+
+def _compute_user_status_from_record(record: dict) -> str:
+    if record.get("blocked") or record.get("is_blocked") or record.get("deleted_at") or record.get("is_active") == 0:
+        return "BLOCKED"
+    if record.get("approved") == 0 and not record.get("is_admin"):
+        return "PENDING"
+    now = datetime.utcnow()
+    for key in ("paid_until", "demo_end_at", "demo_expires_at", "promo_expires_at"):
+        if key == "promo_expires_at" and not record.get("promo_active"):
+            continue
+        dt = parse_dt_safe(record.get(key))
+        if dt and dt > now:
+            return "ACTIVE"
+    if record.get("is_admin"):
+        return "ACTIVE"
+    return "EXPIRED"
+
+
+def get_user_computed_status(chat_id: int) -> Optional[str]:
+    record = user_db.get_user(chat_id)
+    return _compute_user_status_from_record(record) if record else None
+
+
+def is_user_active(chat_id: int) -> bool:
+    return get_user_computed_status(chat_id) == "ACTIVE"
+
+
+def register_or_update_user_if_needed(message, start_arg: str) -> bool:
+    chat_id = message.chat.id
+    user = getattr(message, "from_user", None)
+    username = getattr(user, "username", "") or ""
+    first_name = getattr(user, "first_name", "") or ""
+    last_name = getattr(user, "last_name", "") or ""
+    full_name = (f"{first_name} {last_name}").strip() or first_name or username or str(chat_id)
+    referrer_chat_id = parse_referrer_from_text(message.text or "")
+    source_type = "qr" if start_arg in ALLOWED_START_AREAS else "direct"
+    source_area = start_arg if start_arg in ALLOWED_START_AREAS else None
+    demo_days = 7 if source_area else 3
+    demo_expiry = datetime.utcnow() + timedelta(days=demo_days)
+    record, created = user_db.ensure_user(
+        chat_id,
+        username=username,
+        full_name=full_name,
+        first_name=first_name,
+        is_admin=is_admin(chat_id),
+        start_source={
+            "source_type": source_type,
+            "source_area": source_area,
+            "join_source": start_arg or None,
+            "referred_by": referrer_chat_id if referrer_chat_id and referrer_chat_id != chat_id else None,
+            "last_version": CURRENT_VERSION,
+            "demo_days": demo_days,
+            "demo_end_at": demo_expiry.isoformat() if created else None,
+            "demo_expires_at": demo_expiry.isoformat() if created else None,
+            "attribution_created_at": datetime.now(timezone.utc).isoformat() if created else None,
+        },
+    )
+    if is_admin(chat_id):
+        user_db.update_user(chat_id, {"approved": 1, "is_admin": 1, "blocked": 0})
+        set_user_state(chat_id, "ADMIN")
+    if created:
+        try:
+            username_line = f"@{username}" if username else "-"
+            admin_text = (
+                "🆕 Yeni istifadəçi qoşuldu\n"
+                f"ID: {chat_id}\nUsername: {username_line}\nAd: {first_name}\n"
+                f"Tarix: {(datetime.utcnow() + timedelta(hours=4)).strftime('%d.%m.%Y %H:%M')}"
+            )
+            mk = types.InlineKeyboardMarkup(row_width=1)
+            mk.add(types.InlineKeyboardButton("✅ Təsdiqlə", callback_data=f"approve_user:{chat_id}"))
+            mk.add(types.InlineKeyboardButton("⛔ Blokla", callback_data=f"block_user:{chat_id}"))
+            send_message_to_admins(admin_text, reply_markup=mk)
+        except Exception:
+            logger.exception("Failed to notify admin about new user chat_id=%s", chat_id)
+    if record.get("is_first_start") and not is_admin(chat_id):
+        bot.send_message(
+            chat_id,
+            "👋 Best Home — Əmlak axtarış platformasına xoş gəldin!\n\n"
+            "🏠 Burada *yalnız əmlak sahiblərinin* yerləşdirdiyi real elanlar var:\n"
+            "• Satış və kirayə evləri\n• Filtrlə və açar sözlə axtarış\n"
+            "• Uyğun elan çıxan kimi bildiriş 🔔\n\n"
+            "✨ Axtarma, elanlar səni tapsın.\n\n"
+            "Başlamaq üçün aşağıdakı Menyudan istədiyin bölməni seç.",
+            disable_web_page_preview=True,
+            parse_mode="Markdown",
+        )
+        user_db.update_user(chat_id, {"is_first_start": 0})
+    set_user_state(chat_id, "MAIN")
+    set_ui_context(chat_id, UI_CONTEXT_MAIN)
+    logger.info("/start executed successfully for user %s", chat_id)
+    return bool(created)
+
+
+def set_user_support_active_flag(chat_id: int, active: bool) -> None:
+    user_db.update_user(chat_id, {"user_support_active": 1 if active else 0})
+
+
+def set_user_support_inbox_unread(chat_id: int, unread_count: int) -> None:
+    user_db.update_user(chat_id, {"user_support_inbox_unread": max(0, int(unread_count))})
+
+
+def increment_user_support_inbox_unread(chat_id: int, delta: int = 1) -> None:
+    record = user_db.get_user(chat_id) or {}
+    current = int(record.get("user_support_inbox_unread") or 0)
+    user_db.update_user(chat_id, {"user_support_inbox_unread": max(0, current + int(delta))})
+
+
+def ensure_notification_records(chat_id: int, criteria_id: Optional[int], listing_ids: List[int]) -> int:
+    return user_db.ensure_notification_records(chat_id, criteria_id, listing_ids)
+
+
+_keyword_summary_timers: Dict[int, threading.Timer] = {}
+_keyword_summary_lock = threading.Lock()
+
+def notify_on_keyword_match(matches: List[dict], user_id: int) -> None:
+    """Group all matches per user into one summary notification."""
+    if not matches:
+        return
+    existing = pending_keyword_results.get(user_id, [])
+    merged: List[dict] = []
+    seen: Set[str] = set()
+    for item in list(existing) + list(matches):
+        listing_id = item.get("id") or item.get("ID") or item.get("Elan_kodu")
+        key = f"id:{listing_id}" if listing_id is not None else build_listing_unique_key(item, item.get("__source") or "main")
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        merged.append(item)
+    pending_keyword_results[user_id] = merged
+
+    def _send_summary():
+        with _keyword_summary_lock:
+            _keyword_summary_timers.pop(user_id, None)
+        items = pending_keyword_results.get(user_id, [])
+        total = len(items)
+        if not total:
+            return
+        mk = types.InlineKeyboardMarkup()
+        mk.add(types.InlineKeyboardButton("Elanları gör", callback_data="kw_notif_view"))
+        try:
+            bot.send_message(user_id, f"🔔 Açar sözlərinizə uyğun {total} yeni elan tapıldı.", reply_markup=mk)
+            logger.info("keyword notification grouped summary sent chat_id=%s total=%s", user_id, total)
+        except Exception:
+            logger.exception("Failed to send keyword grouped summary chat_id=%s", user_id)
+
+    with _keyword_summary_lock:
+        old = _keyword_summary_timers.get(user_id)
+        if old:
+            old.cancel()
+        timer = threading.Timer(2.0, _send_summary)
+        timer.daemon = True
+        _keyword_summary_timers[user_id] = timer
+        timer.start()
+
+
+def init_local_db():
+    logger.info("Supabase user-data initialization active; no local user SQLite DB is created.")
+
+
+def init_agents_db():
+    logger.info("Supabase agent user-data tables active.")
+
+
 def main():
     if _polling_started.is_set():
         logger.info("Bot polling already running; skipping duplicate start")
@@ -26619,13 +26046,7 @@ def run_bot():
 def keepalive_worker(interval_seconds: int = 300):
     while True:
         try:
-            logger.info("⏳ Keep-alive heartbeat (DATA_DIR=%s)", BASE_DATA_DIR)
-            if os.path.exists(LOCAL_DB):
-                conn = get_local_conn()
-                try:
-                    conn.execute("SELECT 1")
-                finally:
-                    conn.close()
+            logger.info("⏳ Keep-alive heartbeat (DATA_DIR=%s, user_db=Supabase)", BASE_DATA_DIR)
         except Exception as exc:
             logger.warning("Keep-alive ping failed: %s", exc)
         time.sleep(interval_seconds)
