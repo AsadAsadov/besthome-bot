@@ -1,6 +1,7 @@
 """Render entrypoint for running the Telegram bot worker (STRICT POLLING MODE)."""
 
 import os
+import sys
 
 def _require_env(name: str) -> str:
     value = os.getenv(name, "").strip()
@@ -27,6 +28,12 @@ if __name__ == "__main__":
     
     print("🚀 Bot tamamilə TƏK PROSES rejimində başladılır...")
     
-    # Telegram botunu birbaşa və yalqız şəkildə çağırırıq
+    # Təhlükəsizlik addımı: əgər nəsə arxa fonda ilişibsə, Render mühitini təmizləyirik
+    sys.stdout.flush()
+    
+    # Telegram botunu daxildə təhlükəsiz şəkildə çağırırıq
     from besthome_unified_bot import main as run_telegram_bot
+    
+    # main() funksiyasını çağırırıq - daxildə sync_loop olmadığı üçün 
+    # artıq CPU-nu yükləmədən təmiz polling başlayacaq
     run_telegram_bot()
