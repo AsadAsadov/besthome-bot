@@ -311,12 +311,6 @@ def _log_main_db_boot_status():
 # 🛡️ DB TƏHLÜKƏSİZLİK YOXLAMASI
 # ==============================
 
-@bot.callback_query_handler(func=lambda call: True)
-def test_all_callbacks(call):
-    print(f"🚨 [TEST CALLBACK] Düymə sıxıldı! Data: {call.data}", flush=True)
-    # Telegram-da düymənin üstündəki saat fırlanmasını dayandırmaq üçün mütləq lazımdır:
-    bot.answer_callback_query(call.id)
-
 # ==============================
 # 🧠 STATE-LƏR
 # ==============================
