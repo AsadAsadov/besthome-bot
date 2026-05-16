@@ -25129,12 +25129,25 @@ def _initialize_app_state():
     check_favorite_price_drops()
     _app_initialized = True
 
+def _load_admin_routes_status() -> Tuple[Optional[Any], str]:
+    try:
+        from admin_routes import router as admin_router
+    except Exception as exc:
+        logger.warning("[ADMIN IMPORT ERROR] %s", exc)
+        print("[ADMIN IMPORT ERROR]", exc)
+        return None, "error"
+
+    logger.info("[ADMIN] admin_routes loaded")
+    print("[ADMIN] admin_routes loaded")
+    return admin_router, "loaded"
+
+
 def create_flask_app():
     global app
     if app is not None:
         return app
 
-    from admin import admin_bp
+    admin_router, admin_status = _load_admin_routes_status()
 
     _initialize_app_state()
     app = Flask(__name__)
@@ -25150,8 +25163,13 @@ def create_flask_app():
     if os.environ.get("ENV") == "prod":
         app.config["SESSION_COOKIE_SECURE"] = True
 
-    app.register_blueprint(admin_bp)
-    logger.info("Web admin panel registered at /admin")
+    if admin_router is not None:
+        logger.info(
+            "[BOOT] Admin routes status=%s; FastAPI APIRouter is not registered on Flask",
+            admin_status,
+        )
+    else:
+        logger.warning("[BOOT] Admin routes status=%s", admin_status)
 
     @app.route("/")
     def home():
@@ -26035,6 +26053,7 @@ def main():
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    logger.info("[BOOT] Telegram bot starting")
 
     global BOT_TOKEN, BOT_USERNAME
     BOT_TOKEN = _load_bot_token()
@@ -26052,6 +26071,7 @@ def main():
     threading.Thread(target=sync_loop, daemon=True).start()
 
     create_flask_app()
+    logger.info("[BOOT] Startup completed")
     run_bot()
 
 def run_bot():
