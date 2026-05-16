@@ -128,10 +128,17 @@ def select_many(
 
 def upsert(table: str, payload: Dict[str, Any], on_conflict: Optional[str] = None) -> Optional[Dict[str, Any]]:
     try:
-        query = supabase.table(table).upsert(payload, on_conflict=on_conflict) if on_conflict else supabase.table(table).upsert(payload)
+        conflict = on_conflict or ("chat_id" if "chat_id" in payload else None)
+        query = (
+            supabase.table(table).upsert(payload, on_conflict=conflict)
+            if conflict
+            else supabase.table(table).upsert(payload)
+        )
         response = query.execute()
         rows = response.data or []
         invalidate_cache(table)
+        if "chat_id" in payload:
+            invalidate_cache(f"{table}:{payload.get('chat_id')}")
         return rows[0] if rows else payload
     except Exception as exc:
         _log_supabase_error(table, "upsert", exc)
@@ -143,6 +150,8 @@ def insert(table: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         response = supabase.table(table).insert(payload).execute()
         rows = response.data or []
         invalidate_cache(table)
+        if "chat_id" in payload:
+            invalidate_cache(f"{table}:{payload.get('chat_id')}")
         return rows[0] if rows else payload
     except Exception as exc:
         _log_supabase_error(table, "insert", exc)
@@ -156,6 +165,8 @@ def update(table: str, payload: Dict[str, Any], **equals: Any) -> bool:
             query = query.eq(key, value)
         query.execute()
         invalidate_cache(table)
+        if "chat_id" in equals:
+            invalidate_cache(f"{table}:{equals.get('chat_id')}")
         return True
     except Exception as exc:
         _log_supabase_error(table, "update", exc)
@@ -173,6 +184,76 @@ def delete(table: str, **equals: Any) -> bool:
     except Exception as exc:
         _log_supabase_error(table, "delete", exc)
         return False
+
+
+def create_user(
+    chat_id: int,
+    *,
+    username: str = "",
+    full_name: str = "",
+    first_name: str = "",
+    is_admin: bool = False,
+    start_source: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    try:
+        record, _ = ensure_user(
+            chat_id,
+            username=username,
+            full_name=full_name,
+            first_name=first_name,
+            is_admin=is_admin,
+            start_source=start_source,
+        )
+        return record
+    except Exception as exc:
+        _log_supabase_error("users", "create", exc)
+        return None
+
+
+def update_last_seen(chat_id: int, *, username: str = "", full_name: str = "") -> bool:
+    payload = {"last_seen": _now_iso(), "last_seen_at": _now_iso()}
+    if username:
+        payload["username"] = username
+    if full_name:
+        payload["full_name"] = full_name
+    return update_user(chat_id, payload)
+
+
+def activate_subscription(
+    chat_id: int,
+    *,
+    plan: str,
+    expires_at: Any,
+    is_demo: int = 0,
+    note: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    expires_iso = expires_at.isoformat() if hasattr(expires_at, "isoformat") else expires_at
+    now_iso = _now_iso()
+    sub = upsert_subscription(
+        {
+            "chat_id": chat_id,
+            "plan": plan,
+            "expires_at": expires_iso,
+            "is_active": 1,
+            "is_demo": int(is_demo),
+            "last_payment_note": note,
+        }
+    )
+    update_user(
+        chat_id,
+        {
+            "paid_until": expires_iso if not is_demo else None,
+            "demo_end_at": expires_iso if is_demo else None,
+            "demo_expires_at": expires_iso if is_demo else None,
+            "approved": 1,
+            "blocked": 0,
+            "is_blocked": 0,
+            "is_active": 1,
+            "last_payment_at": now_iso if not is_demo else None,
+        },
+    )
+    invalidate_cache(f"users:{chat_id}", f"subscriptions:{chat_id}", "premium_users", "blocked_users")
+    return sub
 
 
 def ensure_user(
@@ -313,6 +394,90 @@ def cached_blocked_users() -> List[int]:
     ids = sorted({int(r["chat_id"]) for r in rows if r.get("chat_id")})
     return _ttl_set("blocked_users", ids)
 
+def _split_sql_assignments(set_part: str) -> List[str]:
+    parts: List[str] = []
+    current: List[str] = []
+    depth = 0
+    quote: Optional[str] = None
+    for ch in set_part:
+        if quote:
+            current.append(ch)
+            if ch == quote:
+                quote = None
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            current.append(ch)
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")" and depth > 0:
+            depth -= 1
+        if ch == "," and depth == 0:
+            part = "".join(current).strip()
+            if part:
+                parts.append(part)
+            current = []
+        else:
+            current.append(ch)
+    part = "".join(current).strip()
+    if part:
+        parts.append(part)
+    return parts
+
+
+def _parse_dt(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        return None
+
+
+def _effective_expires_at(row: Dict[str, Any]) -> Optional[str]:
+    dates = []
+    for key in ("paid_until", "demo_end_at", "demo_expires_at", "promo_expires_at"):
+        if key == "promo_expires_at" and not row.get("promo_active"):
+            continue
+        dt = _parse_dt(row.get(key))
+        if dt:
+            dates.append(dt)
+    return max(dates).isoformat() if dates else None
+
+
+def _compute_user_status(row: Dict[str, Any]) -> str:
+    if row.get("blocked") or row.get("is_blocked") or row.get("deleted_at") or row.get("is_active") == 0:
+        return "BLOCKED"
+    if row.get("approved") == 0 and not row.get("is_admin"):
+        return "PENDING"
+    raw_exp = _effective_expires_at(row)
+    exp = _parse_dt(raw_exp)
+    if exp and exp > datetime.utcnow():
+        return "ACTIVE"
+    if row.get("is_admin"):
+        return "ACTIVE"
+    return "EXPIRED"
+
+
+class SupabaseCompatRow(dict):
+    def __init__(self, data: Dict[str, Any], columns: Optional[Sequence[str]] = None):
+        super().__init__(data)
+        self._columns = list(columns or data.keys())
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            if key < 0 or key >= len(self._columns):
+                raise IndexError(key)
+            return dict.get(self, self._columns[key])
+        return dict.__getitem__(self, key)
+
+    def keys(self):
+        return dict.keys(self)
+
+
 class SupabaseCompatCursor:
     """Small transitional cursor for legacy code paths while user tables move to Supabase.
 
@@ -345,12 +510,31 @@ class SupabaseCompatCursor:
                     return self
                 table = "users" if table == "users_with_status" else table
                 rows = select_many(table)
+                if "users_with_status" in lower:
+                    for row in rows:
+                        if "computed_status" not in row:
+                            row["computed_status"] = _compute_user_status(row)
+                        if "effective_expires_at" not in row:
+                            row["effective_expires_at"] = _effective_expires_at(row)
                 # Apply very common single-column equality predicates in parameter order.
                 columns = re.findall(r"([a-zA-Z_][a-zA-Z0-9_\.]*?)\s*=\s*\?", compact)
                 for col, value in zip(columns, params):
                     key = col.split(".")[-1]
                     rows = [r for r in rows if str(r.get(key)) == str(value)]
-                self._rows = rows
+                select_match = re.match(r"select\s+(.+?)\s+from\s+", compact, re.I)
+                raw_cols = select_match.group(1).strip() if select_match else "*"
+                if raw_cols.lower().startswith("count("):
+                    alias_match = re.search(r"\bas\s+([a-zA-Z_][a-zA-Z0-9_]*)", raw_cols, re.I)
+                    count_col = alias_match.group(1) if alias_match else "COUNT(*)"
+                    self._rows = [SupabaseCompatRow({count_col: len(rows)}, [count_col])]
+                    self.rowcount = 1
+                    return self
+                result_columns = None
+                if raw_cols and raw_cols != "*" and "," in raw_cols:
+                    result_columns = [c.strip().split()[-1].split(".")[-1] for c in raw_cols.split(",")]
+                elif raw_cols and raw_cols != "*" and "(" not in raw_cols:
+                    result_columns = [raw_cols.strip().split()[-1].split(".")[-1]]
+                self._rows = [SupabaseCompatRow(r, result_columns or list(r.keys())) for r in rows]
                 self.rowcount = len(rows)
                 return self
             if lower.startswith("update"):
@@ -360,11 +544,28 @@ class SupabaseCompatCursor:
                 table, set_part, where_part = m.groups()
                 if table not in USER_TABLES:
                     return self
-                set_cols = [part.split("=")[0].strip() for part in set_part.split(",") if "?" in part]
-                payload = {col: params[i] for i, col in enumerate(set_cols) if i < len(params)}
+                payload: Dict[str, Any] = {}
+                set_param_count = 0
+                for part in _split_sql_assignments(set_part):
+                    if "=" not in part:
+                        continue
+                    col, expr = part.split("=", 1)
+                    col = col.strip()
+                    expr_clean = expr.strip()
+                    expr_lower = expr_clean.lower()
+                    if "?" in expr_clean:
+                        if set_param_count < len(params):
+                            payload[col] = params[set_param_count]
+                        set_param_count += expr_clean.count("?")
+                    elif expr_lower == "null":
+                        payload[col] = None
+                    elif expr_clean in ("0", "1"):
+                        payload[col] = int(expr_clean)
+                    elif (expr_clean.startswith("'") and expr_clean.endswith("'")) or (expr_clean.startswith('"') and expr_clean.endswith('"')):
+                        payload[col] = expr_clean[1:-1]
                 where_cols = re.findall(r"([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*\?", where_part)
                 equals = {}
-                for idx, col in enumerate(where_cols, start=len(set_cols)):
+                for idx, col in enumerate(where_cols, start=set_param_count):
                     if idx < len(params):
                         equals[col] = params[idx]
                 if equals:
@@ -379,7 +580,13 @@ class SupabaseCompatCursor:
                     return self
                 cols = [c.strip() for c in cols_raw.split(",")]
                 payload = {col: params[i] for i, col in enumerate(cols) if i < len(params)}
-                result = upsert(table, payload)
+                if "or ignore" in lower and select_one(table, **{k: payload[k] for k in ("chat_id",) if k in payload}):
+                    result = payload
+                elif table == "manual_payments":
+                    result = insert(table, payload)
+                else:
+                    result = upsert(table, payload)
+                self.lastrowid = result.get("id") if isinstance(result, dict) else None
                 self.rowcount = 1 if result else 0
                 return self
             if lower.startswith("delete"):

@@ -14,6 +14,7 @@ import errno
 import zipfile
 import sqlite3
 import user_db
+from supabase_client import validate_supabase_startup
 from listing_db import MAIN_DB as LISTING_MAIN_DB
 import threading
 import math
@@ -102,7 +103,7 @@ class _BotProxy:
             def guarded(update):
                 user = getattr(update, "from_user", None)
                 user_id = getattr(user, "id", None)
-                if user_id is not None and not is_allowed(user_id):
+                if user_id is not None and _requires_access_check(handler_type, update) and not is_allowed(user_id):
                     try:
                         if handler_type == "callback_query_handler":
                             safe_answer_callback_query(
@@ -132,6 +133,7 @@ class _BotProxy:
             return func
 
         return decorator
+
 
     def message_handler(self, *args, **kwargs):
         return self._store_handler("message_handler", *args, **kwargs)
@@ -203,6 +205,15 @@ ALLOWED_USERS = [
 CHANNEL_ID = -1001878623087  # Bot bu kanalda admin olmalıdır
 
 bot = _BotProxy()
+
+
+def _requires_access_check(handler_type: str, update) -> bool:
+    if handler_type == "message_handler":
+        content_type = getattr(update, "content_type", None)
+        text = (getattr(update, "text", "") or "").strip().lower()
+        if content_type == "contact" or text.startswith("/start"):
+            return False
+    return True
 
 # ==============================
 # 💾 DATABASE KONFİQURASİYASI
@@ -415,6 +426,10 @@ def _edit_last_message_reply_markup(proxy: _BotProxy, edit_func, *args, **kwargs
 def handle_start(message):
     chat_id = message.chat.id
     support_admin_state.pop(chat_id, None)
+    text = message.text or ""
+    parts = text.split(maxsplit=1)
+    start_arg = parts[1].strip().lower() if len(parts) > 1 else ""
+    _ensure_start_user_record(message, start_arg)
     phone_row = get_phone_verification_row(chat_id)
     if not phone_row:
         logger.info("NEW_USER_STARTED user_id=%s", chat_id)
@@ -456,10 +471,6 @@ def handle_start(message):
 
     user_row = fetch_user_row()
     now = datetime.now(timezone.utc)
-
-    text = message.text or ""
-    parts = text.split(maxsplit=1)
-    start_arg = parts[1].strip().lower() if len(parts) > 1 else ""
 
     logger.info("START HANDLER HIT user=%s arg=%s", chat_id, start_arg)
 
@@ -547,6 +558,12 @@ def handle_contact(message):
         except Exception:
             logger.exception("Start logic failed after phone verification")
     update_phone_verification(chat_id, phone, now_iso)
+    try:
+        text = message.text or ""
+        parts = text.split(maxsplit=1)
+        handle_start_attribution_and_demo(message, parts[1].strip().lower() if len(parts) > 1 else "")
+    except Exception:
+        logger.exception("Start logic failed after phone verification")
     logger.info(
         "PHONE_VERIFIED user_id=%s phone=%s", chat_id, mask_phone(phone)
     )
@@ -557,6 +574,45 @@ def handle_contact(message):
     )
     reset_user_state(chat_id)
     restore_reply_keyboard(chat_id)
+
+def _start_user_payload(message, start_arg: str, created: bool = True) -> Dict[str, Any]:
+    chat_id = message.chat.id
+    referrer_chat_id = parse_referrer_from_text(message.text or "")
+    source_type = "qr" if start_arg in ALLOWED_START_AREAS else "direct"
+    source_area = start_arg if start_arg in ALLOWED_START_AREAS else None
+    demo_days = 7 if source_area else 3
+    demo_expiry = datetime.utcnow() + timedelta(days=demo_days)
+    return {
+        "source_type": source_type,
+        "source_area": source_area,
+        "join_source": start_arg or None,
+        "referred_by": referrer_chat_id if referrer_chat_id and referrer_chat_id != chat_id else None,
+        "last_version": CURRENT_VERSION,
+        "demo_days": demo_days,
+        "demo_end_at": demo_expiry.isoformat() if created else None,
+        "demo_expires_at": demo_expiry.isoformat() if created else None,
+        "attribution_created_at": datetime.now(timezone.utc).isoformat() if created else None,
+    }
+
+
+def _ensure_start_user_record(message, start_arg: str) -> dict:
+    chat_id = message.chat.id
+    user = getattr(message, "from_user", None)
+    username = getattr(user, "username", "") or ""
+    first_name = getattr(user, "first_name", "") or ""
+    last_name = getattr(user, "last_name", "") or ""
+    full_name = (f"{first_name} {last_name}").strip() or first_name or username or str(chat_id)
+    existing = user_db.get_user(chat_id, use_cache=False)
+    record, _created = user_db.ensure_user(
+        chat_id,
+        username=username,
+        full_name=full_name,
+        first_name=first_name,
+        is_admin=is_admin(chat_id),
+        start_source=_start_user_payload(message, start_arg, created=not bool(existing)),
+    )
+    return record or {}
+
 
 def handle_start_attribution_and_demo(message, start_arg: str):
     # existing start logic here (do not remove)
@@ -3381,7 +3437,9 @@ def is_allowed(user_id: int) -> bool:
         uid = int(str(user_id).strip())
     except Exception:
         return False
-    return uid in {int(x) for x in ALLOWED_USERS}
+    if is_admin(uid):
+        return True
+    return is_user_active(uid)
 
 def send_message_to_admins(text: str, **kwargs) -> None:
     for admin_id in ADMIN_IDS:
@@ -4002,25 +4060,13 @@ def set_subscription(
     is_demo: int = 0,
     note: Optional[str] = None,
 ):
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        UPDATE subscriptions
-        SET plan=?, expires_at=?, is_active=?, is_demo=?, last_payment_note=COALESCE(?, last_payment_note)
-        WHERE chat_id=?
-        """,
-        (
-            plan,
-            expires_at.isoformat() if expires_at else None,
-            is_active,
-            is_demo,
-            note,
-            chat_id,
-        ),
+    user_db.activate_subscription(
+        chat_id,
+        plan=plan,
+        expires_at=expires_at.isoformat() if expires_at else None,
+        is_demo=is_demo,
+        note=note,
     )
-    conn.commit()
-    conn.close()
 
 def get_user_demo_status(chat_id: int) -> dict:
     record = get_user_record(chat_id)
@@ -4419,29 +4465,13 @@ def insert_subscription(
     is_demo: int = 0,
     note: Optional[str] = None,
 ):
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO subscriptions (chat_id, plan, expires_at, is_active, is_demo, last_payment_note)
-        VALUES (?, ?, ?, 1, ?, ?)
-        ON CONFLICT(chat_id) DO UPDATE SET
-            plan=excluded.plan,
-            expires_at=excluded.expires_at,
-            is_active=1,
-            is_demo=excluded.is_demo,
-            last_payment_note=COALESCE(excluded.last_payment_note, subscriptions.last_payment_note)
-        """,
-        (
-            chat_id,
-            plan,
-            expires_at.isoformat() if expires_at else None,
-            is_demo,
-            note,
-        ),
+    user_db.activate_subscription(
+        chat_id,
+        plan=plan,
+        expires_at=expires_at.isoformat() if expires_at else None,
+        is_demo=is_demo,
+        note=note,
     )
-    conn.commit()
-    conn.close()
 
 def mark_demo_used(chat_id: int, expires_at: datetime):
     update_user_demo_end(chat_id, expires_at, approve=True)
@@ -6666,8 +6696,8 @@ def send_logo_if_exists(chat_id: int):
         if os.path.exists("besthomelogo.jpeg"):
             with open("besthomelogo.jpeg", "rb") as f:
                 bot.send_photo(chat_id, f)
-    except:
-        pass
+    except Exception as exc:
+        logger.exception("Suppressed exception replaced with logging: %s", exc)
 
 MENU_REFRESH_BUTTON = "🔄 Botu yenilə"
 MAIN_MENU_BUTTONS = [
@@ -9702,6 +9732,9 @@ def approve_manual_payment(chat_id: int, plan_key: str, request_id: Optional[int
         """
         UPDATE users
         SET approved=1,
+            blocked=0,
+            is_blocked=0,
+            is_active=1,
             payment_type=COALESCE(payment_type, ?),
             paid_until=?,
             last_payment_at=?
@@ -9725,6 +9758,7 @@ def approve_manual_payment(chat_id: int, plan_key: str, request_id: Optional[int
         pass
     if request_id:
         update_manual_payment_status(request_id, MANUAL_PAYMENT_APPROVED)
+    user_db.invalidate_cache(f"users:{chat_id}", f"subscriptions:{chat_id}", "premium_users", "blocked_users")
     return True
 
 def reject_manual_payment(chat_id: int, request_id: Optional[int] = None):
@@ -10180,8 +10214,8 @@ def save_agent_if_needed(data: dict):
         )
         conn.commit()
         conn.close()
-    except:
-        pass
+    except Exception as exc:
+        logger.exception("Suppressed exception replaced with logging: %s", exc)
 
 def add_listing_new(data: dict) -> int:
     conn = get_local_conn()
@@ -10273,8 +10307,8 @@ def step_link(message):
             ),
         )
         send_message_to_admins(preview, parse_mode="Markdown", reply_markup=mk)
-    except:
-        pass
+    except Exception as exc:
+        logger.exception("Suppressed exception replaced with logging: %s", exc)
 
     bot.send_message(
         chat_id,
@@ -20141,8 +20175,8 @@ def cb_admin(c):
 
     try:
         bot.answer_callback_query(c.id)
-    except:
-        pass
+    except Exception as exc:
+        logger.exception("Suppressed exception replaced with logging: %s", exc)
 
 def show_admin_promo_menu(chat_id: int, message: Optional[types.Message] = None):
     if not is_admin(chat_id):
@@ -22777,6 +22811,7 @@ def cb_approve_new_user(c):
     cur.execute(f"UPDATE users SET {', '.join(updates)} WHERE chat_id=?", (uid,))
     conn.commit()
     conn.close()
+    user_db.invalidate_cache(f"users:{uid}", "blocked_users", "premium_users")
 
     try:
         render_ui(c.message.chat.id, f"✅ İstifadəçi təsdiqləndi\nID: {uid}", None)
@@ -22824,6 +22859,7 @@ def cb_user_approve_action(c):
     cur.execute("UPDATE users SET approved=1 WHERE chat_id=?", (uid,))
     conn.commit()
     conn.close()
+    user_db.invalidate_cache(f"users:{uid}", "blocked_users", "premium_users")
 
     safe_answer_callback_query(c.id, "✅ İstifadəçi təsdiqləndi.")
     try:
@@ -22909,6 +22945,7 @@ def cb_user_approve(c):
     cur.execute("UPDATE users SET approved=1 WHERE chat_id=?", (uid,))
     conn.commit()
     conn.close()
+    user_db.invalidate_cache(f"users:{uid}", "blocked_users", "premium_users")
 
     bot.answer_callback_query(c.id, "✅ İstifadəçi təsdiqləndi.")
     try:
@@ -23032,8 +23069,8 @@ def refresh_button_message(message):
 def cb_bot_refresh(c):
     try:
         bot.answer_callback_query(c.id, "✅ Yeniləndi.")
-    except:
-        pass
+    except Exception as exc:
+        logger.exception("Suppressed exception replaced with logging: %s", exc)
     handle_bot_refresh(c.message)
 
 @bot.callback_query_handler(func=lambda c: c.data == "refresh_bot")
@@ -23042,8 +23079,8 @@ def cb_refresh_bot(c):
     """İstifadəçi 'Botu yenilə' düyməsinə basanda başlanğıc bərpa olunur."""
     try:
         bot.answer_callback_query(c.id, "✅ Yeniləndi.")
-    except:
-        pass
+    except Exception as exc:
+        logger.exception("Suppressed exception replaced with logging: %s", exc)
     handle_bot_refresh(c.message)
 
 # =============== PUBLIC MENYUDAN DÜYMƏLƏR ===============
@@ -24635,8 +24672,8 @@ def admin_search_handler(message):
                 ev = dict(r)
                 ev["__source"] = "main"
                 items.append(ev)
-        except:
-            pass
+        except Exception as exc:
+            logger.exception("Suppressed exception replaced with logging: %s", exc)
 
     # LOCAL APPROVED
     conn = get_local_conn()
@@ -24678,8 +24715,8 @@ def admin_search_handler(message):
             ev = dict(r)
             ev["__source"] = "agents"
             items.append(ev)
-    except:
-        pass
+    except Exception as exc:
+        logger.exception("Suppressed exception replaced with logging: %s", exc)
 
     if not items:
         bot.send_message(message.chat.id, "😕 Heç nə tapılmadı.")
@@ -25871,28 +25908,14 @@ def register_or_update_user_if_needed(message, start_arg: str) -> bool:
     first_name = getattr(user, "first_name", "") or ""
     last_name = getattr(user, "last_name", "") or ""
     full_name = (f"{first_name} {last_name}").strip() or first_name or username or str(chat_id)
-    referrer_chat_id = parse_referrer_from_text(message.text or "")
-    source_type = "qr" if start_arg in ALLOWED_START_AREAS else "direct"
-    source_area = start_arg if start_arg in ALLOWED_START_AREAS else None
-    demo_days = 7 if source_area else 3
-    demo_expiry = datetime.utcnow() + timedelta(days=demo_days)
+    existing = user_db.get_user(chat_id, use_cache=False)
     record, created = user_db.ensure_user(
         chat_id,
         username=username,
         full_name=full_name,
         first_name=first_name,
         is_admin=is_admin(chat_id),
-        start_source={
-            "source_type": source_type,
-            "source_area": source_area,
-            "join_source": start_arg or None,
-            "referred_by": referrer_chat_id if referrer_chat_id and referrer_chat_id != chat_id else None,
-            "last_version": CURRENT_VERSION,
-            "demo_days": demo_days,
-            "demo_end_at": demo_expiry.isoformat() if created else None,
-            "demo_expires_at": demo_expiry.isoformat() if created else None,
-            "attribution_created_at": datetime.now(timezone.utc).isoformat() if created else None,
-        },
+        start_source=_start_user_payload(message, start_arg, created=not bool(existing)),
     )
     if is_admin(chat_id):
         user_db.update_user(chat_id, {"approved": 1, "is_admin": 1, "blocked": 0})
@@ -26017,6 +26040,7 @@ def main():
     BOT_TOKEN = _load_bot_token()
 
     _initialize_app_state()
+    validate_supabase_startup()
 
     bot.bind(telebot.TeleBot(BOT_TOKEN))
     BOT_USERNAME = bot.get_me().username
