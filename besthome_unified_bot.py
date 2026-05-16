@@ -429,7 +429,10 @@ def handle_start(message):
     text = message.text or ""
     parts = text.split(maxsplit=1)
     start_arg = parts[1].strip().lower() if len(parts) > 1 else ""
-    _ensure_start_user_record(message, start_arg)
+    try:
+        _ensure_start_user_record(message, start_arg)
+    except Exception:
+        logger.exception("Failed to upsert /start user in Supabase chat_id=%s", chat_id)
     phone_row = get_phone_verification_row(chat_id)
     if not phone_row:
         logger.info("NEW_USER_STARTED user_id=%s", chat_id)

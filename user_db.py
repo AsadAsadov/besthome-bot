@@ -7,6 +7,7 @@ besthome.db through listing_db.py.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -64,6 +65,65 @@ def _log_supabase_error(table: str, action: str, exc: BaseException) -> None:
         exc,
         exc_info=True,
     )
+
+
+_UNAVAILABLE_USER_COLUMNS = set()
+
+
+def _missing_schema_column_from_error(exc: BaseException) -> Optional[str]:
+    """Return a missing PostgREST schema-cache column name when available."""
+    text = str(exc)
+    patterns = (
+        r"Could not find the ['\"](?P<column>[^'\"]+)['\"] column",
+        r"column ['\"](?P<column>[^'\"]+)['\"] of relation",
+        r"record ['\"](?P<column>[^'\"]+)['\"] has no field",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return match.group("column")
+    return None
+
+
+def _without_unavailable_user_columns(table: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    if table != "users" or not _UNAVAILABLE_USER_COLUMNS:
+        return payload
+    return {k: v for k, v in payload.items() if k not in _UNAVAILABLE_USER_COLUMNS}
+
+
+def _execute_user_write_with_schema_fallback(
+    action: str,
+    payload: Dict[str, Any],
+    execute,
+) -> Optional[Any]:
+    """Write users rows while tolerating optional columns absent from deployments.
+
+    Some BestHome deployments have a minimal `users` table.  The /start flow
+    should still save the Telegram user instead of failing the whole write when
+    optional profile or timestamp columns are not present in Supabase.
+    """
+    current_payload = _without_unavailable_user_columns("users", dict(payload))
+    for _ in range(len(payload) + 1):
+        try:
+            return execute(current_payload)
+        except Exception as exc:
+            missing_column = _missing_schema_column_from_error(exc)
+            if (
+                missing_column
+                and missing_column in current_payload
+                and missing_column != "chat_id"
+            ):
+                logger.warning(
+                    "[SUPABASE WARN] table=users action=%s missing_optional_column=%s; retrying without it",
+                    action,
+                    missing_column,
+                )
+                _UNAVAILABLE_USER_COLUMNS.add(missing_column)
+                current_payload.pop(missing_column, None)
+                continue
+            _log_supabase_error("users", action, exc)
+            return None
+    return None
 
 
 def _ttl_get(key: str) -> Any:
@@ -127,40 +187,55 @@ def select_many(
 
 
 def upsert(table: str, payload: Dict[str, Any], on_conflict: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    try:
-        conflict = on_conflict or ("chat_id" if "chat_id" in payload else None)
+    def execute(write_payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        conflict = on_conflict or ("chat_id" if "chat_id" in write_payload else None)
         query = (
-            supabase.table(table).upsert(payload, on_conflict=conflict)
+            supabase.table(table).upsert(write_payload, on_conflict=conflict)
             if conflict
-            else supabase.table(table).upsert(payload)
+            else supabase.table(table).upsert(write_payload)
         )
         response = query.execute()
         rows = response.data or []
         invalidate_cache(table)
-        if "chat_id" in payload:
-            invalidate_cache(f"{table}:{payload.get('chat_id')}")
-        return rows[0] if rows else payload
+        if "chat_id" in write_payload:
+            invalidate_cache(f"{table}:{write_payload.get('chat_id')}")
+        return rows[0] if rows else write_payload
+
+    if table == "users":
+        return _execute_user_write_with_schema_fallback("upsert", payload, execute)
+
+    try:
+        return execute(payload)
     except Exception as exc:
         _log_supabase_error(table, "upsert", exc)
         return None
 
 
 def insert(table: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    try:
-        response = supabase.table(table).insert(payload).execute()
+    def execute(write_payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        response = supabase.table(table).insert(write_payload).execute()
         rows = response.data or []
         invalidate_cache(table)
-        if "chat_id" in payload:
-            invalidate_cache(f"{table}:{payload.get('chat_id')}")
-        return rows[0] if rows else payload
+        if "chat_id" in write_payload:
+            invalidate_cache(f"{table}:{write_payload.get('chat_id')}")
+        return rows[0] if rows else write_payload
+
+    if table == "users":
+        return _execute_user_write_with_schema_fallback("insert", payload, execute)
+
+    try:
+        return execute(payload)
     except Exception as exc:
         _log_supabase_error(table, "insert", exc)
         return None
 
 
 def update(table: str, payload: Dict[str, Any], **equals: Any) -> bool:
-    try:
-        query = supabase.table(table).update(payload)
+    def execute(write_payload: Dict[str, Any]) -> bool:
+        if not write_payload:
+            logger.warning("[SUPABASE WARN] table=%s action=update skipped empty payload", table)
+            return True
+        query = supabase.table(table).update(write_payload)
         for key, value in equals.items():
             query = query.eq(key, value)
         query.execute()
@@ -168,6 +243,12 @@ def update(table: str, payload: Dict[str, Any], **equals: Any) -> bool:
         if "chat_id" in equals:
             invalidate_cache(f"{table}:{equals.get('chat_id')}")
         return True
+
+    if table == "users":
+        return bool(_execute_user_write_with_schema_fallback("update", payload, execute))
+
+    try:
+        return execute(payload)
     except Exception as exc:
         _log_supabase_error(table, "update", exc)
         return False
