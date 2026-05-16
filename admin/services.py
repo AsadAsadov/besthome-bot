@@ -1,6 +1,7 @@
 import logging
 import os
 import sqlite3
+import user_db
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple, List, Sequence
 
@@ -25,7 +26,6 @@ def _send_approval_notification(chat_id: int) -> None:
 
 class AdminDatabase:
     def __init__(self, data_dir: str):
-        self.local_db = os.path.join(data_dir, "local_data.db")
         self.main_db = os.path.join(data_dir, "besthome.db")
         self._indexes_created = False
 
@@ -34,8 +34,8 @@ class AdminDatabase:
         conn.row_factory = sqlite3.Row
         return conn
 
-    def local_conn(self) -> sqlite3.Connection:
-        return self._connect(self.local_db)
+    def local_conn(self):
+        return user_db.SupabaseCompatConnection()
 
     def main_conn(self) -> sqlite3.Connection:
         return self._connect(self.main_db)

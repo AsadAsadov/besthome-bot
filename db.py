@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
-DB_PATH = os.getenv("DM_DB_PATH", "local_data.db")
+DB_PATH = os.getenv("DM_DB_PATH", "dm_events.db")
 
 
 def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:

@@ -1,0 +1,444 @@
+"""Supabase access layer for BestHome user data.
+
+Only user-owned tables live here. Listing search and region filtering remain in
+besthome.db through listing_db.py.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterable, List, Optional, Sequence
+
+from supabase_client import supabase
+
+logger = logging.getLogger("besthome_user_db")
+
+USER_TABLES = {
+    "users",
+    "subscriptions",
+    "favorites",
+    "user_notifications",
+    "search_history",
+    "saved_searches",
+    "payments",
+    "referrals",
+    "promo_codes",
+    "promo_usages",
+    "user_activity",
+    "search_logs",
+    "keyword_alerts",
+    "keyword_alert_hits",
+    "customer_requests",
+    "customer_request_rules",
+    "customer_request_alerts",
+    "customer_request_favorites",
+    "customer_request_archives",
+    "agents",
+    "agent_activity",
+    "agent_notifications",
+    "agent_interests",
+    "customer_requests_access",
+    "support_threads",
+    "support_messages",
+    "feature_flags",
+    "feature_overrides",
+    "manual_payments",
+    "bonus_probabilities",
+}
+
+_CACHE_TTL_SECONDS = 60
+_cache: Dict[str, Dict[str, Any]] = {}
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _log_supabase_error(table: str, action: str, exc: BaseException) -> None:
+    logger.error(
+        "[SUPABASE ERROR]\ntable=%s\naction=%s\ndetails=%s",
+        table,
+        action,
+        exc,
+        exc_info=True,
+    )
+
+
+def _ttl_get(key: str) -> Any:
+    item = _cache.get(key)
+    if not item:
+        return None
+    if item["expires_at"] < time.time():
+        _cache.pop(key, None)
+        return None
+    return item["value"]
+
+
+def _ttl_set(key: str, value: Any, ttl: int = _CACHE_TTL_SECONDS) -> Any:
+    _cache[key] = {"value": value, "expires_at": time.time() + ttl}
+    return value
+
+
+def invalidate_cache(*prefixes: str) -> None:
+    if not prefixes:
+        _cache.clear()
+        return
+    for key in list(_cache.keys()):
+        if any(key.startswith(prefix) for prefix in prefixes):
+            _cache.pop(key, None)
+
+
+def select_one(table: str, **equals: Any) -> Optional[Dict[str, Any]]:
+    try:
+        query = supabase.table(table).select("*")
+        for key, value in equals.items():
+            query = query.eq(key, value)
+        response = query.limit(1).execute()
+        rows = response.data or []
+        return rows[0] if rows else None
+    except Exception as exc:
+        _log_supabase_error(table, "select", exc)
+        return None
+
+
+def select_many(
+    table: str,
+    *,
+    order: Optional[str] = None,
+    desc: bool = False,
+    limit: Optional[int] = None,
+    **equals: Any,
+) -> List[Dict[str, Any]]:
+    try:
+        query = supabase.table(table).select("*")
+        for key, value in equals.items():
+            query = query.eq(key, value)
+        if order:
+            query = query.order(order, desc=desc)
+        if limit:
+            query = query.limit(limit)
+        response = query.execute()
+        return response.data or []
+    except Exception as exc:
+        _log_supabase_error(table, "select", exc)
+        return []
+
+
+def upsert(table: str, payload: Dict[str, Any], on_conflict: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    try:
+        query = supabase.table(table).upsert(payload, on_conflict=on_conflict) if on_conflict else supabase.table(table).upsert(payload)
+        response = query.execute()
+        rows = response.data or []
+        invalidate_cache(table)
+        return rows[0] if rows else payload
+    except Exception as exc:
+        _log_supabase_error(table, "upsert", exc)
+        return None
+
+
+def insert(table: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    try:
+        response = supabase.table(table).insert(payload).execute()
+        rows = response.data or []
+        invalidate_cache(table)
+        return rows[0] if rows else payload
+    except Exception as exc:
+        _log_supabase_error(table, "insert", exc)
+        return None
+
+
+def update(table: str, payload: Dict[str, Any], **equals: Any) -> bool:
+    try:
+        query = supabase.table(table).update(payload)
+        for key, value in equals.items():
+            query = query.eq(key, value)
+        query.execute()
+        invalidate_cache(table)
+        return True
+    except Exception as exc:
+        _log_supabase_error(table, "update", exc)
+        return False
+
+
+def delete(table: str, **equals: Any) -> bool:
+    try:
+        query = supabase.table(table).delete()
+        for key, value in equals.items():
+            query = query.eq(key, value)
+        query.execute()
+        invalidate_cache(table)
+        return True
+    except Exception as exc:
+        _log_supabase_error(table, "delete", exc)
+        return False
+
+
+def ensure_user(
+    chat_id: int,
+    *,
+    username: str = "",
+    full_name: str = "",
+    first_name: str = "",
+    is_admin: bool = False,
+    start_source: Optional[Dict[str, Any]] = None,
+) -> tuple[Dict[str, Any], bool]:
+    now_iso = _now_iso()
+    existing = get_user(chat_id, use_cache=False)
+    if existing:
+        payload = {
+            "last_seen": now_iso,
+            "last_seen_at": now_iso,
+            "username": username or existing.get("username"),
+            "full_name": full_name or existing.get("full_name"),
+            "first_name": first_name or existing.get("first_name"),
+            "last_version": start_source.get("last_version") if start_source else existing.get("last_version"),
+        }
+        update("users", payload, chat_id=chat_id)
+        merged = {**existing, **{k: v for k, v in payload.items() if v is not None}}
+        _ttl_set(f"users:{chat_id}", merged)
+        return merged, False
+
+    payload: Dict[str, Any] = {
+        "chat_id": chat_id,
+        "username": username or "",
+        "full_name": full_name or "",
+        "first_name": first_name or "",
+        "first_seen": now_iso,
+        "first_seen_at": now_iso,
+        "last_seen": now_iso,
+        "last_seen_at": now_iso,
+        "approved": 1 if is_admin else 0,
+        "blocked": 0,
+        "is_blocked": 0,
+        "is_admin": 1 if is_admin else 0,
+        "is_active": 1,
+        "is_first_start": 1,
+        "created_at": now_iso,
+        # joined_at is intentionally omitted so the Supabase/PostgreSQL default NOW() owns it.
+    }
+    if start_source:
+        payload.update({k: v for k, v in start_source.items() if v is not None})
+    created = upsert("users", payload, on_conflict="chat_id") or payload
+    _ttl_set(f"users:{chat_id}", created)
+    return created, True
+
+
+def get_user(chat_id: int, *, use_cache: bool = True) -> Optional[Dict[str, Any]]:
+    key = f"users:{chat_id}"
+    if use_cache:
+        cached = _ttl_get(key)
+        if cached is not None:
+            return cached
+    row = select_one("users", chat_id=chat_id)
+    if row:
+        _ttl_set(key, row)
+    return row
+
+
+def update_user(chat_id: int, payload: Dict[str, Any]) -> bool:
+    ok = update("users", payload, chat_id=chat_id)
+    invalidate_cache(f"users:{chat_id}", "premium_users", "blocked_users", "admin_users")
+    return ok
+
+
+def get_subscription(chat_id: int) -> Optional[Dict[str, Any]]:
+    cached = _ttl_get(f"subscriptions:{chat_id}")
+    if cached is not None:
+        return cached
+    row = select_one("subscriptions", chat_id=chat_id)
+    return _ttl_set(f"subscriptions:{chat_id}", row)
+
+
+def upsert_subscription(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    result = upsert("subscriptions", payload, on_conflict="chat_id")
+    invalidate_cache(f"subscriptions:{payload.get('chat_id')}", "premium_users")
+    return result
+
+
+def list_favorites(chat_id: int, source: Optional[str] = None) -> List[Dict[str, Any]]:
+    params: Dict[str, Any] = {"chat_id": chat_id}
+    if source:
+        params["source"] = source
+    return select_many("favorites", order="added_at", desc=True, **params)
+
+
+def toggle_favorite(chat_id: int, listing_id: int, source: str = "main") -> bool:
+    existing = select_one("favorites", chat_id=chat_id, listing_id=listing_id, source=source)
+    if existing:
+        delete("favorites", chat_id=chat_id, listing_id=listing_id, source=source)
+        return False
+    upsert(
+        "favorites",
+        {"chat_id": chat_id, "listing_id": listing_id, "source": source, "added_at": _now_iso()},
+        on_conflict="chat_id,listing_id,source",
+    )
+    return True
+
+
+def ensure_notification_records(chat_id: int, criteria_id: Optional[int], listing_ids: Sequence[int]) -> int:
+    inserted = 0
+    for lid in dict.fromkeys(listing_ids):
+        try:
+            listing_id = int(lid)
+        except Exception:
+            continue
+        payload = {
+            "chat_id": chat_id,
+            "criteria_id": criteria_id,
+            "listing_id": listing_id,
+            "created_at": _now_iso(),
+            "status": "new",
+        }
+        if upsert("user_notifications", payload, on_conflict="chat_id,criteria_id,listing_id"):
+            inserted += 1
+    return inserted
+
+
+def cached_admin_users() -> List[int]:
+    cached = _ttl_get("admin_users")
+    if cached is not None:
+        return cached
+    rows = select_many("users", is_admin=1)
+    return _ttl_set("admin_users", [int(r["chat_id"]) for r in rows if r.get("chat_id")])
+
+
+def cached_blocked_users() -> List[int]:
+    cached = _ttl_get("blocked_users")
+    if cached is not None:
+        return cached
+    rows = select_many("users", blocked=1)
+    rows += select_many("users", is_blocked=1)
+    ids = sorted({int(r["chat_id"]) for r in rows if r.get("chat_id")})
+    return _ttl_set("blocked_users", ids)
+
+class SupabaseCompatCursor:
+    """Small transitional cursor for legacy code paths while user tables move to Supabase.
+
+    It intentionally does not touch SQLite. Supported simple statements are routed to
+    Supabase; unsupported reporting joins return an empty result instead of creating a
+    local database.
+    """
+
+    def __init__(self):
+        self._rows: List[Dict[str, Any]] = []
+        self.rowcount = 0
+        self.lastrowid = None
+
+    def execute(self, sql: str, params: Iterable[Any] = ()):  # noqa: C901 - transitional parser
+        import re
+
+        params = tuple(params or ())
+        compact = " ".join((sql or "").strip().split())
+        lower = compact.lower()
+        self._rows = []
+        self.rowcount = 0
+        try:
+            if lower.startswith("select 1"):
+                self._rows = [{"1": 1}]
+                return self
+            if lower.startswith("select"):
+                m = re.search(r"from\s+([a-zA-Z_][a-zA-Z0-9_]*)", lower)
+                table = m.group(1) if m else ""
+                if table not in USER_TABLES and table != "users_with_status":
+                    return self
+                table = "users" if table == "users_with_status" else table
+                rows = select_many(table)
+                # Apply very common single-column equality predicates in parameter order.
+                columns = re.findall(r"([a-zA-Z_][a-zA-Z0-9_\.]*?)\s*=\s*\?", compact)
+                for col, value in zip(columns, params):
+                    key = col.split(".")[-1]
+                    rows = [r for r in rows if str(r.get(key)) == str(value)]
+                self._rows = rows
+                self.rowcount = len(rows)
+                return self
+            if lower.startswith("update"):
+                m = re.match(r"update\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+set\s+(.+?)\s+where\s+(.+)", compact, re.I)
+                if not m:
+                    return self
+                table, set_part, where_part = m.groups()
+                if table not in USER_TABLES:
+                    return self
+                set_cols = [part.split("=")[0].strip() for part in set_part.split(",") if "?" in part]
+                payload = {col: params[i] for i, col in enumerate(set_cols) if i < len(params)}
+                where_cols = re.findall(r"([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*\?", where_part)
+                equals = {}
+                for idx, col in enumerate(where_cols, start=len(set_cols)):
+                    if idx < len(params):
+                        equals[col] = params[idx]
+                if equals:
+                    self.rowcount = 1 if update(table, payload, **equals) else 0
+                return self
+            if lower.startswith("insert"):
+                m = re.search(r"into\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(([^)]+)\)", compact, re.I)
+                if not m:
+                    return self
+                table, cols_raw = m.groups()
+                if table not in USER_TABLES:
+                    return self
+                cols = [c.strip() for c in cols_raw.split(",")]
+                payload = {col: params[i] for i, col in enumerate(cols) if i < len(params)}
+                result = upsert(table, payload)
+                self.rowcount = 1 if result else 0
+                return self
+            if lower.startswith("delete"):
+                m = re.match(r"delete\s+from\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+where\s+(.+)", compact, re.I)
+                if not m:
+                    return self
+                table, where_part = m.groups()
+                if table not in USER_TABLES:
+                    return self
+                where_cols = re.findall(r"([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*\?", where_part)
+                equals = {col: params[i] for i, col in enumerate(where_cols) if i < len(params)}
+                self.rowcount = 1 if delete(table, **equals) else 0
+                return self
+        except Exception as exc:
+            _log_supabase_error("legacy_sql", compact[:80], exc)
+        return self
+
+    def executemany(self, sql: str, seq_of_params: Iterable[Iterable[Any]]):
+        count = 0
+        for params in seq_of_params:
+            self.execute(sql, params)
+            count += self.rowcount or 0
+        self.rowcount = count
+        return self
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+class SupabaseCompatConnection:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+    def cursor(self):
+        return SupabaseCompatCursor()
+
+    def execute(self, sql: str, params: Iterable[Any] = ()): 
+        cur = self.cursor()
+        return cur.execute(sql, params)
+
+    def executemany(self, sql: str, seq_of_params: Iterable[Iterable[Any]]):
+        cur = self.cursor()
+        return cur.executemany(sql, seq_of_params)
+
+    def executescript(self, sql: str):
+        return self.cursor()
+
+    def commit(self):
+        return None
+
+    def rollback(self):
+        return None
+
+    def close(self):
+        return None
