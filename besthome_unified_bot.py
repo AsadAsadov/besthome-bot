@@ -10366,54 +10366,31 @@ def _normalize_favorite_source(source: Optional[str]) -> str:
 
 def is_favorite_entry(chat_id: int, source: str, listing_id: int) -> bool:
     norm_source = _normalize_favorite_source(source)
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT 1
-        FROM favorites
-        WHERE chat_id=? AND source=? AND listing_id=?
-        LIMIT 1
-        """,
-        (chat_id, norm_source, listing_id),
-    )
-    row = cur.fetchone()
-    conn.close()
-    return bool(row)
+    try:
+        return user_db.is_favorite(chat_id, listing_id, source=norm_source)
+    except Exception as e:
+        logger.exception("is_favorite_entry failed chat_id=%s listing_id=%s source=%s error=%s", chat_id, listing_id, norm_source, e)
+        return False
 
 def add_favorite_entry(chat_id: int, source: str, listing_id: int) -> bool:
     norm_source = _normalize_favorite_source(source)
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT OR IGNORE INTO favorites (chat_id, listing_id, source, added_at)
-        VALUES (?, ?, ?, ?)
-        """,
-        (chat_id, listing_id, norm_source, datetime.utcnow().isoformat()),
-    )
-    inserted = cur.rowcount > 0
-    conn.commit()
-    conn.close()
-    if inserted:
-        record_favorite_price(norm_source, listing_id)
-    return inserted
+    try:
+        existed = user_db.is_favorite(chat_id, listing_id, source=norm_source)
+        user_db.add_favorite(chat_id, listing_id, source=norm_source)
+        if not existed:
+            record_favorite_price(norm_source, listing_id)
+        return not existed
+    except Exception as e:
+        logger.exception("add_favorite_entry failed chat_id=%s listing_id=%s source=%s error=%s", chat_id, listing_id, norm_source, e)
+        return False
 
 def remove_favorite_entry(chat_id: int, source: str, listing_id: int) -> bool:
     norm_source = _normalize_favorite_source(source)
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        DELETE FROM favorites
-        WHERE chat_id=? AND source=? AND listing_id=?
-        """,
-        (chat_id, norm_source, listing_id),
-    )
-    removed = cur.rowcount > 0
-    conn.commit()
-    conn.close()
-    return removed
+    try:
+        return user_db.remove_favorite(chat_id, listing_id, source=norm_source)
+    except Exception as e:
+        logger.exception("remove_favorite_entry failed chat_id=%s listing_id=%s source=%s error=%s", chat_id, listing_id, norm_source, e)
+        return False
 
 @bot.message_handler(func=lambda m: m.text == "⭐ Favorilərim")
 def show_favorites(message):
@@ -10880,6 +10857,14 @@ def handle_favorites_menu(chat_id: int):
     set_navigation_state(chat_id, STATE_SEARCH_ACTION)
     set_search_menu_active(chat_id, True)
     reset_search_state(chat_id)
+    try:
+        if not user_db.get_user_favorites(chat_id):
+            bot.send_message(chat_id, "Favori elan yoxdur")
+            return
+    except Exception as e:
+        logger.exception("handle_favorites_menu failed chat_id=%s error=%s", chat_id, e)
+        bot.send_message(chat_id, "Əməliyyat zamanı xəta baş verdi")
+        return
     send_paginated_results(chat_id, "favorites", params={}, page=1)
 
 def handle_notifications_menu(chat_id: int):
@@ -15325,29 +15310,19 @@ def query_phone_results(
     return results, total
 
 def query_favorites_page(chat_id: int, offset: int = 0, limit: int = None):
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM favorites WHERE chat_id=?", (chat_id,))
-    total = cur.fetchone()[0]
-    cur.execute(
-        """
-        SELECT listing_id, source FROM favorites
-        WHERE chat_id=?
-        ORDER BY added_at DESC
-        LIMIT ? OFFSET ?
-    """,
-        (chat_id, limit if limit is not None else -1, offset),
-    )
-    rows = cur.fetchall()
-    conn.close()
+    rows = user_db.get_user_favorites(chat_id)
+    total = len(rows)
+    if limit is not None:
+        rows = rows[offset : offset + limit]
+    elif offset:
+        rows = rows[offset:]
 
     items = []
     for r in rows:
-        ev = fetch_listing_by_source(
-            r["source"], r["listing_id"]
-        )
+        src = _normalize_favorite_source(r.get("source"))
+        ev = fetch_listing_by_source(src, r.get("listing_id"))
         if ev:
-            items.append({"data": ev, "source": r["source"]})
+            items.append({"data": ev, "source": src})
     return items, total
 
 def fetch_page_results(chat_id: int, mode: str, params: dict, page: int):
@@ -21708,7 +21683,6 @@ def delete_user_fully(chat_id: int):
 
     conn = get_local_conn()
     cur = conn.cursor()
-    cur.execute("DELETE FROM favorites WHERE chat_id=?", (chat_id,))
     cur.execute("DELETE FROM subscriptions WHERE chat_id=?", (chat_id,))
     cur.execute("DELETE FROM agent_activity WHERE chat_id=?", (chat_id,))
     cur.execute("DELETE FROM users WHERE chat_id=?", (chat_id,))
@@ -25507,36 +25481,18 @@ def create_flask_app():
                 return api_error_response("Telegram user_id missing", 400)
 
             ensure_user_exists(user_id)
-            conn = get_local_conn()
-            cur = conn.cursor()
-            cur.execute(
-                """
-                SELECT listing_id, source, added_at
-                FROM favorites
-                WHERE chat_id=?
-                ORDER BY added_at DESC
-                """,
-                (user_id,),
-            )
-            rows = cur.fetchall()
-            conn.close()
+            rows = user_db.get_user_favorites(user_id)
 
             results = []
             for r in rows:
-                src = r["source"] or "main"
-                if src == "besthome":
-                    src = "main"
-                listing = fetch_listing_by_source(
-                    src, r["listing_id"]
-                )
+                src = _normalize_favorite_source(r.get("source"))
+                listing = fetch_listing_by_source(src, r.get("listing_id"))
                 if not listing and src != "main":
-                    listing = fetch_listing_by_source(
-                        "main", r["listing_id"]
-                    )
+                    listing = fetch_listing_by_source("main", r.get("listing_id"))
 
                 base_payload = {
-                    "listing_id": r["listing_id"],
-                    "created_at": r["added_at"],
+                    "listing_id": r.get("listing_id"),
+                    "created_at": r.get("created_at"),
                     "source": src,
                 }
 
@@ -25572,28 +25528,13 @@ def create_flask_app():
             source_raw = payload.get("source") or "main"
             source = "main" if source_raw in ("besthome", "main") else source_raw
 
-            conn = get_local_conn()
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT 1 FROM favorites WHERE chat_id=? AND listing_id=? AND source=?",
-                (user_id, listing_id, source),
-            )
-            exists = cur.fetchone() is not None
-
+            exists = user_db.is_favorite(user_id, listing_id, source=source)
             if exists:
-                cur.execute(
-                    "DELETE FROM favorites WHERE chat_id=? AND listing_id=? AND source=?",
-                    (user_id, listing_id, source),
-                )
+                user_db.remove_favorite(user_id, listing_id, source=source)
                 is_fav = False
             else:
-                cur.execute(
-                    "INSERT OR IGNORE INTO favorites (chat_id, listing_id, source, added_at) VALUES (?, ?, ?, ?)",
-                    (user_id, listing_id, source, datetime.utcnow().isoformat()),
-                )
+                user_db.add_favorite(user_id, listing_id, source=source)
                 is_fav = True
-            conn.commit()
-            conn.close()
 
             log_api_call(
                 "favorites_toggle",
