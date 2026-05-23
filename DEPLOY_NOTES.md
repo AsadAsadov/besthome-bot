@@ -24,6 +24,7 @@ Use **two services** so Instagram webhook and Telegram bot can run independently
 
 2. **Telegram Bot Worker**
    - Service type: **Background Worker**
+   - Instances: **1**
    - Build Command:
      ```bash
      pip install -r requirements.txt
@@ -32,6 +33,9 @@ Use **two services** so Instagram webhook and Telegram bot can run independently
      ```bash
      python telegram_main.py
      ```
+   - Environment:
+     - `WEB_CONCURRENCY=1`
+     - `PYTHONUNBUFFERED=1`
 
 ## Required environment variables (Telegram worker)
 - `BOT_TOKEN` (required)
