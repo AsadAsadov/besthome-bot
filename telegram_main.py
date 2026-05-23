@@ -51,10 +51,14 @@ def _start_render_health_server() -> threading.Thread:
     return thread
 
 
+def run_bot() -> None:
+    from besthome_unified_bot import main as initialize_bot, run_bot as start_polling
+
+    initialize_bot()
+    start_polling()
+
+
 if __name__ == "__main__":
     bootstrap_env()
     _start_render_health_server()
-
-    from besthome_unified_bot import main as run_telegram_bot
-
-    run_telegram_bot()
+    run_bot()

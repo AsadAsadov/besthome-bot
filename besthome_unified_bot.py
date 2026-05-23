@@ -26047,6 +26047,10 @@ def init_local_db():
 def init_agents_db():
     logger.info("Supabase agent user-data tables active.")
 
+
+_POLLING_START_LOCK = threading.Lock()
+_POLLING_STARTED = False
+
 def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -26074,10 +26078,16 @@ def main():
 
     create_flask_app()
     logger.info("[BOOT] Startup completed")
-    run_bot()
 
 def run_bot():
-    logger.info("🤖 SINGLE polling loop active")
+    global _POLLING_STARTED
+    with _POLLING_START_LOCK:
+        if _POLLING_STARTED:
+            logger.warning("[BOOT] Duplicate start prevented")
+            return
+        _POLLING_STARTED = True
+
+    logger.info("[BOOT] Bot starting single instance")
     try:
         bot.remove_webhook(drop_pending_updates=True)
         logger.info("[BOOT] Telegram webhook removed before polling")
@@ -26091,7 +26101,7 @@ def run_bot():
                 skip_pending=True,
                 allowed_updates=["message", "callback_query"],
             )
-        except Exception as e:
+        except Exception:
             logger.exception("Polling crashed")
             time.sleep(5)
 
