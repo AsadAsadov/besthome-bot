@@ -15868,6 +15868,7 @@ def update_listing_keyboard(message, chat_id, listing_id):
         )
     except Exception:
         logger.exception("[FAV UI] markup update failed")
+    return is_fav
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("fav:"))
@@ -15896,17 +15897,21 @@ def handle_fav(call):
 
         if action == "add":
             add_favorite_entry(chat_id, source, int(listing_id))
-
         elif action == "remove":
             remove_favorite_entry(chat_id, source, int(listing_id))
 
+        state = is_favorite_entry(chat_id, source, int(listing_id))
+
         bot.answer_callback_query(call.id)
 
-        update_listing_keyboard(
+        refreshed_state = update_listing_keyboard(
             call.message,
             chat_id,
             listing_id
         )
+        if refreshed_state is None:
+            refreshed_state = state
+        logger.info("[FAV UI] refreshed state=%s", refreshed_state)
 
     except Exception as e:
         logger.exception("Favorite callback failed")

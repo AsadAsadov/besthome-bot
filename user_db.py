@@ -430,14 +430,18 @@ def add_favorite(chat_id: int, listing_id: int, source: str = "main") -> bool:
         "chat_id": chat_id,
         "listing_id": listing_id,
         "source": source,
-        "created_at": _now_iso(),
     }
     result = upsert("favorites", payload, on_conflict="chat_id,listing_id,source")
+    if result:
+        logger.info("[FAV DB] insert success listing=%s", listing_id)
     return bool(result)
 
 
 def remove_favorite(chat_id: int, listing_id: int, source: str = "main") -> bool:
-    return delete("favorites", chat_id=chat_id, listing_id=listing_id, source=source)
+    removed = delete("favorites", chat_id=chat_id, listing_id=listing_id, source=source)
+    if removed:
+        logger.info("[FAV DB] remove success listing=%s", listing_id)
+    return removed
 
 
 def is_favorite(chat_id: int, listing_id: int, source: str = "main") -> bool:
@@ -448,7 +452,7 @@ def get_user_favorites(chat_id: int, source: Optional[str] = None) -> List[Dict[
     params: Dict[str, Any] = {"chat_id": chat_id}
     if source:
         params["source"] = source
-    rows = select_many("favorites", order="created_at", desc=True, **params)
+    rows = select_many("favorites", order="added_at", desc=True, **params)
     return rows or []
 
 
