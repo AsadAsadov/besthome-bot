@@ -51,6 +51,12 @@ USER_TABLES = {
 
 _CACHE_TTL_SECONDS = 60
 _cache: Dict[str, Dict[str, Any]] = {}
+_DEFAULT_ON_CONFLICT_BY_TABLE: Dict[str, str] = {
+    "users": "chat_id",
+    "subscriptions": "chat_id",
+    "favorites": "chat_id,listing_id,source",
+    "user_notifications": "chat_id,criteria_id,listing_id",
+}
 
 
 def _now_iso() -> str:
@@ -188,7 +194,7 @@ def select_many(
 
 def upsert(table: str, payload: Dict[str, Any], on_conflict: Optional[str] = None) -> Optional[Dict[str, Any]]:
     def execute(write_payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        conflict = on_conflict or ("chat_id" if "chat_id" in write_payload else None)
+        conflict = on_conflict or _DEFAULT_ON_CONFLICT_BY_TABLE.get(table)
         query = (
             supabase.table(table).upsert(write_payload, on_conflict=conflict)
             if conflict
