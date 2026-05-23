@@ -11,7 +11,6 @@ CURRENT_VERSION = "v10"
 import os
 import time
 import errno
-import atexit
 import zipfile
 import sqlite3
 import user_db
@@ -25136,7 +25135,6 @@ _app_initialized = False
 app: Optional[Flask] = None
 __all__ = ["main", "create_flask_app", "app"]
 
-_polling_started = threading.Event()
 
 def _initialize_app_state():
     global _app_initialized
@@ -25994,41 +25992,6 @@ def ensure_notification_records(chat_id: int, criteria_id: Optional[int], listin
 
 _keyword_summary_timers: Dict[int, threading.Timer] = {}
 _keyword_summary_lock = threading.Lock()
-_startup_lock_fd = None
-
-def _acquire_startup_lock() -> bool:
-    global _startup_lock_fd
-    lock_path = os.environ.get("BOT_STARTUP_LOCK_FILE", "/tmp/besthome_telegram_bot.lock")
-    try:
-        _startup_lock_fd = open(lock_path, "w")
-        try:
-            import fcntl
-            fcntl.flock(_startup_lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except ImportError:
-            pass
-        _startup_lock_fd.write(str(os.getpid()))
-        _startup_lock_fd.flush()
-        logger.info("[BOOT] Startup lock acquired path=%s pid=%s", lock_path, os.getpid())
-        return True
-    except OSError:
-        logger.warning("[BOOT] Another bot process already holds startup lock path=%s", lock_path)
-        return False
-
-def _release_startup_lock() -> None:
-    global _startup_lock_fd
-    if _startup_lock_fd is None:
-        return
-    try:
-        try:
-            import fcntl
-            fcntl.flock(_startup_lock_fd.fileno(), fcntl.LOCK_UN)
-        except ImportError:
-            pass
-        _startup_lock_fd.close()
-    except Exception:
-        logger.exception("[BOOT] Failed to release startup lock")
-    finally:
-        _startup_lock_fd = None
 
 def notify_on_keyword_match(matches: List[dict], user_id: int) -> None:
     """Group all matches per user into one summary notification."""
@@ -26080,15 +26043,6 @@ def init_agents_db():
     logger.info("Supabase agent user-data tables active.")
 
 def main():
-    if _polling_started.is_set():
-        logger.info("Bot polling already running; skipping duplicate start")
-        return
-    if not _acquire_startup_lock():
-        return
-
-    _polling_started.set()
-    atexit.register(_release_startup_lock)
-
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -26120,7 +26074,7 @@ def main():
 def run_bot():
     logger.info("🤖 SINGLE polling loop active")
     try:
-        bot.remove_webhook()
+        bot.remove_webhook(drop_pending_updates=True)
         logger.info("[BOOT] Telegram webhook removed before polling")
     except Exception as e:
         logger.warning(f"Webhook remove failed: {e}")
@@ -26133,7 +26087,7 @@ def run_bot():
                 allowed_updates=["message", "callback_query"],
             )
         except Exception as e:
-            logger.error(f"Polling crashed, restarting in 5s: {e}")
+            logger.exception("Polling crashed")
             time.sleep(5)
 
 def keepalive_worker(interval_seconds: int = 300):
