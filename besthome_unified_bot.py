@@ -11,6 +11,8 @@ CURRENT_VERSION = "v10"
 import os
 import time
 import errno
+import atexit
+import fcntl
 import zipfile
 import sqlite3
 import user_db
@@ -26050,6 +26052,84 @@ def init_agents_db():
 
 _POLLING_START_LOCK = threading.Lock()
 _POLLING_STARTED = False
+_LOCK_FILE_PATH = "/tmp/besthome_bot.lock"
+_LOCK_FILE_HANDLE = None
+
+
+def _require_env(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
+
+def bootstrap_env() -> None:
+    _require_env("BOT_TOKEN")
+
+    admin_ids = os.getenv("ADMIN_IDS", "").strip()
+    admin_id = os.getenv("ADMIN_ID", "").strip()
+    if not admin_ids and not admin_id:
+        raise RuntimeError(
+            "Missing admin configuration. Set ADMIN_ID or ADMIN_IDS environment variable."
+        )
+    if admin_id and not admin_ids:
+        os.environ["ADMIN_IDS"] = admin_id
+
+
+def _release_startup_lock() -> None:
+    global _LOCK_FILE_HANDLE
+    if _LOCK_FILE_HANDLE is None:
+        return
+    try:
+        fcntl.flock(_LOCK_FILE_HANDLE.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        _LOCK_FILE_HANDLE.close()
+    except Exception:
+        pass
+    _LOCK_FILE_HANDLE = None
+
+
+def _acquire_startup_lock() -> None:
+    global _LOCK_FILE_HANDLE
+    lock_handle = open(_LOCK_FILE_PATH, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_handle.seek(0)
+        owner = lock_handle.read().strip() or "unknown"
+        logger.error("Another bot instance is active (owner pid=%s). Exiting.", owner)
+        lock_handle.close()
+        raise SystemExit(0)
+    lock_handle.seek(0)
+    lock_handle.truncate()
+    lock_handle.write(str(os.getpid()))
+    lock_handle.flush()
+    _LOCK_FILE_HANDLE = lock_handle
+    atexit.register(_release_startup_lock)
+
+
+def _start_render_health_server() -> threading.Thread:
+    host = "0.0.0.0"
+    port = int(os.getenv("PORT", 10000))
+    health_app = Flask("render_health")
+
+    @health_app.get("/")
+    def root_health() -> tuple[str, int]:
+        return "Bot is running", 200
+
+    from werkzeug.serving import make_server
+
+    server = make_server(host, port, health_app)
+
+    def _serve_forever() -> None:
+        logger.info("[BOOT] Render health server listening on %s:%s", host, port)
+        server.serve_forever()
+
+    thread = threading.Thread(target=_serve_forever, daemon=True, name="render-health-server")
+    thread.start()
+    return thread
 
 def main():
     logging.basicConfig(
@@ -26085,6 +26165,7 @@ def run_bot():
         if _POLLING_STARTED:
             logger.warning("[BOOT] Duplicate start prevented")
             return
+        _acquire_startup_lock()
         _POLLING_STARTED = True
 
     logger.info("[BOOT] Bot starting single instance")
@@ -26112,3 +26193,10 @@ def keepalive_worker(interval_seconds: int = 300):
         except Exception as exc:
             logger.warning("Keep-alive ping failed: %s", exc)
         time.sleep(interval_seconds)
+
+
+if __name__ == "__main__":
+    bootstrap_env()
+    _start_render_health_server()
+    main()
+    run_bot()
