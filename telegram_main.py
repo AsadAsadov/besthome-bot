@@ -1,29 +1,4 @@
-import atexit
-import fcntl
-import sys
-
-LOCK_FILE = "/tmp/besthome_telegram_bot.lock"
-
-lock_fp = open(LOCK_FILE, "w")
-
-try:
-    fcntl.flock(lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
-except BlockingIOError:
-    print("⚠️ Another bot instance already running")
-    sys.exit(0)
-
-
-def release_lock():
-    try:
-        fcntl.flock(lock_fp, fcntl.LOCK_UN)
-        lock_fp.close()
-    except:
-        pass
-
-
-atexit.register(release_lock)
-
-"""Render entrypoint for running the Telegram bot worker (STRICT POLLING MODE)."""
+"""Render entrypoint for running the Telegram bot worker."""
 
 import logging
 import os
@@ -56,7 +31,6 @@ def bootstrap_env() -> None:
 
 
 def _start_render_health_server() -> threading.Thread:
-    """Start a minimal HTTP server so Render Web Services can detect an open port."""
     host = "0.0.0.0"
     port = int(os.getenv("PORT", 10000))
 
@@ -79,17 +53,8 @@ def _start_render_health_server() -> threading.Thread:
 
 if __name__ == "__main__":
     bootstrap_env()
-
-    print("🚀 Bot tamamilə TƏK PROSES rejimində başladılır...")
-
-    # Təhlükəsizlik addımı: əgər nəsə arxa fonda ilişibsə, Render mühitini təmizləyirik
-    sys.stdout.flush()
-
     _start_render_health_server()
 
-    # Telegram botunu daxildə təhlükəsiz şəkildə çağırırıq
     from besthome_unified_bot import main as run_telegram_bot
 
-    # main() funksiyasını çağırırıq - daxildə sync_loop olmadığı üçün
-    # artıq CPU-nu yükləmədən təmiz polling başlayacaq
     run_telegram_bot()
