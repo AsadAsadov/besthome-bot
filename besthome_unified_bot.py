@@ -6085,12 +6085,16 @@ def build_listing_action_keyboard(
 
 def build_listing_navigation_keyboard(
     is_favorite: bool,
+    listing_id: Optional[int] = None,
     listing_link: Optional[str] = None,
     whatsapp_url: Optional[str] = None,
 ) -> types.InlineKeyboardMarkup:
-    fav_label = "💔 Favori" if is_favorite else "❤️ Favori"
+    fav_label = "❤️ Favoridən sil" if is_favorite else "🤍 Favoriyə əlavə et"
+    fav_callback = "fav:toggle"
+    if listing_id is not None:
+        fav_callback = f"fav:{'remove' if is_favorite else 'add'}:{listing_id}"
     mk = types.InlineKeyboardMarkup()
-    row1 = [types.InlineKeyboardButton(fav_label, callback_data="fav:toggle")]
+    row1 = [types.InlineKeyboardButton(fav_label, callback_data=fav_callback)]
     mk.row(*row1)
     mk.row(
         types.InlineKeyboardButton("⬅️ Əvvəlki", callback_data="nav:prev"),
@@ -15558,7 +15562,7 @@ def render_listing_for_user(
     wa_message = build_whatsapp_message(listing)
     wa_phone = listing.get("phone") or listing.get("Elaqe_nomresi")
     wa_url = make_whatsapp_url(wa_phone, wa_message)
-    markup = build_listing_navigation_keyboard(is_fav, listing_link, wa_url)
+    markup = build_listing_navigation_keyboard(is_fav, ref["id"], listing_link, wa_url)
     try:
         markup_signature = json.dumps(markup.to_dic(), sort_keys=True)
     except Exception:
@@ -15834,39 +15838,72 @@ def cb_listing_nav(c):
     except Exception:
         pass
 
-@bot.callback_query_handler(func=lambda c: c.data == "fav:toggle")
-@callback_guard
-def cb_listing_favorite_toggle(c):
-    if not ensure_allowed_cb(c):
-        return
-    chat_id = c.message.chat.id
+def update_listing_keyboard(message, chat_id, listing_id):
     session = get_active_listing_session(chat_id)
-    if not session or not session.get("result_ids"):
-        try:
-            bot.answer_callback_query(c.id, "Siyahı bitib.")
-        except Exception:
-            pass
+    if not session:
         return
-    ref = session["result_ids"][session.get("current_index", 0)]
+    refs = session.get("result_ids") or []
+    ref = None
+    for item in refs:
+        if str(item.get("id")) == str(listing_id):
+            ref = item
+            break
+    if not ref:
+        return
     is_fav = is_favorite_entry(chat_id, ref["source"], ref["id"])
-    if is_fav:
-        removed = remove_favorite_entry(chat_id, ref["source"], ref["id"])
-        msg = "❌ Favoritdən çıxarıldı" if removed else "Əvvəlcə əlavə olunmayıb"
-    else:
-        added = add_favorite_entry(chat_id, ref["source"], ref["id"])
-        msg = "❤️ Favoritə əlavə olundu" if added else "Artıq favoritdədir"
-    render_listing_view(
-        chat_id,
-        session.get("listings") or [],
-        session.get("current_index", 0),
-        mode=session.get("mode"),
-        params=session.get("params", {}),
-        track_view=session.get("track_view", False),
+    cache_key = make_listing_ref(ref["source"], ref["id"])
+    listing = session.get("cache", {}).get(cache_key)
+    listing_link = (listing.get("link") or listing.get("source_link")) if listing else None
+    wa_url = None
+    if listing:
+        wa_message = build_whatsapp_message(listing)
+        wa_phone = listing.get("phone") or listing.get("Elaqe_nomresi")
+        wa_url = make_whatsapp_url(wa_phone, wa_message)
+    new_markup = build_listing_navigation_keyboard(is_fav, ref["id"], listing_link, wa_url)
+    bot.edit_message_reply_markup(
+        chat_id=message.chat.id,
+        message_id=message.message_id,
+        reply_markup=new_markup
     )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("fav:"))
+@callback_guard
+def handle_fav(call):
+    if not ensure_allowed_cb(call):
+        return
     try:
-        bot.answer_callback_query(c.id, msg)
-    except Exception:
-        pass
+        data = call.data.split(":")
+        action = data[1]
+        listing_id = data[2]
+        chat_id = call.message.chat.id
+
+        if action == "add":
+            logger.info(f"[FAVORITE] add user={chat_id} listing={listing_id}")
+            add_favorite(chat_id, listing_id)
+
+        elif action == "remove":
+            logger.info(f"[FAVORITE] remove user={chat_id} listing={listing_id}")
+            remove_favorite(chat_id, listing_id)
+
+        bot.answer_callback_query(call.id)
+
+        update_listing_keyboard(
+            call.message,
+            chat_id,
+            listing_id
+        )
+
+    except Exception as e:
+        logger.exception("Favorite callback failed")
+
+        try:
+            bot.answer_callback_query(
+                call.id,
+                "Əməliyyat zamanı xəta baş verdi"
+            )
+        except:
+            pass
 
 def render_op_step(chat_id, message=None):
     st = search_state.setdefault(chat_id, {})
@@ -26071,12 +26108,12 @@ def main():
     run_bot()
 
 def run_bot():
-    logger.info("🤖 Telegram bot polling started (safe mode)")
+    logger.info("🤖 SINGLE polling loop active")
     try:
         bot.remove_webhook()
         logger.info("[BOOT] Telegram webhook removed before polling")
-    except Exception:
-        logger.exception("[BOOT] Failed to remove webhook before polling")
+    except Exception as e:
+        logger.warning(f"Webhook remove failed: {e}")
     while True:
         try:
             bot.infinity_polling(

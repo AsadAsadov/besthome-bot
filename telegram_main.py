@@ -1,5 +1,14 @@
 """Render entrypoint for running the Telegram bot worker (STRICT POLLING MODE)."""
 
+import os
+import sys
+
+if os.getenv("BOT_STARTED") == "1":
+    print("⚠️ BOT_ALREADY_STARTED")
+    sys.exit(0)
+
+os.environ["BOT_STARTED"] = "1"
+
 import logging
 import os
 import sys
