@@ -14385,7 +14385,7 @@ def check_favorite_price_drops():
         src = row["source"]
         lid = row["listing_id"]
         chat_id = row["chat_id"]
-        last_price = row["last_price"]
+        last_price = row.get("last_price")
 
         ev = fetch_listing_by_source(src, lid)
         if not ev:
@@ -26052,8 +26052,8 @@ def init_agents_db():
 
 _POLLING_START_LOCK = threading.Lock()
 _POLLING_STARTED = False
-_LOCK_FILE_PATH = "/tmp/besthome_bot.lock"
-_LOCK_FILE_HANDLE = None
+LOCK_FILE = "/tmp/besthome_bot.lock"
+lock_fd = None
 
 
 def _require_env(name: str) -> str:
@@ -26077,36 +26077,27 @@ def bootstrap_env() -> None:
 
 
 def _release_startup_lock() -> None:
-    global _LOCK_FILE_HANDLE
-    if _LOCK_FILE_HANDLE is None:
+    global lock_fd
+    if lock_fd is None:
         return
     try:
-        fcntl.flock(_LOCK_FILE_HANDLE.fileno(), fcntl.LOCK_UN)
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
     except Exception:
         pass
     try:
-        _LOCK_FILE_HANDLE.close()
+        lock_fd.close()
     except Exception:
         pass
-    _LOCK_FILE_HANDLE = None
+    lock_fd = None
 
 
-def _acquire_startup_lock() -> None:
-    global _LOCK_FILE_HANDLE
-    lock_handle = open(_LOCK_FILE_PATH, "a+", encoding="utf-8")
+def acquire_lock() -> None:
+    global lock_fd
+    lock_fd = open(LOCK_FILE, "w")
     try:
-        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        lock_handle.seek(0)
-        owner = lock_handle.read().strip() or "unknown"
-        logger.error("Another bot instance is active (owner pid=%s). Exiting.", owner)
-        lock_handle.close()
-        raise SystemExit(0)
-    lock_handle.seek(0)
-    lock_handle.truncate()
-    lock_handle.write(str(os.getpid()))
-    lock_handle.flush()
-    _LOCK_FILE_HANDLE = lock_handle
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except Exception:
+        raise SystemExit("Bot already running (lock active)")
     atexit.register(_release_startup_lock)
 
 
@@ -26131,6 +26122,19 @@ def _start_render_health_server() -> threading.Thread:
     thread.start()
     return thread
 
+def safe_init(fn):
+    try:
+        fn()
+    except Exception as e:
+        logger.exception(f"[BOOT SAFE FAIL] {e}")
+
+
+def background_init():
+    safe_init(_initialize_app_state)
+    safe_init(validate_supabase_startup)
+    safe_init(check_favorite_price_drops)
+
+
 def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -26140,9 +26144,6 @@ def main():
 
     global BOT_TOKEN, BOT_USERNAME
     BOT_TOKEN = _load_bot_token()
-
-    _initialize_app_state()
-    validate_supabase_startup()
 
     bot.bind(telebot.TeleBot(BOT_TOKEN))
     BOT_USERNAME = bot.get_me().username
@@ -26155,6 +26156,7 @@ def main():
 
     # FIX: Arxa fonda sonsuz dövrə girən və CPU-nu yükləyən sync_loop thread-i ləğv edildi.
     # Çünki tətbiq hər dəfə Render-də qalxanda baza onsuz da avtomatik bərpa olunur.
+    threading.Thread(target=background_init, daemon=True, name="background-init").start()
 
     create_flask_app()
     logger.info("[BOOT] Startup completed")
@@ -26165,7 +26167,6 @@ def run_bot():
         if _POLLING_STARTED:
             logger.warning("[BOOT] Duplicate start prevented")
             return
-        _acquire_startup_lock()
         _POLLING_STARTED = True
 
     logger.info("[BOOT] Bot starting single instance")
@@ -26174,17 +26175,12 @@ def run_bot():
         logger.info("[BOOT] Telegram webhook removed before polling")
     except Exception as e:
         logger.warning(f"Webhook remove failed: {e}")
-    while True:
-        try:
-            bot.infinity_polling(
-                timeout=60,
-                long_polling_timeout=60,
-                skip_pending=True,
-                allowed_updates=["message", "callback_query"],
-            )
-        except Exception:
-            logger.exception("Polling crashed")
-            time.sleep(5)
+    bot.infinity_polling(
+        timeout=60,
+        long_polling_timeout=60,
+        skip_pending=True,
+        allowed_updates=["message", "callback_query"],
+    )
 
 def keepalive_worker(interval_seconds: int = 300):
     while True:
@@ -26196,6 +26192,7 @@ def keepalive_worker(interval_seconds: int = 300):
 
 
 if __name__ == "__main__":
+    acquire_lock()
     bootstrap_env()
     _start_render_health_server()
     main()
