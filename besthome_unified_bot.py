@@ -15839,6 +15839,7 @@ def cb_listing_nav(c):
         pass
 
 def update_listing_keyboard(message, chat_id, listing_id):
+    logger.info(f"[FAV UI] refresh listing={listing_id}")
     session = get_active_listing_session(chat_id)
     if not session:
         return
@@ -15860,11 +15861,14 @@ def update_listing_keyboard(message, chat_id, listing_id):
         wa_phone = listing.get("phone") or listing.get("Elaqe_nomresi")
         wa_url = make_whatsapp_url(wa_phone, wa_message)
     new_markup = build_listing_navigation_keyboard(is_fav, ref["id"], listing_link, wa_url)
-    bot.edit_message_reply_markup(
-        chat_id=message.chat.id,
-        message_id=message.message_id,
-        reply_markup=new_markup
-    )
+    try:
+        bot.edit_message_reply_markup(
+            chat_id=message.chat.id,
+            message_id=message.message_id,
+            reply_markup=new_markup
+        )
+    except Exception:
+        logger.exception("[FAV UI] markup update failed")
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("fav:"))
@@ -15872,19 +15876,30 @@ def update_listing_keyboard(message, chat_id, listing_id):
 def handle_fav(call):
     if not ensure_allowed_cb(call):
         return
+    logger.info(f"[FAV CALLBACK] raw={call.data}")
+    logger.info(f"[FAV CALLBACK] message_id={call.message.message_id}")
     try:
         data = call.data.split(":")
+        if len(data) < 3:
+            bot.answer_callback_query(call.id, "Yanlış favorit məlumatı")
+            return
         action = data[1]
         listing_id = data[2]
+        if listing_id is None or str(listing_id).strip() == "":
+            bot.answer_callback_query(call.id, "Listing ID tapılmadı")
+            return
+        logger.info(f"[FAV CALLBACK] action={action} listing={listing_id}")
         chat_id = call.message.chat.id
+        session = get_active_listing_session(chat_id) or {}
+        refs = session.get("result_ids") or []
+        ref = next((item for item in refs if str(item.get("id")) == str(listing_id)), None)
+        source = (ref or {}).get("source", "main")
 
         if action == "add":
-            logger.info(f"[FAVORITE] add user={chat_id} listing={listing_id}")
-            add_favorite(chat_id, listing_id)
+            add_favorite_entry(chat_id, source, int(listing_id))
 
         elif action == "remove":
-            logger.info(f"[FAVORITE] remove user={chat_id} listing={listing_id}")
-            remove_favorite(chat_id, listing_id)
+            remove_favorite_entry(chat_id, source, int(listing_id))
 
         bot.answer_callback_query(call.id)
 
@@ -25983,9 +25998,6 @@ _startup_lock_fd = None
 
 def _acquire_startup_lock() -> bool:
     global _startup_lock_fd
-    if os.environ.get("BOT_STARTED") == "1":
-        logger.warning("[BOOT] BOT_STARTED guard already set; skipping duplicate start")
-        return False
     lock_path = os.environ.get("BOT_STARTUP_LOCK_FILE", "/tmp/besthome_telegram_bot.lock")
     try:
         _startup_lock_fd = open(lock_path, "w")
@@ -25994,7 +26006,6 @@ def _acquire_startup_lock() -> bool:
             fcntl.flock(_startup_lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except ImportError:
             pass
-        os.environ["BOT_STARTED"] = "1"
         _startup_lock_fd.write(str(os.getpid()))
         _startup_lock_fd.flush()
         logger.info("[BOOT] Startup lock acquired path=%s pid=%s", lock_path, os.getpid())
@@ -26018,7 +26029,6 @@ def _release_startup_lock() -> None:
         logger.exception("[BOOT] Failed to release startup lock")
     finally:
         _startup_lock_fd = None
-        os.environ.pop("BOT_STARTED", None)
 
 def notify_on_keyword_match(matches: List[dict], user_id: int) -> None:
     """Group all matches per user into one summary notification."""

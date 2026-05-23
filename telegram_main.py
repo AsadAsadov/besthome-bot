@@ -1,17 +1,32 @@
-"""Render entrypoint for running the Telegram bot worker (STRICT POLLING MODE)."""
-
-import os
+import atexit
+import fcntl
 import sys
 
-if os.getenv("BOT_STARTED") == "1":
-    print("⚠️ BOT_ALREADY_STARTED")
+LOCK_FILE = "/tmp/besthome_telegram_bot.lock"
+
+lock_fp = open(LOCK_FILE, "w")
+
+try:
+    fcntl.flock(lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    print("⚠️ Another bot instance already running")
     sys.exit(0)
 
-os.environ["BOT_STARTED"] = "1"
+
+def release_lock():
+    try:
+        fcntl.flock(lock_fp, fcntl.LOCK_UN)
+        lock_fp.close()
+    except:
+        pass
+
+
+atexit.register(release_lock)
+
+"""Render entrypoint for running the Telegram bot worker (STRICT POLLING MODE)."""
 
 import logging
 import os
-import sys
 import threading
 
 from flask import Flask
