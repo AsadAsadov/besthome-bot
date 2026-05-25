@@ -14369,10 +14369,18 @@ def check_favorite_price_drops():
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT f.chat_id, f.listing_id, f.source, p.last_price
+        SELECT
+            f.chat_id,
+            f.listing_id,
+            f.source,
+            (
+                SELECT h.last_price
+                FROM favorite_price_history h
+                WHERE h.source = f.source AND h.listing_id = f.listing_id
+                ORDER BY datetime(h.updated_at) DESC
+                LIMIT 1
+            ) AS last_price
         FROM favorites f
-        LEFT JOIN favorite_price_history p
-            ON p.source = f.source AND p.listing_id = f.listing_id
         """
     )
     rows = cur.fetchall()
