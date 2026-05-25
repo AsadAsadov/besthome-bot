@@ -73,6 +73,13 @@ def _log_supabase_error(table: str, action: str, exc: BaseException) -> None:
     )
 
 
+def safe_rows(result: Any) -> List[Dict[str, Any]]:
+    if hasattr(result, "data"):
+        data = getattr(result, "data", None)
+        return data or []
+    return []
+
+
 _UNAVAILABLE_USER_COLUMNS = set()
 
 
@@ -162,7 +169,7 @@ def select_one(table: str, **equals: Any) -> Optional[Dict[str, Any]]:
         for key, value in equals.items():
             query = query.eq(key, value)
         response = query.limit(1).execute()
-        rows = response.data or []
+        rows = safe_rows(response)
         return rows[0] if rows else None
     except Exception as exc:
         _log_supabase_error(table, "select", exc)
@@ -186,7 +193,7 @@ def select_many(
         if limit:
             query = query.limit(limit)
         response = query.execute()
-        return response.data or []
+        return safe_rows(response)
     except Exception as exc:
         _log_supabase_error(table, "select", exc)
         return []
@@ -201,7 +208,7 @@ def upsert(table: str, payload: Dict[str, Any], on_conflict: Optional[str] = Non
             else supabase.table(table).upsert(write_payload)
         )
         response = query.execute()
-        rows = response.data or []
+        rows = safe_rows(response)
         invalidate_cache(table)
         if "chat_id" in write_payload:
             invalidate_cache(f"{table}:{write_payload.get('chat_id')}")
@@ -220,7 +227,7 @@ def upsert(table: str, payload: Dict[str, Any], on_conflict: Optional[str] = Non
 def insert(table: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     def execute(write_payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         response = supabase.table(table).insert(write_payload).execute()
-        rows = response.data or []
+        rows = safe_rows(response)
         invalidate_cache(table)
         if "chat_id" in write_payload:
             invalidate_cache(f"{table}:{write_payload.get('chat_id')}")
@@ -727,6 +734,9 @@ class SupabaseCompatCursor:
 
     def fetchall(self):
         return list(self._rows)
+
+    def __iter__(self):
+        return iter(self._rows)
 
 
 class SupabaseCompatConnection:
