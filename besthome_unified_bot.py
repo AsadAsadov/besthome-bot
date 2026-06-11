@@ -25210,6 +25210,7 @@ def create_flask_app():
         logger.warning("[BOOT] Admin routes status=%s", admin_status)
 
     @app.route("/")
+    @app.route("/elanlar")
     def home():
         def _handler():
             resp = send_file(os.path.join(BASE_DIR, "index.html"))
