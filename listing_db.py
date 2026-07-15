@@ -1,7 +1,7 @@
 """SQLite access layer for listing-only data stored in besthome.db.
 
 This module intentionally owns only the immutable listing database path and
-helpers. User data must be read/written through user_db.py (Supabase).
+helpers. User data must be read/written through user_db.py (local_data.db).
 """
 
 import os
@@ -9,9 +9,9 @@ import sqlite3
 from contextlib import contextmanager
 from typing import Iterator
 
-BASE_DATA_DIR = os.getenv("BASE_DATA_DIR") or os.getenv("DATA_DIR") or "/tmp/besthome"
+BASE_DATA_DIR = os.getenv("BASE_DATA_DIR") or os.getenv("DATA_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 MAIN_DB_DEFAULT_PATH = os.path.join(BASE_DATA_DIR, "besthome.db")
-MAIN_DB = os.path.realpath(os.getenv("BESTHOME_DB_PATH", MAIN_DB_DEFAULT_PATH))
+MAIN_DB = os.path.realpath(os.getenv("LISTINGS_DB_PATH") or os.getenv("BESTHOME_DB_PATH", MAIN_DB_DEFAULT_PATH))
 
 LISTING_SQLITE_TABLES = {
     "listings",

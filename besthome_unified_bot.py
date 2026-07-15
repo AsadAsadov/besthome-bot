@@ -2,7 +2,7 @@
 # 🏠 BestHome Unified Bot — FULL v9
 # Elan əlavə • Filtrlə axtarış • Açar sözlə axtarış • Nömrə ilə axtarış
 # Favorilər • Admin Panel • Vasitəçi bazası • İstifadəçi təsdiqi
-# besthome.db (listings only) + Supabase PostgreSQL (user data)
+# besthome.db (listings only) + local_data.db SQLite (user data)
 # ©️ 2025 Əsəd Əsədov (@esedovesed)
 # ============================================
 
@@ -16,7 +16,6 @@ import fcntl
 import zipfile
 import sqlite3
 import user_db
-from supabase_client import validate_supabase_startup
 from listing_db import MAIN_DB as LISTING_MAIN_DB
 import threading
 import math
@@ -242,7 +241,7 @@ WEB_APP_URL = (
 )
 EMLAK_BAZASI_URL = "https://emlak-bazasi.com/search/agency/"
 
-BASE_DATA_DIR = os.getenv("BASE_DATA_DIR") or os.getenv("DATA_DIR") or "/tmp/besthome"
+BASE_DATA_DIR = os.getenv("BASE_DATA_DIR") or os.getenv("DATA_DIR") or os.path.join(BASE_DIR, "data")
 os.environ.setdefault("BASE_DATA_DIR", BASE_DATA_DIR)
 os.environ.setdefault("DATA_DIR", BASE_DATA_DIR)
 DATA_DIR = BASE_DATA_DIR
@@ -253,7 +252,10 @@ DB_SYNC_INTERVAL_SECONDS = 7200
 
 MAIN_DB_DEFAULT_PATH = os.path.join(BASE_DATA_DIR, "besthome.db")
 MAIN_DB = LISTING_MAIN_DB
-SUPABASE_USER_TABLES = user_db.USER_TABLES
+LOCAL_DB_PATH = str(user_db.LOCAL_DB_PATH)
+LISTINGS_DB_PATH = str(user_db.LISTINGS_DB_PATH)
+USER_DATA_TABLES = user_db.USER_TABLES
+SUPABASE_USER_TABLES = USER_DATA_TABLES  # backwards-compatible alias for older code paths
 SUPPORT_THREAD_STATUS_OPEN = "OPEN"
 SUPPORT_THREAD_STATUS_ACTIVE = "ACTIVE"
 SUPPORT_THREAD_STATUS_WAITING = "WAITING"
@@ -441,7 +443,7 @@ def handle_start(message):
         _ensure_start_user_record(message, start_arg)
         created_for_start = existing_before_start is None
     except Exception:
-        logger.exception("Failed to upsert /start user in Supabase chat_id=%s", chat_id)
+        logger.exception("Failed to upsert /start user in local SQLite chat_id=%s", chat_id)
     try:
         phone_missing = should_request_phone(chat_id)
     except Exception:
@@ -516,7 +518,7 @@ def handle_contact(message):
         run_phone_flow_step("show_main_menu", show_main_menu, chat_id)
         return
 
-    # A) Save phone to Supabase. This step is retry-safe and cannot block menu recovery.
+    # A) Save phone to local_data.db. This step is retry-safe and cannot block menu recovery.
     saved = run_phone_flow_step(
         "save_phone",
         lambda: (update_phone_verification(chat_id, phone, now_iso), True)[1],
@@ -1049,13 +1051,13 @@ def get_conn():
     return sqlite3.connect(MAIN_DB)
 
 def get_local_conn():
-    return user_db.SupabaseCompatConnection()
+    return user_db.get_local_connection()
 
 def get_db():
-    return user_db.SupabaseCompatConnection()
+    return user_db.get_local_connection()
 
 def get_agents_conn():
-    return user_db.SupabaseCompatConnection()
+    return user_db.get_local_connection()
 
 def _table_columns(conn: sqlite3.Connection, table_name: str) -> set:
     try:
@@ -2443,7 +2445,16 @@ def extract_main_db_from_zip(zip_path: str) -> Tuple[str, str]:
                 or member_path.startswith(base_dir + os.sep)
             ):
                 raise RuntimeError(f"ZIP içində təhlükəli yol aşkarlandı: {member_name}")
-        zf.extractall(temp_dir)
+        for member in zf.infolist():
+            if os.path.basename(member.filename).lower() != "besthome.db":
+                if os.path.basename(member.filename).lower() == "local_data.db":
+                    logger.warning("[ZIP] Ignoring local_data.db from listing restore archive")
+                continue
+            target_path = os.path.realpath(os.path.join(temp_dir, os.path.basename(member.filename)))
+            if not target_path.startswith(base_dir + os.sep):
+                raise RuntimeError(f"ZIP içində təhlükəli yol aşkarlandı: {member.filename}")
+            with zf.open(member) as src, open(target_path, "wb") as dst:
+                shutil.copyfileobj(src, dst)
     candidates: List[Tuple[int, str]] = []
     for current_root, _dirs, files in os.walk(temp_dir):
         for filename in files:
@@ -3254,12 +3265,13 @@ def sanity_check_main_db():
         conn.close()
 
 def init_local_db():
-    """Supabase owns all user-data tables; legacy local user DB is intentionally not created."""
-    logger.info("Supabase user-data layer active for tables: %s", sorted(SUPABASE_USER_TABLES))
+    """Initialize local SQLite user-data tables without touching besthome.db."""
+    user_db.initialize_local_database()
+    logger.info("Local SQLite user-data layer active for tables: %s", sorted(USER_DATA_TABLES))
 
 def init_agents_db():
-    """Agent tables are user data and are stored in Supabase."""
-    logger.info("Supabase agent tables active: agents, agent_activity, agent_notifications, agent_interests")
+    """Agent tables are user data and are stored in local_data.db."""
+    logger.info("Local agent tables active: agents, agent_activity, agent_notifications, agent_interests")
 
 
 def init_main_db_indices():
@@ -5808,7 +5820,7 @@ def build_date_range_clause(
     )
 
 def attach_local_db(conn) -> bool:
-    # legacy local user DB was removed; user data lives in Supabase.
+    # User data lives in local_data.db; never attach it to listing restore/update flows.
     return False
 
 def detach_local_db(conn, attached: bool):
@@ -25250,7 +25262,7 @@ def create_flask_app():
                     close_main_conn(conn_main)
             except Exception:
                 logger.exception("Health check failed for main DB")
-            db_status["supabase_user_data"] = True
+            db_status["local_user_data"] = os.path.exists(LOCAL_DB_PATH)
 
             return api_ok_response(
                 {"time": datetime.utcnow().isoformat(), "db": db_status}
@@ -25260,7 +25272,7 @@ def create_flask_app():
 
     @app.route("/download/user-data", methods=["GET"])
     def download_local_db():
-        return jsonify({"ok": False, "error": "legacy local user DB removed; user data is in Supabase"}), 410
+        return send_file(LOCAL_DB_PATH, as_attachment=True) if os.path.exists(LOCAL_DB_PATH) else (jsonify({"ok": False, "error": "local_data.db not found"}), 404)
 
     @app.route("/api/stats/overview", methods=["GET"])
     def api_stats_overview():
@@ -25851,7 +25863,7 @@ def create_flask_app():
 
 
 # ==============================
-# Supabase user-data overrides
+# local_data.db user-data overrides
 # ==============================
 def _dict_row(row: Optional[dict]) -> Optional[dict]:
     return dict(row) if row else None
@@ -25882,7 +25894,7 @@ def update_phone_verification(chat_id: int, phone: str, now_iso: str) -> None:
     }
     updated = user_db.upsert("users", payload, on_conflict="chat_id")
     if not updated:
-        raise RuntimeError("Supabase users phone upsert failed")
+        raise RuntimeError("local users phone upsert failed")
 
 def get_user_record(chat_id: int) -> Optional[dict]:
     record = user_db.get_user(chat_id)
@@ -25952,7 +25964,7 @@ def get_user_computed_status(chat_id: int) -> Optional[str]:
 
 
 def is_user_active(chat_id: int) -> bool:
-    return get_user_computed_status(chat_id) == "ACTIVE"
+    return user_db.is_user_active(chat_id)
 
 
 def register_or_update_user_if_needed(message, start_arg: str) -> bool:
@@ -26071,11 +26083,12 @@ def notify_on_keyword_match(matches: List[dict], user_id: int) -> None:
 
 
 def init_local_db():
-    logger.info("Supabase user-data initialization active; no local user SQLite DB is created.")
+    user_db.initialize_local_database()
+    logger.info("Local SQLite user-data initialization active at %s", LOCAL_DB_PATH)
 
 
 def init_agents_db():
-    logger.info("Supabase agent user-data tables active.")
+    logger.info("Local SQLite agent user-data tables active.")
 
 
 _POLLING_START_LOCK = threading.Lock()
@@ -26159,7 +26172,7 @@ def safe_init(fn):
 
 def background_init():
     safe_init(_initialize_app_state)
-    safe_init(validate_supabase_startup)
+    safe_init(user_db.initialize_local_database)
     safe_init(check_favorite_price_drops)
 
 
@@ -26213,7 +26226,7 @@ def run_bot():
 def keepalive_worker(interval_seconds: int = 300):
     while True:
         try:
-            logger.info("⏳ Keep-alive heartbeat (DATA_DIR=%s, user_db=Supabase)", BASE_DATA_DIR)
+            logger.info("⏳ Keep-alive heartbeat (DATA_DIR=%s, user_db=local_data.db)", BASE_DATA_DIR)
         except Exception as exc:
             logger.warning("Keep-alive ping failed: %s", exc)
         time.sleep(interval_seconds)
