@@ -515,7 +515,8 @@ def handle_contact(message):
             "\u2063",
             reply_markup=types.ReplyKeyboardRemove(),
         )
-        run_phone_flow_step("show_main_menu", show_main_menu, chat_id)
+        reset_user_state(chat_id)
+        run_phone_flow_step("send_main_menu", send_main_menu, chat_id, "📋 Əsas menyudan seçim et:", force=True)
         return
 
     # A) Save phone to local_data.db. This step is retry-safe and cannot block menu recovery.
@@ -536,12 +537,15 @@ def handle_contact(message):
         reply_markup=types.ReplyKeyboardRemove(),
     )
 
-    # C) Send activation confirmation.
-    run_phone_flow_step("send_activation_confirmation", bot.send_message, chat_id, "Account activated")
-
-    # D) Always send main menu, even when an earlier step failed.
+    # C) Clear phone prompt and any previous conversation state before opening the main menu.
+    phone_request_prompted.discard(chat_id)
     reset_user_state(chat_id)
-    run_phone_flow_step("show_main_menu", show_main_menu, chat_id)
+
+    # D) Send activation confirmation.
+    run_phone_flow_step("send_activation_confirmation", bot.send_message, chat_id, "✅ Nömrəniz təsdiqləndi.")
+
+    # E) Always send the forced main menu after ReplyKeyboardRemove, even when an earlier step failed.
+    run_phone_flow_step("send_main_menu", send_main_menu, chat_id, "📋 Əsas menyudan seçim et:", force=True)
 
 def _start_user_payload(message, start_arg: str, created: bool = True) -> Dict[str, Any]:
     chat_id = message.chat.id
@@ -1383,7 +1387,14 @@ def ensure_feature_flag_tables(cur: sqlite3.Cursor):
             (key, int(enabled)),
         )
 
+def _sqlite_row_to_dict(row):
+    """Convert sqlite3.Row values before using dict-style helpers such as .get()."""
+    return dict(row) if isinstance(row, sqlite3.Row) else row
+
 def is_feature_enabled(key: str, user_id: Optional[int] = None) -> bool:
+    if user_id is not None and is_admin(user_id):
+        return True
+
     conn = get_local_conn()
     try:
         cur = conn.cursor()
@@ -1400,6 +1411,9 @@ def is_feature_enabled(key: str, user_id: Optional[int] = None) -> bool:
         row = cur.fetchone()
         if row is not None:
             return bool(row[0])
+        return bool(FEATURE_FLAG_DEFAULTS.get(key, 1))
+    except Exception:
+        logger.exception("FEATURE_FLAG_CHECK_FAILED key=%s user_id=%s", key, user_id)
         return bool(FEATURE_FLAG_DEFAULTS.get(key, 1))
     finally:
         conn.close()
@@ -3418,15 +3432,33 @@ def ensure_fts_tables():
 
 # =============== ÜMUMİ UTIL FUNKSİYALAR ===============
 
+def _admin_id_set() -> Set[int]:
+    raw_values = []
+    raw_values.extend(ADMIN_IDS if isinstance(ADMIN_IDS, (list, tuple, set)) else [ADMIN_IDS])
+    raw_values.extend(os.getenv("ADMIN_IDS", "").split(","))
+    admin_id = os.getenv("ADMIN_ID", "").strip()
+    if admin_id:
+        raw_values.append(admin_id)
+    result: Set[int] = set()
+    for value in raw_values:
+        try:
+            text = str(value).strip()
+            if text:
+                result.add(int(text))
+        except Exception:
+            continue
+    return result
+
 def is_admin(chat_id: int) -> bool:
     try:
         cid = int(str(chat_id).strip())
     except Exception:
         return False
-
+    if cid in _admin_id_set():
+        return True
     try:
-        admin_ids = {int(str(x).strip()) for x in ADMIN_IDS}
-        return cid in admin_ids
+        record = _sqlite_row_to_dict(user_db.get_user(cid, use_cache=False)) or {}
+        return bool(record.get("is_admin"))
     except Exception:
         return False
 
@@ -6963,34 +6995,58 @@ def build_main_menu(
     )
 
     buttons: List[Union[str, types.KeyboardButton]] = []
+    status = (get_user_computed_status(chat_id) or "PENDING").upper()
+    active_access = is_admin_user or status == "ACTIVE" or has_customer_access
 
-    if is_feature_enabled("main_search", chat_id):
-        buttons.append("🔎 Axtarış sistemi")
+    def add_feature(key: str, label: str, *, require_active: bool = False) -> None:
+        if require_active and not active_access:
+            return
+        if is_feature_enabled(key, chat_id) or is_admin_user:
+            buttons.append(label)
 
-    if is_feature_enabled("last_24_hours", chat_id):
-        buttons.append("🕒 Son 24 saatda əlavə olunan elanlar")
+    add_feature("main_search", "🔎 Axtarış sistemi", require_active=True)
+    add_feature("last_24_hours", "🕒 Son 24 saatda əlavə olunan elanlar", require_active=True)
+    add_feature("account", "👤 Hesabım")
+    add_feature("statistics", "📊 Statistika", require_active=True)
 
-    if is_feature_enabled("account", chat_id):
-        buttons.append("👤 Hesabım")
+    if show_bonus_button and active_access:
+        add_feature("try_your_luck", "🎁 Şansını sına", require_active=True)
 
-    if is_feature_enabled("statistics", chat_id):
-        buttons.append("📊 Statistika")
-
-    if show_bonus_button and is_feature_enabled("try_your_luck", chat_id):
-        buttons.append("🎁 Şansını sına")
-
-    if is_feature_enabled("payment", chat_id):
-        buttons.append("💳 Ödəniş")
+    add_feature("payment", "💳 Ödəniş")
 
     if not is_admin_user:
         buttons.append("💬 Adminlə əlaqə")
-        buttons.append("🤝 Dostunu dəvət et")
+        if active_access:
+            buttons.append("🤝 Dostunu dəvət et")
 
-    if is_feature_enabled("about", chat_id):
-        buttons.append("ℹ️ Haqqında")
+    add_feature("about", "ℹ️ Haqqında")
 
     if is_admin_user:
         buttons.append(TEXTS_AZ["admin_panel_button"])
+
+    # Hard fallback: feature flags must never leave users without their core menu.
+    core_labels = {"🔎 Axtarış sistemi", "🕒 Son 24 saatda əlavə olunan elanlar", "👤 Hesabım", "📊 Statistika", "💳 Ödəniş", "ℹ️ Haqqında"}
+    if not any(label in buttons for label in core_labels):
+        if is_admin_user:
+            buttons.extend([
+                "🔎 Axtarış sistemi",
+                "🕒 Son 24 saatda əlavə olunan elanlar",
+                "👤 Hesabım",
+                "📊 Statistika",
+                "💳 Ödəniş",
+                "ℹ️ Haqqında",
+                TEXTS_AZ["admin_panel_button"],
+            ])
+        elif active_access:
+            buttons.extend([
+                "🔎 Axtarış sistemi",
+                "🕒 Son 24 saatda əlavə olunan elanlar",
+                "👤 Hesabım",
+                "💳 Ödəniş",
+                "ℹ️ Haqqında",
+            ])
+        else:
+            buttons.extend(["👤 Hesabım", "💳 Ödəniş", "💬 Adminlə əlaqə", "ℹ️ Haqqında"])
 
     buttons.append(MENU_REFRESH_BUTTON)
 
@@ -25870,7 +25926,7 @@ def _dict_row(row: Optional[dict]) -> Optional[dict]:
 
 
 def get_phone_verification_row(chat_id: int) -> Optional[dict]:
-    row = user_db.get_user(chat_id, use_cache=False)
+    row = _sqlite_row_to_dict(user_db.get_user(chat_id, use_cache=False))
     if not row:
         return None
     return {
@@ -25897,11 +25953,11 @@ def update_phone_verification(chat_id: int, phone: str, now_iso: str) -> None:
         raise RuntimeError("local users phone upsert failed")
 
 def get_user_record(chat_id: int) -> Optional[dict]:
-    record = user_db.get_user(chat_id)
+    record = _sqlite_row_to_dict(user_db.get_user(chat_id))
     if not record:
         return None
-    computed_status = _compute_user_status_from_record(record)
     record = dict(record)
+    computed_status = _compute_user_status_from_record(record)
     record["computed_status"] = computed_status
     record["effective_expires_at"] = _effective_expires_timestamp(record)
     return record
@@ -25931,40 +25987,50 @@ def _effective_expires_timestamp(record: dict) -> Optional[float]:
     return max(dates).timestamp()
 
 
+def _future_dt(record: dict, *keys: str, require_flag: Optional[str] = None) -> bool:
+    if require_flag and not record.get(require_flag):
+        return False
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    for key in keys:
+        dt = parse_dt_safe(record.get(key))
+        if dt and dt.replace(tzinfo=None) > now:
+            return True
+    return False
+
 def _compute_user_status_from_record(record: dict) -> str:
+    record = dict(_sqlite_row_to_dict(record) or {})
+    chat_id = record.get("chat_id")
+    if chat_id and is_admin(chat_id):
+        return "ACTIVE"
     if record.get("blocked") or record.get("is_blocked") or record.get("deleted_at") or record.get("is_active") == 0:
         return "BLOCKED"
-        
-    if record.get("approved") == 0 and not record.get("is_admin"):
-        return "PENDING"
-        
-    # Python 3.14+ üçün ən müasir və təhlükəsiz UTC vaxt təyini (Zonasız hala salırıq)
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    
-    for key in ("paid_until", "demo_end_at", "demo_expires_at", "promo_expires_at"):
-        if key == "promo_expires_at" and not record.get("promo_active"):
-            continue
-            
-        dt = parse_dt_safe(record.get(key))
-        if dt:
-            # Müqayisədən qabaq dt-nin də zonasını silirik (Toqquşma olmasın deyə)
-            dt_naive = dt.replace(tzinfo=None)
-            if dt_naive > now:
-                return "ACTIVE"
-                
-    if record.get("is_admin"):
+
+    status = str(record.get("status") or "").strip().lower()
+    if status in {"active", "active_paid"}:
         return "ACTIVE"
-        
+    if status == "active_demo" or (status == "demo" and _future_dt(record, "demo_end_at", "demo_expires_at")):
+        return "ACTIVE"
+    if _future_dt(record, "paid_until"):
+        return "ACTIVE"
+    if _future_dt(record, "demo_end_at", "demo_expires_at"):
+        return "ACTIVE"
+    if _future_dt(record, "promo_expires_at", require_flag="promo_active"):
+        return "ACTIVE"
+
+    if status == "pending" or (record.get("approved") == 0 and not record.get("is_admin")):
+        return "PENDING"
+    if status == "blocked":
+        return "BLOCKED"
     return "EXPIRED"
 
 
 def get_user_computed_status(chat_id: int) -> Optional[str]:
-    record = user_db.get_user(chat_id)
+    record = _sqlite_row_to_dict(user_db.get_user(chat_id))
     return _compute_user_status_from_record(record) if record else None
 
 
 def is_user_active(chat_id: int) -> bool:
-    return user_db.is_user_active(chat_id)
+    return is_admin(chat_id) or get_user_computed_status(chat_id) == "ACTIVE"
 
 
 def register_or_update_user_if_needed(message, start_arg: str) -> bool:
