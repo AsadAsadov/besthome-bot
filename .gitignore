@@ -1,1 +1,8 @@
 .env
+local_data.db
+data/*.db
+*.db-wal
+*.db-shm
+*.db-journal
+venv/
+__pycache__/
