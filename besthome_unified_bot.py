@@ -14733,8 +14733,13 @@ def query_keyword_results(
     _, token_query = build_fts_queries(search_text)
     or_query = " OR ".join([f"{t}*" for t in tokens]) if tokens else None
 
-    op_main = detect_db_operation_value(selected_op, "main")
-    op_local = detect_db_operation_value(selected_op, "local")
+    selected_op_norm = normalize_operation_value(selected_op)
+    if selected_op_norm not in ("sale", "rent"):
+        logger.warning("keyword search blocked without valid operation: %r", selected_op)
+        return [], 0, {"phrase_mode": phrase_enabled, "fallback_used": False}
+
+    op_main = detect_db_operation_value(selected_op_norm, "main")
+    op_local = detect_db_operation_value(selected_op_norm, "local")
 
     results = []
     search_started_at = time.perf_counter()
@@ -14755,6 +14760,9 @@ def query_keyword_results(
             "summary",
             "region_name",
             "rayon",
+            "address",
+            "metro",
+            "building_name",
             "project_name",
             "source_text",
         ]
@@ -14831,12 +14839,20 @@ def query_keyword_results(
         )
         base_where = "1=1"
         params: List[Any] = []
-        if operation_value == "sale":
+        operation_norm = normalize_operation_value(operation_value)
+        if operation_norm == "sale":
             base_where += " AND LOWER(COALESCE(operation,'')) LIKE ?"
             params.append("%sat%")
-        elif operation_value == "rent":
+        elif operation_norm == "rent":
             base_where += " AND LOWER(COALESCE(operation,'')) LIKE ?"
             params.append("%kiray%")
+        else:
+            logger.warning(
+                "keyword search source=%s has invalid operation filter: %r",
+                source,
+                operation_value,
+            )
+            return
         if table == "listings":
             base_where += ""
         rows = []
@@ -14956,6 +14972,9 @@ def query_keyword_results(
 
     filtered: List[dict] = []
     for ev in results:
+        ev_operation = normalize_operation_value(ev.get("operation") or ev.get("Emeliyyat"))
+        if ev_operation != selected_op_norm:
+            continue
         if not is_within_date_range(ev, date_days):
             continue
         if phrase_enabled and not fallback_used:
