@@ -14615,6 +14615,7 @@ def check_favorite_price_drops():
         return
 
     for row in rows:
+        row = dict(row) if isinstance(row, sqlite3.Row) else row
         src = row["source"]
         lid = row["listing_id"]
         chat_id = row["chat_id"]
@@ -22632,6 +22633,7 @@ def _perform_bulk_chance_block(chat_id: int, list_status: str, page: int):
 def _ensure_chance_columns_exists(conn: sqlite3.Connection) -> None:
     columns = set()
     for row in conn.execute("PRAGMA table_info(users)"):
+        row = dict(row) if isinstance(row, sqlite3.Row) else row
         try:
             columns.add(row[1])
         except Exception:
