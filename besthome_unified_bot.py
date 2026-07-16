@@ -16,6 +16,7 @@ import fcntl
 import zipfile
 import sqlite3
 import user_db
+import db_migrations
 from listing_db import MAIN_DB as LISTING_MAIN_DB
 import threading
 import math
@@ -104,46 +105,64 @@ class _BotProxy:
         def decorator(func):
             @wraps(func)
             def guarded(update):
-                handler_start = time.perf_counter()
+                handler_start = _perf_now()
+                received_at = _update_timestamp(update)
                 user = getattr(update, "from_user", None)
                 user_id = getattr(user, "id", None)
+                msg = getattr(update, "message", None)
+                chat_obj = getattr(msg, "chat", None) or getattr(update, "chat", None)
+                chat_id = getattr(chat_obj, "id", user_id)
+                callback_id = getattr(update, "id", None) if handler_type == "callback_query_handler" else None
+                timing = {
+                    "handler": _handler_name(func),
+                    "handler_type": handler_type,
+                    "start": handler_start,
+                    "received_at": received_at,
+                    "first_response_at": None,
+                    "callback_answered_at": None,
+                }
+                _update_timing_local.value = timing
                 if handler_type == "callback_query_handler":
-                    try:
-                        logger.debug("CALLBACK_TIMING user_id=%s step=handler_entry data=%s elapsed=0.000s", user_id, getattr(update, "data", None))
-                    except Exception:
-                        pass
-                if user_id is not None and _requires_access_check(handler_type, update) and not is_allowed(user_id):
+                    before_ack = _perf_now()
+                    safe_answer_callback_query(callback_id)
+                    timing["callback_answered_at"] = _perf_now()
+                    logger.debug("CALLBACK_TIMING user_id=%s step=early_ack duration=%.3fs data=%s", user_id, timing["callback_answered_at"] - before_ack, getattr(update, "data", None))
+                try:
+                    if user_id is not None and _requires_access_check(handler_type, update) and not is_allowed(user_id):
+                        if handler_type == "callback_query_handler":
+                            safe_answer_callback_query(callback_id, "⛔ Bu bot yalnız icazəli istifadəçilər üçündür.")
+                        if chat_id is not None:
+                            bot.send_message(chat_id, "⛔ Bu bot yalnız icazəli istifadəçilər üçündür.")
+                        return None
+                    return func(update)
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except Exception as exc:
+                    logger.exception("HANDLER_EXCEPTION handler=%s type=%s user_id=%s chat_id=%s data=%s", _handler_name(func), handler_type, user_id, chat_id, getattr(update, "data", None))
                     try:
                         if handler_type == "callback_query_handler":
-                            safe_answer_callback_query(
-                                getattr(update, "id", None),
-                                "⛔ Bu bot yalnız icazəli istifadəçilər üçündür.",
-                            )
-                        msg = getattr(update, "message", None)
-                        target_chat = (
-                            msg.chat.id
-                            if msg and getattr(msg, "chat", None)
-                            else getattr(getattr(update, "chat", None), "id", None)
-                        )
-                        if target_chat is not None:
-                            bot.send_message(
-                                target_chat,
-                                "⛔ Bu bot yalnız icazəli istifadəçilər üçündür.",
-                            )
+                            safe_answer_callback_query(callback_id, "Xəta baş verdi")
+                        if chat_id is not None:
+                            bot.send_message(chat_id, "⚠️ Xəta baş verdi. Zəhmət olmasa yenidən cəhd edin.")
                     except Exception:
-                        logger.exception("Failed to send access denied message")
-                    return
-                try:
-                    return func(update)
+                        logger.exception("HANDLER_EXCEPTION_NOTIFY_FAILED handler=%s", _handler_name(func))
+                    return None
                 finally:
-                    if handler_type == "callback_query_handler":
-                        try:
-                            elapsed = time.perf_counter() - handler_start
-                            logger.info("CALLBACK_TIMING user_id=%s total=%.3fs data=%s", user_id, elapsed, getattr(update, "data", None))
-                            if elapsed >= SLOW_OPERATION_WARN_SECONDS:
-                                logger.warning("SLOW_OPERATION operation=callback_handler user_id=%s duration=%.3fs data=%s", user_id, elapsed, getattr(update, "data", None))
-                        except Exception:
-                            pass
+                    finished = _perf_now()
+                    first = timing.get("first_response_at")
+                    telegram_delay = max(0.0, handler_start - received_at) if received_at else None
+                    first_delay = (first - handler_start) if first else None
+                    total = finished - handler_start
+                    logger.info(
+                        "UPDATE_TIMING update_id=%s user_id=%s chat_id=%s handler=%s received_at=%s handler_start_delay=%s handler_duration=%.3fs first_response_delay=%s total=%.3fs",
+                        getattr(update, "update_id", None), user_id, chat_id, _handler_name(func),
+                        received_at, f"{telegram_delay:.3f}s" if telegram_delay is not None else "unknown",
+                        total, f"{first_delay:.3f}s" if first_delay is not None else "none", total,
+                    )
+                    if total >= SLOW_OPERATION_WARN_SECONDS:
+                        logger.warning("HANDLER_PROFILE handler=%s user_id=%s queue_delay=%s total=%.3fs", _handler_name(func), user_id, f"{telegram_delay:.3f}s" if telegram_delay is not None else "unknown", total)
+                    _update_timing_local.value = None
+
 
             if self._bot is not None:
                 getattr(self._bot, handler_type)(*args, **kwargs)(guarded)
@@ -189,6 +208,7 @@ class _BotProxy:
 
             def wrapped(*args, **kwargs):
                 try:
+                    _mark_first_response()
                     result = attr(*args, **kwargs)
                 except Exception as e:
                     logger.warning(f"Telegram send error ignored: {e}")
@@ -207,6 +227,7 @@ class _BotProxy:
 
             def wrapped(*args, **kwargs):
                 try:
+                    _mark_first_response()
                     return attr(*args, **kwargs)
                 except Exception as e:
                     logger.warning(f"Telegram send error ignored: {e}")
@@ -354,6 +375,33 @@ SLOW_OPERATION_WARN_SECONDS = 0.5
 SLOW_OPERATION_ERROR_SECONDS = 3.0
 FEATURE_FLAGS_CACHE_TTL_SECONDS = 20
 _feature_flags_cache: Dict[int, Tuple[float, Dict[str, bool]]] = {}
+
+_update_timing_local = threading.local()
+_answered_callback_ids: Set[str] = set()
+_answered_callback_lock = threading.Lock()
+
+def _current_timing() -> Optional[Dict[str, Any]]:
+    return getattr(_update_timing_local, "value", None)
+
+def _mark_first_response() -> None:
+    timing = _current_timing()
+    if timing is not None and timing.get("first_response_at") is None:
+        timing["first_response_at"] = _perf_now()
+
+def _update_timestamp(update) -> Optional[float]:
+    try:
+        if hasattr(update, "date") and update.date:
+            return float(update.date.timestamp() if hasattr(update.date, "timestamp") else update.date)
+        msg = getattr(update, "message", None)
+        if msg is not None and getattr(msg, "date", None):
+            d = msg.date
+            return float(d.timestamp() if hasattr(d, "timestamp") else d)
+    except Exception:
+        return None
+    return None
+
+def _handler_name(func) -> str:
+    return getattr(func, "__name__", func.__class__.__name__)
 
 def _perf_now() -> float:
     return time.perf_counter()
@@ -1402,10 +1450,19 @@ def safe_answer_callback_query(
 ):
     if not callback_id:
         return
+    callback_key = str(callback_id)
+    with _answered_callback_lock:
+        if callback_key in _answered_callback_ids:
+            return
+        _answered_callback_ids.add(callback_key)
+        if len(_answered_callback_ids) > 10000:
+            _answered_callback_ids.clear()
+            _answered_callback_ids.add(callback_key)
     try:
+        _mark_first_response()
         bot.answer_callback_query(callback_id, text, **kwargs)
-    except Exception:
-        logger.exception("answer_callback_query failed callback_id=%s", callback_id)
+    except Exception as exc:
+        logger.warning("answer_callback_query failed callback_id=%s error=%s", callback_id, exc)
 
 def callback_guard(handler):
     @wraps(handler)
@@ -1451,51 +1508,7 @@ def callback_guard(handler):
     return wrapper
 
 def ensure_feature_flag_tables(cur: sqlite3.Cursor):
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS feature_flags (
-            key TEXT PRIMARY KEY,
-            is_enabled INTEGER NOT NULL DEFAULT 1
-        )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS user_feature_overrides (
-            user_id INTEGER NOT NULL,
-            key TEXT NOT NULL,
-            is_enabled INTEGER NOT NULL DEFAULT 1,
-            PRIMARY KEY(user_id, key)
-        )
-        """
-    )
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_user_feature_overrides_user_id ON user_feature_overrides(user_id)")
-
-    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='feature_overrides'")
-    if cur.fetchone():
-        legacy_cols = {row[1] for row in cur.execute("PRAGMA table_info(feature_overrides)").fetchall()}
-        if {"user_id", "key", "is_enabled"}.issubset(legacy_cols):
-            cur.execute(
-                """
-                INSERT OR IGNORE INTO user_feature_overrides (user_id, key, is_enabled)
-                SELECT user_id, key, COALESCE(is_enabled, 1)
-                FROM feature_overrides
-                WHERE user_id IS NOT NULL AND key IS NOT NULL
-                """
-            )
-            logger.info("FEATURE_FLAGS_MIGRATION migrated legacy feature_overrides rows=%s", cur.rowcount)
-        else:
-            logger.warning("FEATURE_FLAGS_MIGRATION skipped legacy feature_overrides with columns=%s", sorted(legacy_cols))
-
-    for key, enabled in FEATURE_FLAG_DEFAULTS.items():
-        cur.execute(
-            """
-            INSERT OR IGNORE INTO feature_flags (key, is_enabled)
-            VALUES (?, ?)
-            """,
-            (key, int(enabled)),
-        )
+    db_migrations.ensure_feature_flag_schema(cur.connection, FEATURE_FLAG_DEFAULTS)
 
 def _sqlite_row_to_dict(row):
     """Convert sqlite3.Row values before using dict-style helpers such as .get()."""
@@ -1515,7 +1528,6 @@ def get_effective_feature_flags(user_id: Optional[int] = None) -> Dict[str, bool
     conn = get_local_conn()
     try:
         cur = conn.cursor()
-        ensure_feature_flag_tables(cur)
         cur.execute("SELECT key, is_enabled FROM feature_flags")
         for row in cur.fetchall():
             flags[str(row[0])] = bool(row[1])
@@ -4235,34 +4247,11 @@ def get_user_demo_status(chat_id: int) -> dict:
     }
 
 def ensure_bonus_tables(cur: sqlite3.Cursor):
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS bonus_probabilities (
-            days INTEGER PRIMARY KEY,
-            weight INTEGER NOT NULL
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS chance_bonus_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            granted_days INTEGER,
-            created_at TEXT
-        )
-        """
-    )
-    for days, weight in BONUS_DEFAULT_PROBABILITIES.items():
-        cur.execute(
-            "INSERT OR IGNORE INTO bonus_probabilities (days, weight) VALUES (?, ?)",
-            (days, weight),
-        )
+    db_migrations.ensure_bonus_schema(cur.connection, BONUS_DEFAULT_PROBABILITIES)
 
 def get_bonus_probabilities() -> Dict[int, int]:
     conn = get_local_conn()
     cur = conn.cursor()
-    ensure_bonus_tables(cur)
     cur.execute("SELECT days, weight FROM bonus_probabilities ORDER BY days")
     rows = cur.fetchall()
     conn.close()
@@ -4302,7 +4291,6 @@ def update_bonus_probabilities(new_weights: Dict[int, int]) -> Dict[int, int]:
         normalized.setdefault(day, BONUS_DEFAULT_PROBABILITIES[day])
     conn = get_local_conn()
     cur = conn.cursor()
-    ensure_bonus_tables(cur)
     cur.execute("DELETE FROM bonus_probabilities")
     cur.executemany(
         "INSERT INTO bonus_probabilities (days, weight) VALUES (?, ?)",
@@ -4322,8 +4310,6 @@ def fetch_bonus_stats(period: str) -> dict:
     start_dt, end_dt, label = bonus_stats_period_range(period)
     conn = get_local_conn()
     cur = conn.cursor()
-    ensure_bonus_tables(cur)
-
     cur.execute(
         """
         SELECT COUNT(*), COALESCE(SUM(granted_days), 0)
@@ -4378,7 +4364,6 @@ def fetch_bonus_stats(period: str) -> dict:
 def fetch_recent_bonus_usage(limit: int = 10) -> List[Tuple[int, Optional[datetime]]]:
     conn = get_local_conn()
     cur = conn.cursor()
-    ensure_bonus_tables(cur)
     cur.execute(
         """
         SELECT user_id, created_at
@@ -4515,7 +4500,6 @@ def update_user_chance_usage(chat_id: int, last_used_at: Optional[datetime]):
 def log_chance_bonus(user_id: int, granted_days: int, created_at: datetime):
     conn = get_local_conn()
     cur = conn.cursor()
-    ensure_bonus_tables(cur)
     cur.execute(
         """
         INSERT INTO chance_bonus_logs (user_id, granted_days, created_at)
@@ -26536,13 +26520,29 @@ def main():
     bot.bind(telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=8))
     _startup_step("bot_creation", step_start)
 
+    def _get_me_warmup_background():
+        global BOT_USERNAME
+        step_start = _perf_now()
+        try:
+            BOT_USERNAME = bot.get_me().username
+            _startup_step("telegram_get_me_warmup_background", step_start)
+        except Exception as exc:
+            logger.warning("[BOOT] Telegram get_me background warm-up failed without stopping bot: %s", exc)
+            BOT_USERNAME = None
+
+    threading.Thread(target=_get_me_warmup_background, daemon=True, name="telegram-get-me-warmup").start()
+
     step_start = _perf_now()
     try:
-        BOT_USERNAME = bot.get_me().username
-        _startup_step("telegram_get_me_warmup", step_start)
-    except Exception as exc:
-        logger.warning("[BOOT] Telegram get_me warm-up failed without stopping bot: %s", exc)
-        BOT_USERNAME = None
+        conn = get_local_conn()
+        try:
+            db_migrations.ensure_local_schema(conn, FEATURE_FLAG_DEFAULTS, BONUS_DEFAULT_PROBABILITIES)
+        finally:
+            conn.close()
+        clear_feature_flags_cache()
+        _startup_step("local_schema_migrations", step_start)
+    except Exception:
+        logger.exception("[BOOT] local schema migration failed")
 
     # Aktiv və lazımlı worker-lər arxa fonda başladılır
     threading.Thread(target=saved_search_worker, daemon=True).start()
@@ -26569,7 +26569,7 @@ def run_bot():
 
     logger.info("[BOOT] Bot starting single instance")
     try:
-        bot.remove_webhook(drop_pending_updates=True)
+        bot.remove_webhook()
         logger.info("[BOOT] Telegram webhook removed before polling")
     except Exception as e:
         logger.warning(f"Webhook remove failed: {e}")
