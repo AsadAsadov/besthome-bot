@@ -14,6 +14,7 @@ import re
 import sqlite3
 import time
 import threading
+import db_migrations
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -162,22 +163,7 @@ def initialize_local_database() -> None:
             conn.execute("""CREATE TABLE IF NOT EXISTS promo_usages (code TEXT, chat_id INTEGER, used_at TEXT, expires_at TEXT, PRIMARY KEY(code, chat_id))""")
             conn.execute("""CREATE TABLE IF NOT EXISTS referrals (referrer_chat_id INTEGER, referred_chat_id INTEGER PRIMARY KEY, created_at TEXT, reward_given INTEGER DEFAULT 0)""")
             conn.execute("""CREATE TABLE IF NOT EXISTS referral_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, referrer_id INTEGER, referred_user_id INTEGER, bonus_days INTEGER, created_at TEXT)""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS feature_flags (
-                key TEXT PRIMARY KEY,
-                is_enabled INTEGER NOT NULL DEFAULT 1)""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS user_feature_overrides (
-                user_id INTEGER NOT NULL,
-                key TEXT NOT NULL,
-                is_enabled INTEGER NOT NULL DEFAULT 1,
-                PRIMARY KEY(user_id, key))""")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_user_feature_overrides_user_id ON user_feature_overrides(user_id)")
-            if _table_exists(conn, "feature_overrides"):
-                cols = {row[1] for row in conn.execute("PRAGMA table_info(feature_overrides)").fetchall()}
-                if {"user_id", "key", "is_enabled"}.issubset(cols):
-                    conn.execute("""INSERT OR IGNORE INTO user_feature_overrides (user_id, key, is_enabled)
-                        SELECT user_id, key, COALESCE(is_enabled, 1)
-                        FROM feature_overrides
-                        WHERE user_id IS NOT NULL AND key IS NOT NULL""")
+            db_migrations.ensure_feature_flag_schema(conn, {})
             for table in USER_TABLES - {"users","subscriptions","payments","favorites","search_history","search_logs","user_activity","search_limits","promo_codes","promo_usages","referrals","referral_logs", "feature_flags", "user_feature_overrides"}:
                 conn.execute(f"CREATE TABLE IF NOT EXISTS {_safe_ident(table)} (id INTEGER PRIMARY KEY AUTOINCREMENT)")
             conn.commit()
