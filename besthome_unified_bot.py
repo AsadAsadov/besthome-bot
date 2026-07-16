@@ -463,7 +463,7 @@ def handle_start(message):
     logger.info("RETURNING_USER user_id=%s", chat_id)
     phone_request_prompted.discard(chat_id)
     reset_user_state(chat_id)
-    show_main_menu(chat_id)
+    route_user_by_access_status(chat_id)
     return
 
 @bot.message_handler(commands=["menu"])
@@ -516,7 +516,7 @@ def handle_contact(message):
             reply_markup=types.ReplyKeyboardRemove(),
         )
         reset_user_state(chat_id)
-        run_phone_flow_step("send_main_menu", send_main_menu, chat_id, "📋 Əsas menyudan seçim et:", force=True)
+        run_phone_flow_step("route_by_status", route_user_by_access_status, chat_id)
         return
 
     # A) Save phone to local_data.db. This step is retry-safe and cannot block menu recovery.
@@ -544,8 +544,8 @@ def handle_contact(message):
     # D) Send activation confirmation.
     run_phone_flow_step("send_activation_confirmation", bot.send_message, chat_id, "✅ Nömrəniz təsdiqləndi.")
 
-    # E) Always send the forced main menu after ReplyKeyboardRemove, even when an earlier step failed.
-    run_phone_flow_step("send_main_menu", send_main_menu, chat_id, "📋 Əsas menyudan seçim et:", force=True)
+    # E) Route by current approval/access status after ReplyKeyboardRemove.
+    run_phone_flow_step("route_by_status", route_user_by_access_status, chat_id)
 
 def _start_user_payload(message, start_arg: str, created: bool = True) -> Dict[str, Any]:
     chat_id = message.chat.id
@@ -585,6 +585,19 @@ def _ensure_start_user_record(message, start_arg: str) -> dict:
     )
     return record or {}
 
+
+
+def route_user_by_access_status(chat_id: int) -> None:
+    clear_user_runtime_cache(chat_id)
+    status = get_user_computed_status(chat_id)
+    if user_has_access(chat_id):
+        send_main_menu(chat_id, "📋 Əsas menyudan seçim et:", force=True)
+    elif status == "PENDING":
+        bot.send_message(chat_id, "⏳ Müraciətiniz yoxlanılır.")
+    elif status == "BLOCKED":
+        send_blocked_prompt(chat_id)
+    else:
+        send_payment_menu(chat_id)
 
 def handle_start_attribution_and_demo(message, start_arg: str):
     # existing start logic here (do not remove)
@@ -1454,6 +1467,9 @@ def get_feature_state_for_scope(key: str, user_ids: Optional[List[int]] = None) 
     return is_feature_enabled(key)
 
 def ensure_feature_available(chat_id: int, key: str) -> bool:
+    if not user_has_access(chat_id):
+        check_subscription(chat_id)
+        return False
     if is_feature_enabled(key, chat_id):
         return True
     bot.send_message(chat_id, FEATURE_DISABLED_MESSAGE)
@@ -1461,6 +1477,10 @@ def ensure_feature_available(chat_id: int, key: str) -> bool:
 
 def ensure_feature_available_cb(c, key: str) -> bool:
     chat_id = c.message.chat.id if getattr(c, "message", None) else c.from_user.id
+    if not user_has_access(chat_id):
+        check_subscription(chat_id)
+        safe_answer_callback_query(getattr(c, "id", None))
+        return False
     if is_feature_enabled(key, chat_id):
         return True
     bot.send_message(chat_id, FEATURE_DISABLED_MESSAGE)
@@ -3463,13 +3483,7 @@ def is_admin(chat_id: int) -> bool:
         return False
 
 def is_allowed(user_id: int) -> bool:
-    try:
-        uid = int(str(user_id).strip())
-    except Exception:
-        return False
-    if is_admin(uid):
-        return True
-    return is_user_active(uid)
+    return user_has_access(user_id)
 
 def send_message_to_admins(text: str, **kwargs) -> None:
     for admin_id in ADMIN_IDS:
@@ -3480,7 +3494,7 @@ def send_message_to_admins(text: str, **kwargs) -> None:
 
 # Access rule: admins always pass; non-admins must have an active subscription/demo.
 def has_access(chat_id: int) -> bool:
-    return is_admin(chat_id) or is_user_active(chat_id)
+    return user_has_access(chat_id)
 
 def format_price(v) -> str:
     if v is None:
@@ -5323,6 +5337,150 @@ def ensure_allowed_cb(c, allow_blocked: bool = False) -> bool:
     chat_id = c.message.chat.id
     return check_subscription(chat_id, allow_blocked=allow_blocked)
 
+
+
+def clear_user_runtime_cache(chat_id: int) -> None:
+    """Clear every in-process and DB TTL cache that can affect user access/menu state."""
+    for mapping in (
+        user_state, search_state, customer_request_state, customer_request_rule_state,
+        keyword_alert_state, agent_request_lookup_state, today_flow_state,
+        today_results_cache, admin_stats_period, admin_direct_message_state,
+        admin_user_message_state, admin_message_state, admin_inactive_message_state,
+        admin_panel_page_state, admin_user_page_state, admin_navigation_state,
+        admin_state, ui_message_state, ui_state, session_interactions,
+    ):
+        try:
+            mapping.pop(chat_id, None)
+        except Exception:
+            pass
+    try:
+        USER_STATE.pop(chat_id, None)
+    except Exception:
+        pass
+    try:
+        search_reminder_shown.discard(chat_id)
+    except Exception:
+        pass
+    user_db.invalidate_cache(
+        f"users:{chat_id}", f"subscriptions:{chat_id}", "premium_users",
+        "blocked_users", "admin_users"
+    )
+
+
+def _subscription_access_state(chat_id: int) -> tuple[Optional[dict], Optional[datetime]]:
+    sub = get_subscription(chat_id) or user_db.get_subscription(chat_id) or {}
+    expires_at = parse_dt_safe(sub.get("expires_at")) if sub else None
+    return sub, expires_at
+
+
+def user_has_access(chat_id: int) -> bool:
+    """Single source of truth for runtime access checks."""
+    try:
+        uid = int(str(chat_id).strip())
+    except Exception:
+        logger.info("ACCESS_CHECK user_id=%s approved= status= subscription= expires_at= result=False reason=invalid_user_id", chat_id)
+        return False
+    if is_admin(uid):
+        logger.info("ACCESS_CHECK user_id=%s approved=1 status=admin subscription=admin expires_at= result=True reason=admin", uid)
+        return True
+    record = _sqlite_row_to_dict(user_db.get_user(uid, use_cache=False)) or {}
+    sub, sub_expires = _subscription_access_state(uid)
+    approved = int(record.get("approved") or 0)
+    status = str(record.get("status") or "").strip().lower()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    result = False
+    reason = "expired"
+    if not record:
+        reason = "missing_user"
+    elif record.get("deleted_at"):
+        reason = "deleted"
+    elif record.get("blocked") or record.get("is_blocked") or record.get("is_active") == 0 or status == "blocked":
+        reason = "blocked"
+    elif not approved and status not in {"active_demo", "active_paid"}:
+        reason = "pending"
+    else:
+        paid_until = parse_dt_safe(record.get("paid_until"))
+        demo_end = parse_dt_safe(record.get("demo_end_at") or record.get("demo_expires_at"))
+        paid_ok = bool(paid_until and paid_until.replace(tzinfo=None) > now)
+        demo_ok = bool(demo_end and demo_end.replace(tzinfo=None) > now)
+        sub_ok = bool(sub and sub.get("is_active") and sub_expires and sub_expires.replace(tzinfo=None) > now)
+        if status == "approved":
+            # Backward-compatible: old approved users without a subscription are allowed.
+            result, reason = True, "approved_legacy"
+        elif status == "active_paid" and (paid_ok or sub_ok):
+            result, reason = True, "active_paid"
+        elif status == "active_demo" and (demo_ok or sub_ok):
+            result, reason = True, "active_demo"
+        elif paid_ok:
+            result, reason = True, "paid_until"
+        elif demo_ok:
+            result, reason = True, "demo_until"
+        elif sub_ok:
+            result, reason = True, "subscription"
+    logger.info(
+        "ACCESS_CHECK user_id=%s approved=%s status=%s subscription=%s expires_at=%s result=%s reason=%s",
+        uid, approved, status or None, (sub or {}).get("plan"), (sub or {}).get("expires_at"), result, reason,
+    )
+    return result
+
+
+def approve_user_with_demo(uid: int, demo_days: int = DEMO_DAYS) -> Optional[str]:
+    """Approve a user atomically and grant immediate demo access."""
+    now_dt = datetime.now(timezone.utc)
+    end_dt = now_dt + timedelta(days=int(demo_days or DEMO_DAYS))
+    now_iso = now_dt.isoformat()
+    end_iso = end_dt.isoformat()
+    conn = get_local_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("BEGIN")
+        schema = detect_users_schema()
+        columns = schema.get("columns", set())
+        payload = {
+            "approved": 1,
+            "blocked": 0,
+            "is_blocked": 0,
+            "is_active": 1,
+            "status": STATUS_ACTIVE_DEMO,
+            "demo_used": 1,
+            "demo_start_at": now_iso,
+            "demo_end_at": end_iso,
+            "demo_expires_at": end_iso,
+            "paid_until": None,
+            "blocked_at": None,
+            "last_status_change_at": now_iso,
+            "last_error": None,
+        }
+        filtered = {k: v for k, v in payload.items() if k in columns}
+        cur.execute(
+            "UPDATE users SET " + ", ".join(f"{k}=?" for k in filtered) + " WHERE chat_id=?",
+            list(filtered.values()) + [uid],
+        )
+        if cur.rowcount == 0:
+            raise RuntimeError(f"user_not_found:{uid}")
+        cur.execute(
+            """
+            INSERT INTO subscriptions (chat_id, plan, expires_at, is_active, is_demo, last_payment_note)
+            VALUES (?, 'demo', ?, 1, 1, 'admin_approval_demo')
+            ON CONFLICT(chat_id) DO UPDATE SET
+                plan='demo', expires_at=excluded.expires_at, is_active=1,
+                is_demo=1, last_payment_note=excluded.last_payment_note
+            """,
+            (uid, end_iso),
+        )
+        clear_user_runtime_cache(uid)
+        conn.commit()
+        return end_iso
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        logger.exception("USER_APPROVAL_TRANSACTION_FAILED user_id=%s", uid)
+        return None
+    finally:
+        conn.close()
+
 def check_limit(chat_id: int, key_type: str, daily_limit: int) -> bool:
     if daily_limit <= 0:
         return True
@@ -6995,8 +7153,7 @@ def build_main_menu(
     )
 
     buttons: List[Union[str, types.KeyboardButton]] = []
-    status = (get_user_computed_status(chat_id) or "PENDING").upper()
-    active_access = is_admin_user or status == "ACTIVE" or has_customer_access
+    active_access = is_admin_user or user_has_access(chat_id) or has_customer_access
 
     def add_feature(key: str, label: str, *, require_active: bool = False) -> None:
         if require_active and not active_access:
@@ -22210,9 +22367,15 @@ def cb_admin_pending_actions(c):
     cur = conn.cursor()
     try:
         if action == "approve":
-            cur.execute("UPDATE users SET approved=1 WHERE chat_id=?", (uid,))
+            conn.close()
+            expires_at = approve_user_with_demo(uid)
+            if not expires_at:
+                safe_answer_callback_query(c.id, "❌ Təsdiqləmə alınmadı.")
+                return
             logger.info("admin approved user_id=%s by=%s", uid, chat_id)
             bot.send_message(uid, "✅ Hesabınız təsdiqləndi.")
+            send_main_menu(uid, "📋 Əsas menyudan seçim et:", force=True)
+            conn = get_local_conn(); cur = conn.cursor()
         elif action == "block":
             cur.execute("UPDATE users SET blocked=1 WHERE chat_id=?", (uid,))
             logger.info("admin blocked user_id=%s by=%s", uid, chat_id)
@@ -22754,7 +22917,7 @@ def activate_user_for_days(user_id: int, days: int):
     )
     conn = get_local_conn()
     cur = conn.cursor()
-    cur.execute("UPDATE users SET approved=1 WHERE chat_id=?", (user_id,))
+    cur.execute("UPDATE users SET approved=1, blocked=0, is_active=1, status=? WHERE chat_id=?", (STATUS_ACTIVE_PAID, user_id))
     conn.commit()
     conn.close()
     logger.info("Admin activated user_id=%s days=%s", user_id, days)
@@ -22923,26 +23086,20 @@ def cb_approve_new_user(c):
         logger.warning("Invalid approve_user callback data=%s", c.data)
         return
 
-    conn = get_local_conn()
-    cur = conn.cursor()
-    schema = detect_users_schema()
-    columns = schema.get("columns", set())
-    updates = ["approved=1", "blocked=0"]
-    if "is_blocked" in columns:
-        updates.append("is_blocked=0")
-    if "blocked_at" in columns:
-        updates.append("blocked_at=NULL")
-    if "is_active" in columns:
-        updates.append("is_active=1")
-    cur.execute(f"UPDATE users SET {', '.join(updates)} WHERE chat_id=?", (uid,))
-    conn.commit()
-    conn.close()
-    user_db.invalidate_cache(f"users:{uid}", "blocked_users", "premium_users")
+    expires_at = approve_user_with_demo(uid)
+    if not expires_at:
+        safe_answer_callback_query(c.id, "❌ Təsdiqləmə alınmadı.")
+        return
 
     try:
         render_ui(c.message.chat.id, f"✅ İstifadəçi təsdiqləndi\nID: {uid}", None)
     except Exception:
         logger.exception("Failed to edit approve message for user_id=%s", uid)
+    try:
+        bot.send_message(uid, "✅ Hesabınız təsdiqləndi.")
+        send_main_menu(uid, "📋 Əsas menyudan seçim et:", force=True)
+    except Exception:
+        logger.exception("Failed to notify approved user_id=%s", uid)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("block_user:"))
 @callback_guard
@@ -22980,21 +23137,17 @@ def cb_user_approve_action(c):
         safe_answer_callback_query(c.id, TEXTS_AZ["admin_user_not_found"])
         return
 
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute("UPDATE users SET approved=1 WHERE chat_id=?", (uid,))
-    conn.commit()
-    conn.close()
-    user_db.invalidate_cache(f"users:{uid}", "blocked_users", "premium_users")
+    expires_at = approve_user_with_demo(uid)
+    if not expires_at:
+        safe_answer_callback_query(c.id, "❌ Təsdiqləmə alınmadı.")
+        return
 
     safe_answer_callback_query(c.id, "✅ İstifadəçi təsdiqləndi.")
     try:
-        bot.send_message(
-            uid,
-            "✅ Hesabınız təsdiqləndi. Admin tərəfindən demo və ya uzatma verilə bilər.",
-        )
+        bot.send_message(uid, "✅ Hesabınız təsdiqləndi.")
+        send_main_menu(uid, "📋 Əsas menyudan seçim et:", force=True)
     except Exception:
-        pass
+        logger.exception("Failed to notify approved user_id=%s", uid)
 
     show_pending_users(c.message.chat.id, message=c.message)
 
@@ -23066,21 +23219,17 @@ def cb_user_approve(c):
         return
     uid = int(c.data.split("|")[1])
 
-    conn = get_local_conn()
-    cur = conn.cursor()
-    cur.execute("UPDATE users SET approved=1 WHERE chat_id=?", (uid,))
-    conn.commit()
-    conn.close()
-    user_db.invalidate_cache(f"users:{uid}", "blocked_users", "premium_users")
+    expires_at = approve_user_with_demo(uid)
+    if not expires_at:
+        bot.answer_callback_query(c.id, "❌ Təsdiqləmə alınmadı.")
+        return
 
     bot.answer_callback_query(c.id, "✅ İstifadəçi təsdiqləndi.")
     try:
-        bot.send_message(
-            uid,
-            "✅ Hesabınız təsdiqləndi.",
-        )
+        bot.send_message(uid, "✅ Hesabınız təsdiqləndi.")
+        send_main_menu(uid, "📋 Əsas menyudan seçim et:", force=True)
     except Exception:
-        pass
+        logger.exception("Failed to notify approved user_id=%s", uid)
 
     show_pending_users(c.message.chat.id, message=c.message)
 
@@ -23158,6 +23307,7 @@ def broadcast_bot_update(
 
 def handle_bot_refresh(message):
     chat_id = message.chat.id
+    clear_user_runtime_cache(chat_id)
     user_state.pop(chat_id, None)
     clear_user_state(chat_id)
     search_state.pop(chat_id, None)
@@ -23181,7 +23331,7 @@ def handle_bot_refresh(message):
     ui_state.pop(chat_id, None)
     session_interactions.pop(chat_id, None)
     search_reminder_shown.discard(chat_id)
-    return_to_main_menu(chat_id)
+    route_user_by_access_status(chat_id)
 
 @bot.message_handler(func=lambda m: m.text == "🔄 Botu yenilə")
 def refresh_button_message(message):
@@ -25755,18 +25905,11 @@ def create_flask_app():
                 return api_error_response("user_id tələb olunur", 400)
             ensure_user_exists(admin_id)
             ensure_user_exists(user_id)
-            conn = get_local_conn()
-            try:
-                cur = conn.cursor()
-                cur.execute(
-                    "UPDATE users SET approved=1, blocked=0 WHERE chat_id=?",
-                    (user_id,),
-                )
-                conn.commit()
-            finally:
-                conn.close()
-            log_api_call("admin_approve", admin_id, {"user_id": user_id})
-            return api_ok_response({})
+            expires_at = approve_user_with_demo(user_id)
+            if not expires_at:
+                return api_error_response("Təsdiqləmə alınmadı", 500)
+            log_api_call("admin_approve", admin_id, {"user_id": user_id, "expires_at": expires_at})
+            return api_ok_response({"expires_at": expires_at})
 
         return _wrap_api("admin_approve", _handler)
 
@@ -26030,7 +26173,7 @@ def get_user_computed_status(chat_id: int) -> Optional[str]:
 
 
 def is_user_active(chat_id: int) -> bool:
-    return is_admin(chat_id) or get_user_computed_status(chat_id) == "ACTIVE"
+    return user_has_access(chat_id)
 
 
 def register_or_update_user_if_needed(message, start_arg: str) -> bool:

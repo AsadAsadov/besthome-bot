@@ -386,9 +386,9 @@ def activate_subscription(chat_id: int, *, plan: str, expires_at: Any, is_demo: 
                     row=conn.execute("SELECT demo_used FROM users WHERE chat_id=?", (chat_id,)).fetchone()
                     if row and int(row["demo_used"] or 0) == 1:
                         conn.rollback(); return None
-                    user_payload={"demo_used":1,"demo_start_at":now,"demo_end_at":exp,"demo_expires_at":exp,"status":"demo","last_status_change_at":now,"approved":1,"blocked":0,"is_blocked":0,"is_active":1}
+                    user_payload={"demo_used":1,"demo_start_at":now,"demo_end_at":exp,"demo_expires_at":exp,"status":"active_demo","last_status_change_at":now,"approved":1,"blocked":0,"is_blocked":0,"is_active":1}
                 else:
-                    user_payload={"is_premium":1,"approved":1,"status":"active","paid_until":exp,"last_status_change_at":now,"blocked":0,"is_blocked":0,"is_active":1,"last_payment_at":now}
+                    user_payload={"is_premium":1,"approved":1,"status":"active_paid","paid_until":exp,"last_status_change_at":now,"blocked":0,"is_blocked":0,"is_active":1,"last_payment_at":now}
                 if not conn.execute("SELECT 1 FROM users WHERE chat_id=?", (chat_id,)).fetchone():
                     conn.execute("INSERT INTO users (chat_id, first_seen, date_joined, joined_at, last_seen) VALUES (?, ?, ?, ?, ?)", (chat_id, now, now, now, now))
                 conn.execute("UPDATE users SET "+", ".join(f"{k}=?" for k in user_payload)+" WHERE chat_id=?", list(user_payload.values())+[chat_id])
@@ -411,7 +411,7 @@ def approve_payment(chat_id: int, plan: str, amount: int, days: int, note: Optio
                 conn.execute("BEGIN")
                 if not conn.execute("SELECT 1 FROM users WHERE chat_id=?", (chat_id,)).fetchone():
                     conn.execute("INSERT INTO users (chat_id, first_seen, date_joined, joined_at, last_seen) VALUES (?, ?, ?, ?, ?)", (chat_id, now, now, now, now))
-                conn.execute("UPDATE users SET is_premium=1, approved=1, status='active', paid_until=?, last_status_change_at=? WHERE chat_id=?", (exp, now, chat_id))
+                conn.execute("UPDATE users SET is_premium=1, approved=1, status='active_paid', paid_until=?, last_status_change_at=? WHERE chat_id=?", (exp, now, chat_id))
                 conn.execute("""INSERT INTO subscriptions (chat_id, plan, expires_at, is_active, is_demo, last_payment_note) VALUES (?, ?, ?, 1, 0, ?)
                     ON CONFLICT(chat_id) DO UPDATE SET plan=excluded.plan, expires_at=excluded.expires_at, is_active=1, is_demo=0, last_payment_note=excluded.last_payment_note""", (chat_id, plan, exp, note))
                 conn.execute("INSERT INTO payments (chat_id, plan, amount, approved_at) VALUES (?, ?, ?, ?)", (chat_id, plan, amount, now))
@@ -430,23 +430,33 @@ def cleanup_expired_access(chat_id: int) -> None:
     if sub.get("is_active") and not ((_parse_dt(sub.get("expires_at")) or datetime.min.replace(tzinfo=timezone.utc)) > now): update("subscriptions", {"is_active":0}, chat_id=chat_id)
 
 
-def is_user_active(chat_id: int) -> bool:
+def user_has_access(chat_id: int) -> bool:
     user=get_user(chat_id, use_cache=False) or {}; now=datetime.now(timezone.utc)
     if user.get("is_admin"): return True
-    if user.get("blocked") or user.get("is_blocked"): return False
-    active = any((_parse_dt(user.get(k)) or datetime.min.replace(tzinfo=timezone.utc)) > now for k in ("paid_until","demo_end_at"))
+    status=str(user.get("status") or "").strip().lower()
+    if user.get("blocked") or user.get("is_blocked") or user.get("deleted_at") or user.get("is_active") == 0 or status == "blocked": return False
+    if not int(user.get("approved") or 0) and status not in {"active_demo", "active_paid"}: return False
+    if status == "approved": return True
+    active = any((_parse_dt(user.get(k)) or datetime.min.replace(tzinfo=timezone.utc)) > now for k in ("paid_until","demo_end_at","demo_expires_at"))
     active = active or (bool(user.get("promo_active")) and ((_parse_dt(user.get("promo_expires_at")) or datetime.min.replace(tzinfo=timezone.utc)) > now))
     sub=get_subscription(chat_id) or {}
     if bool(sub.get("is_active")):
         sub_exp = (_parse_dt(sub.get("expires_at")) or datetime.min.replace(tzinfo=timezone.utc))
-        if int(sub.get("is_demo") or 0) == 1:
-            demo_exp = (_parse_dt(user.get("demo_end_at") or user.get("demo_expires_at")) or datetime.min.replace(tzinfo=timezone.utc))
-            active = active or (sub_exp > now and demo_exp > now)
-        else:
-            active = active or (sub_exp > now)
+        active = active or (sub_exp > now)
     if not active: cleanup_expired_access(chat_id)
     return active
 
+
+def is_user_active(chat_id: int) -> bool:
+    return user_has_access(chat_id)
+
+
+def is_allowed(chat_id: int) -> bool:
+    return user_has_access(chat_id)
+
+
+def has_access(chat_id: int) -> bool:
+    return user_has_access(chat_id)
 
 def add_favorite(chat_id:int, listing_id:int, source:str="main") -> bool:
     return bool(upsert("favorites", {"chat_id":chat_id,"listing_id":listing_id,"source":source,"added_at":_now_iso()}, on_conflict="chat_id,listing_id,source"))
