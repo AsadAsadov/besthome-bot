@@ -34,7 +34,7 @@ USER_TABLES = {
     "customer_request_favorites", "customer_request_archives", "customer_requests_access",
     "agents", "agent_activity", "agent_notifications", "agent_interests",
     "listing_views", "listing_status", "listing_stats", "favorite_price_history",
-    "support_threads", "support_messages", "feature_flags", "feature_overrides",
+    "support_threads", "support_messages", "feature_flags", "feature_overrides", "user_feature_overrides",
     "manual_payments", "bonus_probabilities",
 }
 
@@ -67,7 +67,6 @@ def get_local_connection() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 30000")
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
     return conn
 
@@ -109,6 +108,8 @@ def ensure_column(conn: sqlite3.Connection, table: str, column: str, definition:
 
 def initialize_local_database() -> None:
     with local_connection() as conn:
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
         conn.execute("BEGIN")
         try:
             conn.execute("""CREATE TABLE IF NOT EXISTS users (
@@ -161,7 +162,23 @@ def initialize_local_database() -> None:
             conn.execute("""CREATE TABLE IF NOT EXISTS promo_usages (code TEXT, chat_id INTEGER, used_at TEXT, expires_at TEXT, PRIMARY KEY(code, chat_id))""")
             conn.execute("""CREATE TABLE IF NOT EXISTS referrals (referrer_chat_id INTEGER, referred_chat_id INTEGER PRIMARY KEY, created_at TEXT, reward_given INTEGER DEFAULT 0)""")
             conn.execute("""CREATE TABLE IF NOT EXISTS referral_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, referrer_id INTEGER, referred_user_id INTEGER, bonus_days INTEGER, created_at TEXT)""")
-            for table in USER_TABLES - {"users","subscriptions","payments","favorites","search_history","search_logs","user_activity","search_limits","promo_codes","promo_usages","referrals","referral_logs"}:
+            conn.execute("""CREATE TABLE IF NOT EXISTS feature_flags (
+                key TEXT PRIMARY KEY,
+                is_enabled INTEGER NOT NULL DEFAULT 1)""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS user_feature_overrides (
+                user_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                is_enabled INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY(user_id, key))""")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_user_feature_overrides_user_id ON user_feature_overrides(user_id)")
+            if _table_exists(conn, "feature_overrides"):
+                cols = {row[1] for row in conn.execute("PRAGMA table_info(feature_overrides)").fetchall()}
+                if {"user_id", "key", "is_enabled"}.issubset(cols):
+                    conn.execute("""INSERT OR IGNORE INTO user_feature_overrides (user_id, key, is_enabled)
+                        SELECT user_id, key, COALESCE(is_enabled, 1)
+                        FROM feature_overrides
+                        WHERE user_id IS NOT NULL AND key IS NOT NULL""")
+            for table in USER_TABLES - {"users","subscriptions","payments","favorites","search_history","search_logs","user_activity","search_limits","promo_codes","promo_usages","referrals","referral_logs", "feature_flags", "user_feature_overrides"}:
                 conn.execute(f"CREATE TABLE IF NOT EXISTS {_safe_ident(table)} (id INTEGER PRIMARY KEY AUTOINCREMENT)")
             conn.commit()
         except Exception:
