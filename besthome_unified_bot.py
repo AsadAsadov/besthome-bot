@@ -104,8 +104,14 @@ class _BotProxy:
         def decorator(func):
             @wraps(func)
             def guarded(update):
+                handler_start = time.perf_counter()
                 user = getattr(update, "from_user", None)
                 user_id = getattr(user, "id", None)
+                if handler_type == "callback_query_handler":
+                    try:
+                        logger.debug("CALLBACK_TIMING user_id=%s step=handler_entry data=%s elapsed=0.000s", user_id, getattr(update, "data", None))
+                    except Exception:
+                        pass
                 if user_id is not None and _requires_access_check(handler_type, update) and not is_allowed(user_id):
                     try:
                         if handler_type == "callback_query_handler":
@@ -127,7 +133,17 @@ class _BotProxy:
                     except Exception:
                         logger.exception("Failed to send access denied message")
                     return
-                return func(update)
+                try:
+                    return func(update)
+                finally:
+                    if handler_type == "callback_query_handler":
+                        try:
+                            elapsed = time.perf_counter() - handler_start
+                            logger.info("CALLBACK_TIMING user_id=%s total=%.3fs data=%s", user_id, elapsed, getattr(update, "data", None))
+                            if elapsed >= SLOW_OPERATION_WARN_SECONDS:
+                                logger.warning("SLOW_OPERATION operation=callback_handler user_id=%s duration=%.3fs data=%s", user_id, elapsed, getattr(update, "data", None))
+                        except Exception:
+                            pass
 
             if self._bot is not None:
                 getattr(self._bot, handler_type)(*args, **kwargs)(guarded)
@@ -334,6 +350,40 @@ payment_plan_selection: Dict[int, Dict[str, Any]] = {}
 
 logger = logging.getLogger("besthome_bot")
 
+SLOW_OPERATION_WARN_SECONDS = 0.5
+SLOW_OPERATION_ERROR_SECONDS = 3.0
+FEATURE_FLAGS_CACHE_TTL_SECONDS = 20
+_feature_flags_cache: Dict[int, Tuple[float, Dict[str, bool]]] = {}
+
+def _perf_now() -> float:
+    return time.perf_counter()
+
+def _log_timing(operation: str, step: str, start: float, *, user_id: Optional[int] = None, level: int = logging.DEBUG) -> float:
+    duration = _perf_now() - start
+    logger.log(level, "%s user_id=%s step=%s duration=%.3fs", operation, user_id, step, duration)
+    if duration >= SLOW_OPERATION_WARN_SECONDS:
+        logger.warning("SLOW_OPERATION operation=%s.%s user_id=%s duration=%.3fs", operation, step, user_id, duration)
+    return duration
+
+def _log_total_timing(operation: str, start: float, *, user_id: Optional[int] = None) -> None:
+    duration = _perf_now() - start
+    logger.info("%s user_id=%s total=%.3fs", operation, user_id, duration)
+    if duration >= SLOW_OPERATION_WARN_SECONDS:
+        logger.warning("SLOW_OPERATION operation=%s user_id=%s duration=%.3fs", operation, user_id, duration)
+
+def clear_feature_flags_cache(user_id: Optional[int] = None) -> None:
+    if user_id is None:
+        _feature_flags_cache.clear()
+    else:
+        _feature_flags_cache.pop(int(user_id), None)
+
+def _startup_step(name: str, start: float) -> float:
+    now = _perf_now()
+    logger.info("STARTUP_TIMING step=%s duration=%.3fs elapsed=%.3fs", name, now - start, now - _STARTUP_TIMER_BASE)
+    return now
+
+_STARTUP_TIMER_BASE = _perf_now()
+
 def _record_last_bot_message(
     chat_id: Optional[int], message_id: Optional[int], editable: bool
 ) -> None:
@@ -431,7 +481,9 @@ def _edit_last_message_reply_markup(proxy: _BotProxy, edit_func, *args, **kwargs
 
 @bot.message_handler(commands=["start"])
 def handle_start(message):
+    total_start = _perf_now()
     chat_id = message.chat.id
+    logger.info("START_TIMING user_id=%s step=handler_entry elapsed=0.000s", chat_id)
     support_admin_state.pop(chat_id, None)
     text = message.text or ""
     parts = text.split(maxsplit=1)
@@ -439,16 +491,32 @@ def handle_start(message):
     existing_before_start = None
     created_for_start = False
     try:
+        step_start = _perf_now()
         existing_before_start = user_db.get_user(chat_id, use_cache=False)
+        _log_timing("START_TIMING", "get_user", step_start, user_id=chat_id, level=logging.INFO)
+
+        step_start = _perf_now()
         _ensure_start_user_record(message, start_arg)
+        _log_timing("START_TIMING", "upsert_user", step_start, user_id=chat_id, level=logging.INFO)
         created_for_start = existing_before_start is None
     except Exception:
         logger.exception("Failed to upsert /start user in local SQLite chat_id=%s", chat_id)
     try:
+        step_start = _perf_now()
+        is_admin_user = is_admin(chat_id)
+        _log_timing("START_TIMING", "admin_check", step_start, user_id=chat_id, level=logging.INFO)
+
+        step_start = _perf_now()
+        access_granted = True if is_admin_user else user_has_access(chat_id)
+        _log_timing("START_TIMING", "access_check", step_start, user_id=chat_id, level=logging.INFO)
+
+        step_start = _perf_now()
         phone_missing = should_request_phone(chat_id)
+        _log_timing("START_TIMING", "phone_check", step_start, user_id=chat_id, level=logging.INFO)
     except Exception:
         logger.exception("Failed to check phone before /start flow chat_id=%s", chat_id)
         phone_missing = True
+        access_granted = False
     if phone_missing:
         if chat_id in phone_request_prompted:
             logger.info("PHONE_REQUEST_ALREADY_SHOWN user_id=%s", chat_id)
@@ -457,13 +525,18 @@ def handle_start(message):
                 logger.info("NEW_USER_STARTED user_id=%s", chat_id)
             else:
                 logger.info("RETURNING_USER_MISSING_PHONE user_id=%s", chat_id)
+            step_start = _perf_now()
+            logger.info("START_TIMING user_id=%s step=telegram_send_start duration=0.000s", chat_id)
             send_phone_request(chat_id)
+            _log_timing("START_TIMING", "telegram_send_done", step_start, user_id=chat_id, level=logging.INFO)
+        _log_total_timing("START_TIMING", total_start, user_id=chat_id)
         return
     logger.info("PHONE_ALREADY_EXISTS -> skipping contact request user_id=%s", chat_id)
     logger.info("RETURNING_USER user_id=%s", chat_id)
     phone_request_prompted.discard(chat_id)
     reset_user_state(chat_id)
     route_user_by_access_status(chat_id)
+    _log_total_timing("START_TIMING", total_start, user_id=chat_id)
     return
 
 @bot.message_handler(commands=["menu"])
@@ -478,11 +551,16 @@ def handle_web_app_data(message):
 
 @bot.message_handler(content_types=["contact"])
 def handle_contact(message):
+    total_start = _perf_now()
     chat_id = message.chat.id
+    logger.info("CONTACT_TIMING user_id=%s step=handler_entry elapsed=0.000s", chat_id)
 
     def run_phone_flow_step(step_name: str, func, *args, **kwargs):
+        step_start = _perf_now()
         try:
-            return func(*args, **kwargs)
+            result = func(*args, **kwargs)
+            _log_timing("CONTACT_TIMING", step_name, step_start, user_id=chat_id, level=logging.INFO)
+            return result
         except Exception:
             logger.exception("PHONE_FLOW_STEP_FAILED step=%s user_id=%s", step_name, chat_id)
             return None
@@ -517,6 +595,7 @@ def handle_contact(message):
         )
         reset_user_state(chat_id)
         run_phone_flow_step("route_by_status", route_user_by_access_status, chat_id)
+        _log_total_timing("CONTACT_TIMING", total_start, user_id=chat_id)
         return
 
     # A) Save phone to local_data.db. This step is retry-safe and cannot block menu recovery.
@@ -546,6 +625,7 @@ def handle_contact(message):
 
     # E) Route by current approval/access status after ReplyKeyboardRemove.
     run_phone_flow_step("route_by_status", route_user_by_access_status, chat_id)
+    _log_total_timing("CONTACT_TIMING", total_start, user_id=chat_id)
 
 def _start_user_payload(message, start_arg: str, created: bool = True) -> Dict[str, Any]:
     chat_id = message.chat.id
@@ -1375,7 +1455,7 @@ def ensure_feature_flag_tables(cur: sqlite3.Cursor):
         """
         CREATE TABLE IF NOT EXISTS feature_flags (
             key TEXT PRIMARY KEY,
-            is_enabled INTEGER DEFAULT 1
+            is_enabled INTEGER NOT NULL DEFAULT 1
         )
         """
     )
@@ -1383,13 +1463,30 @@ def ensure_feature_flag_tables(cur: sqlite3.Cursor):
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS user_feature_overrides (
-            user_id INTEGER,
-            key TEXT,
-            is_enabled INTEGER DEFAULT 1,
+            user_id INTEGER NOT NULL,
+            key TEXT NOT NULL,
+            is_enabled INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY(user_id, key)
         )
         """
     )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_user_feature_overrides_user_id ON user_feature_overrides(user_id)")
+
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='feature_overrides'")
+    if cur.fetchone():
+        legacy_cols = {row[1] for row in cur.execute("PRAGMA table_info(feature_overrides)").fetchall()}
+        if {"user_id", "key", "is_enabled"}.issubset(legacy_cols):
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO user_feature_overrides (user_id, key, is_enabled)
+                SELECT user_id, key, COALESCE(is_enabled, 1)
+                FROM feature_overrides
+                WHERE user_id IS NOT NULL AND key IS NOT NULL
+                """
+            )
+            logger.info("FEATURE_FLAGS_MIGRATION migrated legacy feature_overrides rows=%s", cur.rowcount)
+        else:
+            logger.warning("FEATURE_FLAGS_MIGRATION skipped legacy feature_overrides with columns=%s", sorted(legacy_cols))
 
     for key, enabled in FEATURE_FLAG_DEFAULTS.items():
         cur.execute(
@@ -1404,32 +1501,47 @@ def _sqlite_row_to_dict(row):
     """Convert sqlite3.Row values before using dict-style helpers such as .get()."""
     return dict(row) if isinstance(row, sqlite3.Row) else row
 
-def is_feature_enabled(key: str, user_id: Optional[int] = None) -> bool:
+def get_effective_feature_flags(user_id: Optional[int] = None) -> Dict[str, bool]:
     if user_id is not None and is_admin(user_id):
-        return True
+        return {key: True for key in FEATURE_FLAG_DEFAULTS}
 
+    cache_key = int(user_id or 0)
+    cached = _feature_flags_cache.get(cache_key)
+    now = time.time()
+    if cached and cached[0] > now:
+        return dict(cached[1])
+
+    flags = {key: bool(enabled) for key, enabled in FEATURE_FLAG_DEFAULTS.items()}
     conn = get_local_conn()
     try:
         cur = conn.cursor()
+        ensure_feature_flag_tables(cur)
+        cur.execute("SELECT key, is_enabled FROM feature_flags")
+        for row in cur.fetchall():
+            flags[str(row[0])] = bool(row[1])
+
         if user_id is not None:
             cur.execute(
-                "SELECT is_enabled FROM user_feature_overrides WHERE user_id=? AND key=?",
-                (user_id, key),
+                "SELECT key, is_enabled FROM user_feature_overrides WHERE user_id=?",
+                (int(user_id),),
             )
-            row = cur.fetchone()
-            if row is not None:
-                return bool(row[0])
-
-        cur.execute("SELECT is_enabled FROM feature_flags WHERE key=?", (key,))
-        row = cur.fetchone()
-        if row is not None:
-            return bool(row[0])
-        return bool(FEATURE_FLAG_DEFAULTS.get(key, 1))
-    except Exception:
-        logger.exception("FEATURE_FLAG_CHECK_FAILED key=%s user_id=%s", key, user_id)
-        return bool(FEATURE_FLAG_DEFAULTS.get(key, 1))
+            for row in cur.fetchall():
+                flags[str(row[0])] = bool(row[1])
+        conn.commit()
+    except Exception as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        logger.warning("FEATURE_FLAG_CHECK_FAILED user_id=%s error=%s", user_id, exc)
     finally:
         conn.close()
+
+    _feature_flags_cache[cache_key] = (now + FEATURE_FLAGS_CACHE_TTL_SECONDS, dict(flags))
+    return flags
+
+def is_feature_enabled(key: str, user_id: Optional[int] = None) -> bool:
+    return bool(get_effective_feature_flags(user_id).get(key, FEATURE_FLAG_DEFAULTS.get(key, 1)))
 
 def set_feature_flag_state(
     key: str, enabled: bool, user_ids: Optional[List[int]] = None
@@ -1458,6 +1570,7 @@ def set_feature_flag_state(
                 (key, int(enabled)),
             )
         conn.commit()
+        clear_feature_flags_cache()
     finally:
         conn.close()
 
@@ -5381,7 +5494,7 @@ def user_has_access(chat_id: int) -> bool:
         logger.info("ACCESS_CHECK user_id=%s approved= status= subscription= expires_at= result=False reason=invalid_user_id", chat_id)
         return False
     if is_admin(uid):
-        logger.info("ACCESS_CHECK user_id=%s approved=1 status=admin subscription=admin expires_at= result=True reason=admin", uid)
+        logger.debug("ACCESS_CHECK user_id=%s approved=1 status=admin subscription=admin expires_at= result=True reason=admin", uid)
         return True
     record = _sqlite_row_to_dict(user_db.get_user(uid, use_cache=False)) or {}
     sub, sub_expires = _subscription_access_state(uid)
@@ -5417,7 +5530,9 @@ def user_has_access(chat_id: int) -> bool:
             result, reason = True, "demo_until"
         elif sub_ok:
             result, reason = True, "subscription"
-    logger.info(
+    access_log_level = logging.DEBUG if result else logging.INFO
+    logger.log(
+        access_log_level,
         "ACCESS_CHECK user_id=%s approved=%s status=%s subscription=%s expires_at=%s result=%s reason=%s",
         uid, approved, status or None, (sub or {}).get("plan"), (sub or {}).get("expires_at"), result, reason,
     )
@@ -7147,18 +7262,25 @@ def build_main_menu(
     is_admin_user: bool,
     has_customer_access: bool = False,
     show_bonus_button: bool = False,
+    *,
+    access_granted: Optional[bool] = None,
+    feature_flags: Optional[Dict[str, bool]] = None,
 ) -> types.ReplyKeyboardMarkup:
     kb = types.ReplyKeyboardMarkup(
         resize_keyboard=True, one_time_keyboard=False, is_persistent=True, row_width=2
     )
 
+    timing_start = _perf_now()
     buttons: List[Union[str, types.KeyboardButton]] = []
-    active_access = is_admin_user or user_has_access(chat_id) or has_customer_access
+    if access_granted is None:
+        access_granted = user_has_access(chat_id)
+    active_access = is_admin_user or bool(access_granted) or has_customer_access
+    flags = feature_flags if feature_flags is not None else get_effective_feature_flags(chat_id)
 
     def add_feature(key: str, label: str, *, require_active: bool = False) -> None:
         if require_active and not active_access:
             return
-        if is_feature_enabled(key, chat_id) or is_admin_user:
+        if bool(flags.get(key, FEATURE_FLAG_DEFAULTS.get(key, 1))) or is_admin_user:
             buttons.append(label)
 
     add_feature("main_search", "🔎 Axtarış sistemi", require_active=True)
@@ -7210,6 +7332,7 @@ def build_main_menu(
     for i in range(0, len(buttons), 2):
         kb.row(*buttons[i : i + 2])
 
+    _log_timing("BUILD_MAIN_MENU_TIMING", "build_main_menu", timing_start, user_id=chat_id)
     return kb
 
 def build_main_menu_inline_markup() -> Optional[types.InlineKeyboardMarkup]:
@@ -7229,6 +7352,7 @@ def send_main_menu(
     disable_preview: Optional[bool] = None,
     force: bool = False,
 ):
+    total_start = _perf_now()
     current_ctx = get_ui_context(chat_id)
     if not force and current_ctx != UI_CONTEXT_MAIN:
         logger.debug(
@@ -7238,11 +7362,16 @@ def send_main_menu(
     set_ui_context(chat_id, UI_CONTEXT_MAIN)
     set_navigation_state(chat_id, STATE_MAIN_MENU)
     set_search_menu_active(chat_id, False)
+    is_admin_user = is_admin(chat_id)
+    access_granted = True if is_admin_user else user_has_access(chat_id)
+    feature_flags = get_effective_feature_flags(chat_id)
     kb = build_main_menu(
         chat_id,
-        is_admin(chat_id),
+        is_admin_user,
         has_customer_requests_access(chat_id),
         should_show_bonus_button(chat_id),
+        access_granted=access_granted,
+        feature_flags=feature_flags,
     )
     update_ui_message(
         chat_id,
@@ -7252,6 +7381,7 @@ def send_main_menu(
         parse_mode=parse_mode,
         disable_preview=disable_preview,
     )
+    send_start = _perf_now()
     send_with_reply_keyboard(
         chat_id,
         "\u2063",
@@ -7259,6 +7389,8 @@ def send_main_menu(
         parse_mode=parse_mode,
         disable_preview=disable_preview,
     )
+    _log_timing("SEND_MAIN_MENU_TIMING", "telegram_send_done", send_start, user_id=chat_id, level=logging.INFO)
+    _log_total_timing("SEND_MAIN_MENU_TIMING", total_start, user_id=chat_id)
 
 def show_main_menu(chat_id: int):
     """Reliably show the main reply keyboard for onboarding and recovery flows."""
@@ -21784,6 +21916,7 @@ def mark_user_delivery_failure(user_id: int, error_text: str):
         params.append(user_id)
         cur.execute(f"UPDATE users SET {', '.join(updates)} WHERE chat_id=?", params)
         conn.commit()
+        clear_feature_flags_cache()
     except Exception:
         logger.exception("Failed to mark user delivery failure user_id=%s", user_id)
     finally:
@@ -26392,13 +26525,24 @@ def main():
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    startup_start = _perf_now()
     logger.info("[BOOT] Telegram bot starting")
+    _startup_step("main_entry", startup_start)
 
     global BOT_TOKEN, BOT_USERNAME
     BOT_TOKEN = _load_bot_token()
 
-    bot.bind(telebot.TeleBot(BOT_TOKEN))
-    BOT_USERNAME = bot.get_me().username
+    step_start = _perf_now()
+    bot.bind(telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=8))
+    _startup_step("bot_creation", step_start)
+
+    step_start = _perf_now()
+    try:
+        BOT_USERNAME = bot.get_me().username
+        _startup_step("telegram_get_me_warmup", step_start)
+    except Exception as exc:
+        logger.warning("[BOOT] Telegram get_me warm-up failed without stopping bot: %s", exc)
+        BOT_USERNAME = None
 
     # Aktiv və lazımlı worker-lər arxa fonda başladılır
     threading.Thread(target=saved_search_worker, daemon=True).start()
@@ -26410,7 +26554,9 @@ def main():
     # Çünki tətbiq hər dəfə Render-də qalxanda baza onsuz da avtomatik bərpa olunur.
     threading.Thread(target=background_init, daemon=True, name="background-init").start()
 
+    step_start = _perf_now()
     create_flask_app()
+    _startup_step("flask_app_creation", step_start)
     logger.info("[BOOT] Startup completed")
 
 def run_bot():
@@ -26428,9 +26574,12 @@ def run_bot():
     except Exception as e:
         logger.warning(f"Webhook remove failed: {e}")
     bot.infinity_polling(
-        timeout=60,
-        long_polling_timeout=60,
+        timeout=20,
+        long_polling_timeout=20,
+        interval=0,
         skip_pending=True,
+        none_stop=True,
+        restart_on_change=False,
         allowed_updates=["message", "callback_query"],
     )
 
