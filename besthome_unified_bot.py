@@ -376,6 +376,75 @@ SLOW_OPERATION_ERROR_SECONDS = 3.0
 FEATURE_FLAGS_CACHE_TTL_SECONDS = 20
 _feature_flags_cache: Dict[int, Tuple[float, Dict[str, bool]]] = {}
 
+
+class ListingsDbVersionTracker:
+    def __init__(self, db_path: str, marker_path: Optional[str] = None, throttle_seconds: float = 1.0):
+        self.db_path = db_path
+        self.marker_path = marker_path or f"{db_path}.version.json"
+        self.throttle_seconds = throttle_seconds
+        self._last_check = 0.0
+        self._signature: Optional[Tuple[Optional[int], Optional[int], Optional[str]]] = None
+        self._lock = threading.Lock()
+
+    def _marker_hash(self) -> Optional[str]:
+        try:
+            with open(self.marker_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            return str(payload.get("sha256") or "") or None
+        except FileNotFoundError:
+            return None
+        except Exception as exc:
+            logger.debug("Listings DB version marker read failed: %s", exc)
+            return None
+
+    def signature(self) -> Tuple[Optional[int], Optional[int], Optional[str]]:
+        try:
+            st = os.stat(self.db_path)
+            return (st.st_mtime_ns, st.st_size, self._marker_hash())
+        except FileNotFoundError:
+            return (None, None, self._marker_hash())
+
+    def changed(self) -> bool:
+        now = time.time()
+        with self._lock:
+            if now - self._last_check < self.throttle_seconds:
+                return False
+            self._last_check = now
+            sig = self.signature()
+            if self._signature is None:
+                self._signature = sig
+                return False
+            if sig != self._signature:
+                old = self._signature
+                self._signature = sig
+                logger.info("Listings DB changed old=%s new=%s", old, sig)
+                return True
+            return False
+
+
+listings_db_version_tracker = ListingsDbVersionTracker(LISTINGS_DB_PATH)
+
+def clear_listings_runtime_caches() -> None:
+    for mapping in (search_state, listing_sessions, user_listing_state, today_results_cache):
+        try:
+            mapping.clear()
+        except Exception:
+            pass
+    try:
+        close_all_main_conns()
+    except Exception:
+        logger.exception("Failed to close stale listing DB connections")
+    global LISTINGS_TS_COLUMN
+    try:
+        LISTINGS_TS_COLUMN = None
+    except NameError:
+        pass
+    logger.info("Listings runtime caches cleared after DB version change")
+
+def ensure_listings_db_fresh() -> None:
+    if listings_db_version_tracker.changed():
+        clear_listings_runtime_caches()
+
 _update_timing_local = threading.local()
 _answered_callback_ids: Set[str] = set()
 _answered_callback_lock = threading.Lock()
@@ -1186,12 +1255,14 @@ def close_all_main_conns():
             print("⚠️ main DB close error:", e)
 
 def get_main_conn():
+    ensure_listings_db_fresh()
     conn = get_conn()
     conn.row_factory = sqlite3.Row
     register_main_conn(conn)
     return conn
 
 def get_conn():
+    ensure_listings_db_fresh()
     _ensure_parent_dir(MAIN_DB)
     return sqlite3.connect(MAIN_DB)
 

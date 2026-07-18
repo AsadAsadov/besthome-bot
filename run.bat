@@ -5,78 +5,56 @@ chcp 65001 >nul
 set PYTHONIOENCODING=utf-8
 cd /d "%~dp0"
 
-REM --- Python 3.12 ---
+REM Usage: run.bat [--interactive]
+set "INTERACTIVE=0"
+if /I "%~1"=="--interactive" set "INTERACTIVE=1"
+
 set "PY=C:\Users\besthome.az\AppData\Local\Programs\Python\Python312\python.exe"
+if not exist "%PY%" set "PY=python"
 
 if not exist logs mkdir logs
-
-REM --- tarix və saat formatı ---
-for /f "tokens=1-3 delims=." %%a in ("%date%") do (
-    set DD=%%a
-    set MM=%%b
-    set YYYY=%%c
-)
-
-for /f "tokens=1-2 delims=:" %%a in ("%time%") do (
-    set HH=%%a
-    set MN=%%b
-)
-
-set "LOGFILE=%cd%\logs\run_%YYYY%-%MM%-%DD%_%HH%-%MN%.log"
+for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyy-MM-dd_HH-mm-ss"') do set "TS=%%i"
+set "LOGFILE=%cd%\logs\run_%TS%.log"
 
 echo ================================ >> "%LOGFILE%"
-echo START %date% %time% >> "%LOGFILE%"
+echo START %TS% >> "%LOGFILE%"
 echo ================================ >> "%LOGFILE%"
 
-echo [1/4] Running estatebase_sync.py
-echo [1/4] Running estatebase_sync.py >> "%LOGFILE%"
+echo [1/3] Syncing EstateBase to local besthome.db
+echo [1/3] Syncing EstateBase to local besthome.db >> "%LOGFILE%"
 "%PY%" estatebase_sync.py --days -3 >> "%LOGFILE%" 2>&1
 set "ERR=!errorlevel!"
 echo estatebase_sync.py finished with errorlevel=!ERR!
 echo estatebase_sync.py finished with errorlevel=!ERR! >> "%LOGFILE%"
-if not "!ERR!"=="0" (
-    echo ERROR in estatebase_sync.py
-    pause
-    exit /b !ERR!
-)
+if not "!ERR!"=="0" goto :fail
 
-echo [2/4] Running auto_zip.py
-echo [2/4] Running auto_zip.py >> "%LOGFILE%"
-"%PY%" auto_zip.py >> "%LOGFILE%" 2>&1
+echo [2/3] Deploying besthome.db directly to VPS
+echo [2/3] Deploying besthome.db directly to VPS >> "%LOGFILE%"
+"%PY%" deploy_besthome_db.py >> "%LOGFILE%" 2>&1
 set "ERR=!errorlevel!"
-echo auto_zip.py finished with errorlevel=!ERR!
-echo auto_zip.py finished with errorlevel=!ERR! >> "%LOGFILE%"
-if not "!ERR!"=="0" (
-    echo ERROR in auto_zip.py
-    pause
-    exit /b !ERR!
-)
+echo deploy_besthome_db.py finished with errorlevel=!ERR!
+echo deploy_besthome_db.py finished with errorlevel=!ERR! >> "%LOGFILE%"
+if not "!ERR!"=="0" goto :fail
 
-echo [3/4] Running upload_gdrive.py besthome.zip
-echo [3/4] Running upload_gdrive.py besthome.zip >> "%LOGFILE%"
-"%PY%" upload_gdrive.py besthome.zip >> "%LOGFILE%" 2>&1
-set "ERR=!errorlevel!"
-echo upload_gdrive.py finished with errorlevel=!ERR!
-echo upload_gdrive.py finished with errorlevel=!ERR! >> "%LOGFILE%"
-if not "!ERR!"=="0" (
-    echo ERROR in upload_gdrive.py
-    pause
-    exit /b !ERR!
+echo [3/3] Sending success notification
+echo [3/3] Sending success notification >> "%LOGFILE%"
+if exist notify_bot.py (
+    "%PY%" notify_bot.py >> "%LOGFILE%" 2>&1
+    set "ERR=!errorlevel!"
+) else (
+    set "ERR=0"
 )
-
-echo [4/4] Running notify_bot.py
-echo [4/4] Running notify_bot.py >> "%LOGFILE%"
-"%PY%" notify_bot.py >> "%LOGFILE%" 2>&1
-set "ERR=!errorlevel!"
 echo notify_bot.py finished with errorlevel=!ERR!
 echo notify_bot.py finished with errorlevel=!ERR! >> "%LOGFILE%"
-if not "!ERR!"=="0" (
-    echo ERROR in notify_bot.py
-    pause
-    exit /b !ERR!
-)
+if not "!ERR!"=="0" goto :fail
 
-echo FINISH %date% %time% >> "%LOGFILE%"
+echo FINISH %TS% >> "%LOGFILE%"
 echo OK
-pause
+if "%INTERACTIVE%"=="1" pause
 exit /b 0
+
+:fail
+echo ERROR errorlevel=!ERR!
+echo ERROR errorlevel=!ERR! >> "%LOGFILE%"
+if "%INTERACTIVE%"=="1" pause
+exit /b !ERR!
