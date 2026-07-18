@@ -6,3 +6,10 @@ data/*.db
 *.db-journal
 venv/
 __pycache__/
+.besthome.deploy.db
+.besthome_deploy.lock
+.env.*
+!.env.example
+*.key
+id_ed25519*
+logs/

@@ -6,6 +6,7 @@ helpers. User data must be read/written through user_db.py (local_data.db).
 
 import os
 import sqlite3
+import time
 from contextlib import contextmanager
 from typing import Iterator
 
@@ -45,3 +46,36 @@ def connection() -> Iterator[sqlite3.Connection]:
         yield conn
     finally:
         conn.close()
+
+
+class ListingsDbVersionTracker:
+    """Cheap stat-based tracker for atomic besthome.db replacement detection."""
+
+    def __init__(self, path: str = MAIN_DB, throttle_seconds: float = 1.0):
+        self.path = path
+        self.version_path = f"{path}.version.json"
+        self.throttle_seconds = throttle_seconds
+        self._last_check = 0.0
+        self._signature = None
+
+    def signature(self):
+        try:
+            st = os.stat(self.path)
+            version_mtime = os.stat(self.version_path).st_mtime_ns if os.path.exists(self.version_path) else None
+            return (st.st_mtime_ns, st.st_size, version_mtime)
+        except FileNotFoundError:
+            return (None, None, None)
+
+    def changed(self) -> bool:
+        now = time.time()
+        if now - self._last_check < self.throttle_seconds:
+            return False
+        self._last_check = now
+        sig = self.signature()
+        if self._signature is None:
+            self._signature = sig
+            return False
+        if sig != self._signature:
+            self._signature = sig
+            return True
+        return False
